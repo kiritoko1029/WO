@@ -1,0 +1,27 @@
+{
+  "name": "@wo/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ipaddr.js": "^2.4.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}
