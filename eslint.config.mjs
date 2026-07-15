@@ -12,6 +12,7 @@ export default tseslint.config(
       '**/playwright-report/**',
       '**/release/**',
       '**/test-results/**',
+      'docs/poc/results/**',
       '.worktrees/**',
       'outputs/**',
       'work/**',

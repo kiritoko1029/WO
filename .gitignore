@@ -29,6 +29,11 @@ node_modules/
 .env
 .env.*
 !.env.example
+**/.certs/
+
+# Local media-lab evidence (the directory itself remains documented)
+/docs/poc/results/*
+!/docs/poc/results/.gitkeep
 
 # Logs and operating-system metadata
 *.log

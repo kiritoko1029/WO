@@ -5,3 +5,11 @@ docs/plans/
 pnpm-lock.yaml
 outputs/
 work/
+**/coverage/
+**/dist/
+**/out/
+**/release/
+**/playwright-report/
+**/test-results/
+**/.certs/
+docs/poc/results/

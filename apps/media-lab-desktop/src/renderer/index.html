@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' wss://127.0.0.1:*; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; script-src 'self'"
+    />
+    <title>Media Lab</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <div class="identity">
+          <div class="mark" aria-hidden="true">
+            <i data-lucide="monitor-up"></i>
+          </div>
+          <div>
+            <h1>Media Lab</h1>
+            <span id="roleLabel" class="role-label">Publisher</span>
+          </div>
+        </div>
+        <div class="status-wrap">
+          <span id="statusDot" class="status-dot"></span
+          ><span id="statusText">Idle</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="control-band" aria-label="Experiment controls">
+          <div class="field source-field publisher-only">
+            <label for="sourceSelect">Source</label>
+            <div class="inline-control">
+              <select id="sourceSelect">
+                <option value="">Select source</option>
+              </select>
+              <button
+                id="refreshSources"
+                class="icon-button"
+                type="button"
+                title="Refresh sources"
+                aria-label="Refresh sources"
+              >
+                <i data-lucide="refresh-cw"></i>
+              </button>
+            </div>
+          </div>
+          <div class="field publisher-only compact-field">
+            <label for="codecSelect">Codec</label>
+            <select id="codecSelect">
+              <option value="VP8">VP8</option>
+              <option value="H264">H264</option>
+              <option value="VP9">VP9</option>
+            </select>
+          </div>
+          <div class="field bitrate-field publisher-only">
+            <label for="bitrateRange"
+              >Target bitrate <output id="bitrateOutput">4 Mbps</output></label
+            >
+            <div class="bitrate-row">
+              <div
+                class="segments"
+                id="bitratePresets"
+                aria-label="Bitrate presets"
+              >
+                <button type="button" data-bitrate="2">2</button>
+                <button type="button" data-bitrate="4" class="selected">
+                  4
+                </button>
+                <button type="button" data-bitrate="6">6</button>
+                <button type="button" data-bitrate="8">8</button>
+              </div>
+              <input
+                id="bitrateRange"
+                type="range"
+                min="1"
+                max="10"
+                step="1"
+                value="4"
+              />
+            </div>
+          </div>
+          <div class="command-group">
+            <button id="startButton" class="primary-command" type="button">
+              <i data-lucide="play"></i><span>Start</span>
+            </button>
+            <button
+              id="stopButton"
+              class="secondary-command"
+              type="button"
+              disabled
+            >
+              <i data-lucide="square"></i><span>Stop</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="workspace">
+          <div class="video-stage">
+            <video id="video" autoplay playsinline muted></video>
+            <div id="videoEmpty" class="video-empty">
+              <i data-lucide="video"></i><span>No active stream</span>
+            </div>
+            <div class="video-meta">
+              <span id="videoResolution">-</span
+              ><span id="videoFps">- fps</span>
+            </div>
+          </div>
+
+          <aside class="metrics-panel">
+            <div class="panel-heading">
+              <h2>Live metrics</h2>
+              <button
+                id="exportButton"
+                class="icon-button"
+                type="button"
+                title="Export JSON"
+                aria-label="Export JSON"
+              >
+                <i data-lucide="download"></i>
+              </button>
+            </div>
+            <dl class="metrics-grid">
+              <div>
+                <dt>Bitrate</dt>
+                <dd id="metricBitrate">-</dd>
+              </div>
+              <div>
+                <dt>Codec</dt>
+                <dd id="metricCodec">-</dd>
+              </div>
+              <div>
+                <dt>Codec implementation</dt>
+                <dd id="metricCodecImplementation">-</dd>
+              </div>
+              <div>
+                <dt>Direction</dt>
+                <dd id="metricDirection">-</dd>
+              </div>
+              <div>
+                <dt>RID</dt>
+                <dd id="metricRid">-</dd>
+              </div>
+              <div>
+                <dt>FPS</dt>
+                <dd id="metricFps">-</dd>
+              </div>
+              <div>
+                <dt>RTT</dt>
+                <dd id="metricRtt">-</dd>
+              </div>
+              <div>
+                <dt>Loss</dt>
+                <dd id="metricLoss">-</dd>
+              </div>
+              <div>
+                <dt>Jitter</dt>
+                <dd id="metricJitter">-</dd>
+              </div>
+              <div>
+                <dt>NACK</dt>
+                <dd id="metricNack">-</dd>
+              </div>
+              <div>
+                <dt>PLI</dt>
+                <dd id="metricPli">-</dd>
+              </div>
+              <div>
+                <dt>Freezes</dt>
+                <dd id="metricFreeze">-</dd>
+              </div>
+              <div class="wide">
+                <dt>Quality limit</dt>
+                <dd id="metricQuality">-</dd>
+              </div>
+            </dl>
+            <div class="settings-block">
+              <h3>Capture settings</h3>
+              <pre id="captureSettings">{}</pre>
+            </div>
+          </aside>
+        </section>
+
+        <section class="sample-band">
+          <div><span>Samples</span><strong id="sampleCount">0</strong></div>
+          <div>
+            <span>Frames encoded</span><strong id="framesEncoded">-</strong>
+          </div>
+          <div>
+            <span>Frames decoded</span><strong id="framesDecoded">-</strong>
+          </div>
+          <div class="last-event">
+            <span>Last event</span><strong id="lastEvent">Ready</strong>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
