@@ -1,0 +1,7 @@
+# User-authored design artifacts are preserved verbatim.
+docs/plans/
+
+# Generated package-manager and task output.
+pnpm-lock.yaml
+outputs/
+work/

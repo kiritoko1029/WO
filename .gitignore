@@ -1,0 +1,39 @@
+# Dependencies and package-manager state
+node_modules/
+/.pnpm-store/
+
+# Root build, packaging, and test output
+/coverage/
+/dist/
+/out/
+/release/
+/playwright-report/
+/test-results/
+
+# Workspace build, packaging, and test output
+/apps/*/coverage/
+/apps/*/dist/
+/apps/*/out/
+/apps/*/release/
+/apps/*/playwright-report/
+/apps/*/test-results/
+/packages/*/coverage/
+/packages/*/dist/
+/packages/*/out/
+/packages/*/release/
+/packages/*/playwright-report/
+/packages/*/test-results/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and operating-system metadata
+*.log
+.DS_Store
+Thumbs.db
+
+# Local development worktrees
+/.worktrees/
