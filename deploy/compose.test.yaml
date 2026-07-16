@@ -1,0 +1,22 @@
+name: wo-test
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: wo_test
+      POSTGRES_PASSWORD: wo_test
+      POSTGRES_USER: wo_test
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wo_test -d wo_test']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    ports:
+      - '127.0.0.1:55432:5432'
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-test-data:
