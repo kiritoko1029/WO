@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { authRefreshAckSchema, authRefreshRequestSchema } from './auth.js';
+import { protocolErrorResponseSchema } from './envelope.js';
 import {
   consumerCreateAckSchema,
   consumerCreateRequestSchema,
@@ -56,6 +57,8 @@ import {
 } from './room.js';
 import {
   webrtcAnswerAckSchema,
+  webrtcAnswerAppliedAckSchema,
+  webrtcAnswerAppliedRequestSchema,
   webrtcAnswerBroadcastSchema,
   webrtcAnswerRequestSchema,
   webrtcIceCandidateAckSchema,
@@ -80,6 +83,7 @@ export * from './envelope.js';
 export * from './errors.js';
 export * from './media.js';
 export * from './room.js';
+export * from './signaling.js';
 export * from './webrtc.js';
 
 export const inboundEnvelopeSchema = z.discriminatedUnion('type', [
@@ -130,6 +134,7 @@ export const p2pRequestEnvelopeSchema = z.discriminatedUnion('type', [
   peerReadyRequestSchema,
   webrtcOfferRequestSchema,
   webrtcAnswerRequestSchema,
+  webrtcAnswerAppliedRequestSchema,
   webrtcIceCandidateRequestSchema,
   webrtcIceRestartRequestSchema,
   webrtcRestartRequestedRequestSchema,
@@ -149,6 +154,7 @@ export const p2pAckEnvelopeSchema = z.discriminatedUnion('type', [
   peerReadyAckSchema,
   webrtcOfferAckSchema,
   webrtcAnswerAckSchema,
+  webrtcAnswerAppliedAckSchema,
   webrtcIceCandidateAckSchema,
   webrtcIceRestartAckSchema,
   webrtcRestartRequestedAckSchema,
@@ -174,6 +180,12 @@ export const p2pBroadcastEnvelopeSchema = z.discriminatedUnion('type', [
   screenBitrateBroadcastSchema,
 ]);
 
+export const p2pOutboundResponseSchema = z.union([
+  p2pAckEnvelopeSchema,
+  p2pBroadcastEnvelopeSchema,
+  protocolErrorResponseSchema,
+]);
+
 export type InboundEnvelope = z.infer<typeof inboundEnvelopeSchema>;
 export type RequestEnvelope = InboundEnvelope;
 export type BroadcastEnvelope = z.infer<typeof broadcastEnvelopeSchema>;
@@ -181,3 +193,4 @@ export type AckEnvelope = z.infer<typeof ackEnvelopeSchema>;
 export type P2pRequestEnvelope = z.infer<typeof p2pRequestEnvelopeSchema>;
 export type P2pAckEnvelope = z.infer<typeof p2pAckEnvelopeSchema>;
 export type P2pBroadcastEnvelope = z.infer<typeof p2pBroadcastEnvelopeSchema>;
+export type P2pOutboundResponse = z.infer<typeof p2pOutboundResponseSchema>;

@@ -30,6 +30,8 @@ interface HarnessOptions {
   readonly reconnectGraceMs?: number;
   readonly maxCodeAttempts?: number;
   readonly requestCacheMaxEntries?: number;
+  readonly maxRooms?: number;
+  readonly maxNegotiationGeneration?: number;
   readonly now?: () => number;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (timer: unknown) => void;
@@ -55,6 +57,8 @@ function createHarness(options: HarnessOptions = {}) {
     reconnectGraceMs: options.reconnectGraceMs,
     maxCodeAttempts: options.maxCodeAttempts,
     requestCacheMaxEntries: options.requestCacheMaxEntries,
+    maxRooms: options.maxRooms,
+    maxNegotiationGeneration: options.maxNegotiationGeneration,
   });
   return {
     registry,
@@ -149,7 +153,7 @@ function connectRoom(
   fixture: ReturnType<typeof createJoinedRoom>,
 ) {
   markBothReady(registry, fixture);
-  registry.beginNegotiation({
+  const begun = registry.beginNegotiation({
     roomId: fixture.roomId,
     userId: 'creator',
     connectionId: fixture.created.connection.connectionId,
@@ -157,11 +161,37 @@ function connectRoom(
     negotiationId: 'initial-negotiation',
     requestId: 'begin-negotiation-1',
   });
-  registry.completeNegotiation({
+  const offerRelay = {
+    roomId: fixture.roomId,
+    userId: 'creator',
+    connectionId: fixture.created.connection.connectionId,
+    connectionEpoch: fixture.created.connection.connectionEpoch,
+    negotiationId: 'initial-negotiation',
+    negotiationGeneration: begun.data.negotiation.generation,
+    requestId: 'begin-negotiation-1',
+    requestDigest: 'o'.repeat(43),
+    operation: 'webrtc.offer',
+  } as const;
+  registry.prepareOfferRelay(offerRelay);
+  registry.confirmOfferRelay(offerRelay);
+  const answerRelay = {
     roomId: fixture.roomId,
     userId: 'joiner',
     connectionId: fixture.joined.connection.connectionId,
     connectionEpoch: fixture.joined.connection.connectionEpoch,
+    negotiationId: 'initial-negotiation',
+    requestId: 'answer-negotiation-1',
+    requestDigest: 'a'.repeat(43),
+  } as const;
+  registry.confirmAnswerRelay({
+    ...answerRelay,
+    ...registry.prepareAnswerRelay(answerRelay),
+  });
+  registry.completeNegotiation({
+    roomId: fixture.roomId,
+    userId: 'creator',
+    connectionId: fixture.created.connection.connectionId,
+    connectionEpoch: fixture.created.connection.connectionEpoch,
     negotiationId: 'initial-negotiation',
     requestId: 'complete-negotiation-1',
   });
@@ -359,6 +389,68 @@ describe('room creation and joining', () => {
     expect(new Set(errors.map(({ message }) => message))).toEqual(
       new Set(['Room code is invalid']),
     );
+  });
+
+  test('recovers a consumed code only for the bound joiner after ACK loss', () => {
+    const { registry } = createHarness({ codeValues: [42, 42, 43] });
+    const created = createRoom(registry).data;
+    const joined = joinRoom(registry, created.roomCode).data;
+    registry.disconnect({
+      roomId: created.room.id,
+      userId: 'joiner',
+      connectionId: joined.connection.connectionId,
+      connectionEpoch: joined.connection.connectionEpoch,
+    });
+
+    const recovered = joinRoom(registry, created.roomCode, {
+      connectionId: 'joiner-connection-2',
+      requestId: 'join-request-1',
+    }).data;
+    expect(recovered.room.id).toBe(created.room.id);
+    expect(recovered.connection.connectionEpoch).toBeGreaterThan(
+      joined.connection.connectionEpoch,
+    );
+    expectRoomError(
+      () =>
+        joinRoom(registry, created.roomCode, {
+          userId: 'third-user',
+          connectionId: 'third-connection',
+          requestId: 'third-request',
+        }),
+      'ROOM_CODE_INVALID',
+    );
+
+    const another = createRoom(registry, {
+      userId: 'creator-2',
+      connectionId: 'creator-2-connection',
+      requestId: 'creator-2-request',
+    }).data;
+    expect(another.roomCode).toBe('000043');
+  });
+
+  test('aborts an exact partially established session and releases capacity', () => {
+    const { registry, asyncIntents } = createHarness({ maxRooms: 1 });
+    const created = createRoom(registry).data;
+
+    registry.abortSessionSetup({
+      roomId: created.room.id,
+      userId: 'creator',
+      connectionId: created.connection.connectionId,
+      connectionEpoch: created.connection.connectionEpoch,
+    });
+
+    expect(registry.getStats().rooms).toBe(0);
+    expect(asyncIntents).toContainEqual({
+      type: 'room.closed',
+      roomId: created.room.id,
+      reason: 'signaling_error',
+    });
+    expect(() =>
+      createRoom(registry, {
+        requestId: 'create-after-abort',
+        connectionId: 'creator-connection-2',
+      }),
+    ).not.toThrow();
   });
 
   test('joining an offline creator cancels waiting-room grace', () => {
@@ -1139,6 +1231,69 @@ describe('negotiation epochs and reset delivery', () => {
     ).toBe('completed');
   });
 
+  test('atomically replaces a completed negotiation for creator ICE restart', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    connectRoom(registry, fixture);
+
+    expect(
+      registry.beginIceRestart({
+        roomId: fixture.roomId,
+        userId: 'creator',
+        connectionId: fixture.created.connection.connectionId,
+        connectionEpoch: fixture.created.connection.connectionEpoch,
+        negotiationId: 'restart-negotiation',
+        requestId: 'restart-negotiation-1',
+      }).data.negotiation,
+    ).toMatchObject({
+      negotiationId: 'restart-negotiation',
+      offererUserId: 'creator',
+      status: 'active',
+    });
+    expectRoomError(
+      () =>
+        registry.validateNegotiation({
+          roomId: fixture.roomId,
+          userId: 'joiner',
+          connectionId: fixture.joined.connection.connectionId,
+          connectionEpoch: fixture.joined.connection.connectionEpoch,
+          negotiationId: 'initial-negotiation',
+        }),
+      'STALE_NEGOTIATION',
+    );
+  });
+
+  test('rejects joiner and reused IDs for ICE restart', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    connectRoom(registry, fixture);
+
+    expectRoomError(
+      () =>
+        registry.beginIceRestart({
+          roomId: fixture.roomId,
+          userId: 'joiner',
+          connectionId: fixture.joined.connection.connectionId,
+          connectionEpoch: fixture.joined.connection.connectionEpoch,
+          negotiationId: 'restart-negotiation',
+          requestId: 'restart-as-joiner',
+        }),
+      'FORBIDDEN',
+    );
+    expectRoomError(
+      () =>
+        registry.beginIceRestart({
+          roomId: fixture.roomId,
+          userId: 'creator',
+          connectionId: fixture.created.connection.connectionId,
+          connectionEpoch: fixture.created.connection.connectionEpoch,
+          negotiationId: 'initial-negotiation',
+          requestId: 'restart-reused-id',
+        }),
+      'STALE_NEGOTIATION',
+    );
+  });
+
   test('rejects a second completion request for an already completed answer', () => {
     const { registry } = createHarness();
     const fixture = createJoinedRoom(registry);
@@ -1156,6 +1311,389 @@ describe('negotiation epochs and reset delivery', () => {
         }),
       'INVALID_STATE',
     );
+  });
+
+  test('lets only the offerer complete and keeps applied negotiation completed', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    markBothReady(registry, fixture);
+    const begun = registry.beginNegotiation({
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+      negotiationId: 'answer-applied-negotiation',
+      requestId: 'begin-answer-applied',
+    });
+
+    const completionInput = {
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+      negotiationId: 'answer-applied-negotiation',
+      requestId: 'creator-applied-answer',
+    } as const;
+    expectRoomError(
+      () => registry.completeNegotiation(completionInput),
+      'INVALID_STATE',
+    );
+    const answerRelay = {
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+      negotiationId: 'answer-applied-negotiation',
+      requestId: 'answer-relay-1',
+      requestDigest: 'a'.repeat(43),
+    } as const;
+    const offerRelay = {
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+      negotiationId: 'answer-applied-negotiation',
+      negotiationGeneration: begun.data.negotiation.generation,
+      requestId: 'begin-answer-applied',
+      requestDigest: 'o'.repeat(43),
+      operation: 'webrtc.offer',
+    } as const;
+    expect(registry.prepareOfferRelay(offerRelay)).toEqual({
+      replayed: false,
+    });
+    expectRoomError(
+      () => registry.prepareAnswerRelay(answerRelay),
+      'INVALID_STATE',
+    );
+    expect(registry.confirmOfferRelay(offerRelay)).toBe(true);
+    const prepared = registry.prepareAnswerRelay(answerRelay);
+    expect(prepared).toMatchObject({ replayed: false });
+    expect(registry.confirmAnswerRelay({ ...answerRelay, ...prepared })).toBe(
+      true,
+    );
+    expect(registry.prepareAnswerRelay(answerRelay)).toMatchObject({
+      replayed: true,
+      negotiationGeneration: prepared.negotiationGeneration,
+    });
+    expectRoomError(
+      () =>
+        registry.prepareAnswerRelay({
+          ...answerRelay,
+          requestId: 'different-answer',
+          requestDigest: 'b'.repeat(43),
+        }),
+      'INVALID_STATE',
+    );
+    expectRoomError(
+      () =>
+        registry.completeNegotiation({
+          roomId: fixture.roomId,
+          userId: 'joiner',
+          connectionId: fixture.joined.connection.connectionId,
+          connectionEpoch: fixture.joined.connection.connectionEpoch,
+          negotiationId: 'answer-applied-negotiation',
+          requestId: 'joiner-cannot-apply',
+        }),
+      'FORBIDDEN',
+    );
+    expect(
+      registry.completeNegotiation(completionInput).data.room.activeNegotiation,
+    ).toMatchObject({ status: 'completed' });
+    expect(registry.completeNegotiation(completionInput).replayed).toBe(true);
+    expect(
+      registry.markNegotiationDeliveryFailed({
+        roomId: fixture.roomId,
+        negotiationId: 'answer-applied-negotiation',
+        negotiationGeneration: prepared.negotiationGeneration,
+      }),
+    ).toBeNull();
+    expect(
+      registry.getMemberSnapshotForBroadcast({
+        roomId: fixture.roomId,
+        userId: 'creator',
+      }),
+    ).toMatchObject({
+      activeNegotiation: { status: 'completed' },
+      pendingNegotiationReset: null,
+    });
+  });
+
+  test('preflights and confirms relay request IDs without storing payloads', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    markBothReady(registry, fixture);
+    const current = {
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+    } as const;
+    const relay = {
+      ...current,
+      requestId: 'answer-relay-1',
+      operation: 'webrtc.iceCandidate' as const,
+      requestDigest: 'a'.repeat(43),
+    };
+
+    expect(registry.prepareRelay(relay)).toEqual({ replayed: false });
+    expect(registry.confirmRelay(relay)).toBe(true);
+    expect(registry.prepareRelay(relay)).toEqual({ replayed: true });
+    expect(registry.confirmRelay(relay)).toBe(false);
+    expectRoomError(
+      () =>
+        registry.prepareRelay({
+          ...current,
+          requestId: 'joiner-ready-1',
+          operation: 'webrtc.iceCandidate',
+          requestDigest: 'b'.repeat(43),
+        }),
+      'INVALID_STATE',
+    );
+    expect(JSON.stringify(registry)).not.toContain('answer-relay-1');
+  });
+
+  test('ignores a delayed delivery failure after a negotiation ID is reused', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    markBothReady(registry, fixture);
+    const creator = {
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+    } as const;
+    const joiner = {
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+    } as const;
+    const begin = (negotiationId: string, requestId: string) =>
+      registry.beginNegotiation({
+        ...creator,
+        negotiationId,
+        requestId,
+      }).data.negotiation;
+    const queueOffer = (
+      negotiationId: string,
+      negotiationGeneration: number,
+      requestId: string,
+      operation: 'webrtc.offer' | 'webrtc.iceRestart',
+    ) => {
+      const offer = {
+        ...creator,
+        negotiationId,
+        negotiationGeneration,
+        requestId,
+        requestDigest: 'o'.repeat(43),
+        operation,
+      } as const;
+      registry.prepareOfferRelay(offer);
+      registry.confirmOfferRelay(offer);
+    };
+    const apply = (
+      negotiationId: string,
+      negotiationGeneration: number,
+      suffix: string,
+    ) => {
+      const answer = {
+        ...joiner,
+        negotiationId,
+        requestId: `answer-${suffix}`,
+        requestDigest: suffix.repeat(43).slice(0, 43),
+      };
+      registry.confirmAnswerRelay({
+        ...answer,
+        ...registry.prepareAnswerRelay(answer),
+      });
+      registry.completeNegotiation({
+        ...creator,
+        negotiationId,
+        requestId: `applied-${suffix}`,
+      });
+      return negotiationGeneration;
+    };
+
+    const first = begin('reused-negotiation', 'begin-first');
+    queueOffer(
+      'reused-negotiation',
+      first.generation,
+      'begin-first',
+      'webrtc.offer',
+    );
+    apply('reused-negotiation', first.generation, 'a');
+    const second = registry.beginIceRestart({
+      ...creator,
+      negotiationId: 'middle-negotiation',
+      requestId: 'begin-middle',
+    }).data.negotiation;
+    queueOffer(
+      'middle-negotiation',
+      second.generation,
+      'begin-middle',
+      'webrtc.iceRestart',
+    );
+    apply('middle-negotiation', second.generation, 'b');
+    const reused = registry.beginIceRestart({
+      ...creator,
+      negotiationId: 'reused-negotiation',
+      requestId: 'begin-reused',
+    }).data.negotiation;
+    queueOffer(
+      'reused-negotiation',
+      reused.generation,
+      'begin-reused',
+      'webrtc.iceRestart',
+    );
+
+    expect(
+      registry.markNegotiationDeliveryFailed({
+        roomId: fixture.roomId,
+        negotiationId: 'reused-negotiation',
+        negotiationGeneration: first.generation,
+      }),
+    ).toBeNull();
+    expect(reused.generation).toBeGreaterThan(first.generation);
+    expect(
+      registry.getMemberSnapshotForBroadcast({
+        roomId: fixture.roomId,
+        userId: 'creator',
+      }),
+    ).toMatchObject({
+      activeNegotiation: {
+        negotiationId: 'reused-negotiation',
+        generation: reused.generation,
+        status: 'active',
+      },
+      pendingNegotiationReset: null,
+    });
+  });
+
+  test('keeps answer replay identities after the bounded request cache evicts them', () => {
+    const { registry } = createHarness({ requestCacheMaxEntries: 1 });
+    const fixture = createJoinedRoom(registry);
+    markBothReady(registry, fixture);
+    const creator = {
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+    } as const;
+    const joiner = {
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+    } as const;
+    const begun = registry.beginNegotiation({
+      ...creator,
+      negotiationId: 'cache-resistant-negotiation',
+      requestId: 'cache-resistant-offer',
+    });
+    const offer = {
+      ...creator,
+      negotiationId: 'cache-resistant-negotiation',
+      negotiationGeneration: begun.data.negotiation.generation,
+      requestId: 'cache-resistant-offer',
+      requestDigest: 'o'.repeat(43),
+      operation: 'webrtc.offer',
+    } as const;
+    registry.prepareOfferRelay(offer);
+    registry.confirmOfferRelay(offer);
+    const answer = {
+      ...joiner,
+      negotiationId: 'cache-resistant-negotiation',
+      requestId: 'cache-resistant-answer',
+      requestDigest: 'a'.repeat(43),
+    } as const;
+    registry.confirmAnswerRelay({
+      ...answer,
+      ...registry.prepareAnswerRelay(answer),
+    });
+    registry.confirmRelay({
+      ...joiner,
+      requestId: 'evict-answer-cache-entry',
+      operation: 'webrtc.iceCandidate',
+      requestDigest: 'b'.repeat(43),
+    });
+
+    expect(registry.prepareAnswerRelay(answer)).toMatchObject({
+      replayed: true,
+    });
+    expect(registry.prepareAnswerRelay(answer)).toMatchObject({
+      replayed: true,
+    });
+    expectRoomError(
+      () =>
+        registry.prepareAnswerRelay({
+          ...answer,
+          requestDigest: 'c'.repeat(43),
+        }),
+      'INVALID_STATE',
+    );
+
+    const applied = {
+      ...creator,
+      negotiationId: 'cache-resistant-negotiation',
+      requestId: 'cache-resistant-applied',
+    } as const;
+    registry.completeNegotiation(applied);
+    registry.confirmRelay({
+      ...creator,
+      requestId: 'evict-applied-cache-entry',
+      operation: 'webrtc.restartRequested',
+      requestDigest: 'd'.repeat(43),
+    });
+
+    expect(registry.completeNegotiation(applied).replayed).toBe(true);
+    expect(registry.completeNegotiation(applied).replayed).toBe(true);
+    expectRoomError(
+      () =>
+        registry.completeNegotiation({
+          ...applied,
+          negotiationId: 'changed-negotiation',
+        }),
+      'INVALID_STATE',
+    );
+    expect(
+      registry.getMemberSnapshotForBroadcast({
+        roomId: fixture.roomId,
+        userId: 'creator',
+      }).activeNegotiation,
+    ).toMatchObject({
+      negotiationId: 'cache-resistant-negotiation',
+      status: 'completed',
+      answerState: 'applied',
+    });
+  });
+
+  test('rejects negotiation generation overflow before mutating the room', () => {
+    const { registry } = createHarness({ maxNegotiationGeneration: 1 });
+    const fixture = createJoinedRoom(registry);
+    connectRoom(registry, fixture);
+
+    expectRoomError(
+      () =>
+        registry.beginIceRestart({
+          roomId: fixture.roomId,
+          userId: 'creator',
+          connectionId: fixture.created.connection.connectionId,
+          connectionEpoch: fixture.created.connection.connectionEpoch,
+          negotiationId: 'overflowed-negotiation',
+          requestId: 'overflowed-negotiation-request',
+        }),
+      'INVALID_STATE',
+    );
+    expect(
+      registry.getMemberSnapshotForBroadcast({
+        roomId: fixture.roomId,
+        userId: 'creator',
+      }).activeNegotiation,
+    ).toMatchObject({
+      generation: 1,
+      negotiationId: 'initial-negotiation',
+      status: 'completed',
+    });
   });
 
   test('keeps completed negotiation usable across a stable socket replacement', () => {
@@ -1974,6 +2512,36 @@ describe('timer dependency failures', () => {
 });
 
 describe('bulk cleanup', () => {
+  test('caps the default registry at 10000 rooms and releases the slot on cleanup', () => {
+    const { registry } = createHarness({ requestCacheMaxEntries: 10_001 });
+    for (let index = 0; index < 10_000; index += 1) {
+      createRoom(registry, {
+        userId: `capacity-user-${index}`,
+        connectionId: `capacity-connection-${index}`,
+        requestId: `capacity-request-${index}`,
+      });
+    }
+
+    expectRoomError(
+      () =>
+        createRoom(registry, {
+          userId: 'capacity-overflow',
+          connectionId: 'capacity-overflow-connection',
+          requestId: 'capacity-overflow-request',
+        }),
+      'CAPACITY_EXCEEDED',
+    );
+    registry.clear();
+    expect(() =>
+      createRoom(registry, {
+        userId: 'capacity-after-clear',
+        connectionId: 'capacity-after-clear-connection',
+        requestId: 'capacity-after-clear-request',
+      }),
+    ).not.toThrow();
+    registry.clear();
+  });
+
   test('expires 1000 rooms without leaking indices, cache entries, or timers', () => {
     const { registry } = createHarness({ requestCacheMaxEntries: 2_000 });
 

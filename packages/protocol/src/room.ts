@@ -271,6 +271,7 @@ export const roomClosedReasonSchema = z.enum([
   'ended',
   'creator_left',
   'expired',
+  'signaling_error',
 ]);
 export const roomClosedPayloadSchema = z
   .object({

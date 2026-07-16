@@ -6,9 +6,13 @@ import {
 import { generateRoomCode } from './room-code.ts';
 import {
   RoomDomainError,
+  type BeginIceRestartInput,
   type BeginNegotiationInput,
+  type AnswerRelayInput,
   type ClosedRoomSnapshot,
   type CompleteNegotiationInput,
+  type ConfirmAnswerRelayInput,
+  type ConfirmPendingNegotiationResetInput,
   type CreateRoomInput,
   type CreatedRoomSessionData,
   type DisconnectRoomInput,
@@ -17,8 +21,10 @@ import {
   type LeaveRoomInput,
   type MemberRoomInput,
   type NegotiationResetReason,
+  type OfferRelayInput,
   type PendingNegotiationResetSnapshot,
   type ReadyRoomInput,
+  type RelayRequestInput,
   type ReleaseScreenLeaseInput,
   type ResetNegotiationInput,
   type ResumeRoomInput,
@@ -44,6 +50,7 @@ const DEFAULT_ROOM_CODE_TTL_MS = 10 * 60 * 1_000;
 const DEFAULT_RECONNECT_GRACE_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_CODE_ATTEMPTS = 32;
 const DEFAULT_REQUEST_CACHE_MAX_ENTRIES = 4_096;
+const DEFAULT_MAX_ROOMS = 10_000;
 const REPLACED_CLOSE_CODE = 4409;
 const REPLACED_CLOSE_REASON = 'SESSION_REPLACED';
 
@@ -64,11 +71,27 @@ interface RoomMemberState {
   displayName: string;
 }
 
+interface NegotiationRequestIdentity {
+  readonly userId: string;
+  readonly requestId: string;
+  readonly signature: string;
+}
+
+interface OfferRequestIdentity extends NegotiationRequestIdentity {
+  readonly operation: OfferRelayInput['operation'];
+}
+
 interface RoomNegotiationState {
+  readonly generation: number;
   readonly negotiationId: string;
   readonly offererUserId: string;
   readonly expectedConnectionEpochByUserId: Map<string, number>;
   status: 'active' | 'completed' | 'abandoned';
+  offerState: 'awaiting' | 'queued';
+  answerState: 'awaiting' | 'queued' | 'applied';
+  offerRelayIdentity: OfferRequestIdentity | null;
+  answerRelayIdentity: NegotiationRequestIdentity | null;
+  answerAppliedIdentity: NegotiationRequestIdentity | null;
 }
 
 interface PendingNegotiationResetState extends PendingNegotiationResetSnapshot {
@@ -81,6 +104,7 @@ interface ScreenLeaseState extends ScreenLeaseSnapshot {
 
 interface TemporaryRoom {
   readonly id: string;
+  readonly originalCode: string;
   readonly creatorUserId: string;
   joinerUserId: string | null;
   code: string | null;
@@ -91,6 +115,7 @@ interface TemporaryRoom {
   nextConnectionEpoch: number;
   readonly currentConnectionEpochByUserId: Map<string, number>;
   activeNegotiation: RoomNegotiationState | null;
+  negotiationGeneration: number;
   pendingNegotiationReset: PendingNegotiationResetState | null;
   resetGeneration: number;
   screenLease: ScreenLeaseState | null;
@@ -118,6 +143,12 @@ function positiveSafeInteger(value: number, name: string): number {
 function assertIdentifier(value: string, name: string): void {
   if (value.trim().length === 0 || value.length > 128) {
     throw new TypeError(`${name} must be a non-empty bounded identifier`);
+  }
+}
+
+function assertRequestDigest(value: string): void {
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(value)) {
+    throw new TypeError('requestDigest must be a SHA-256 base64url digest');
   }
 }
 
@@ -204,9 +235,19 @@ export function createRoomRegistry(
     dependencies.requestCacheMaxEntries ?? DEFAULT_REQUEST_CACHE_MAX_ENTRIES,
     'requestCacheMaxEntries',
   );
+  const maxRooms = positiveSafeInteger(
+    dependencies.maxRooms ?? DEFAULT_MAX_ROOMS,
+    'maxRooms',
+  );
+  const maxNegotiationGeneration = positiveSafeInteger(
+    dependencies.maxNegotiationGeneration ?? Number.MAX_SAFE_INTEGER,
+    'maxNegotiationGeneration',
+  );
 
   const roomsById = new Map<string, TemporaryRoom>();
   const roomIdByCode = new Map<string, string>();
+  const reservedRoomCodes = new Set<string>();
+  const consumedRoomIdByJoinerCode = new Map<string, string>();
   const idempotencyCache = new Map<string, IdempotencyEntry>();
   let timerCount = 0;
 
@@ -277,6 +318,12 @@ export function createRoomRegistry(
     room.codeTimer = null;
     cancelTimer(room.graceTimer);
     room.graceTimer = null;
+    reservedRoomCodes.delete(room.originalCode);
+    if (room.joinerUserId !== null) {
+      consumedRoomIdByJoinerCode.delete(
+        JSON.stringify([room.joinerUserId, room.originalCode]),
+      );
+    }
     if (room.code !== null) {
       roomIdByCode.delete(room.code);
       room.code = null;
@@ -382,10 +429,13 @@ export function createRoomRegistry(
       }),
     );
     return frozen({
+      generation: negotiation.generation,
       negotiationId: negotiation.negotiationId,
       offererUserId: negotiation.offererUserId,
       expectedEpochs: Object.freeze(expectedEpochs),
       status: negotiation.status,
+      offerState: negotiation.offerState,
+      answerState: negotiation.answerState,
     });
   };
 
@@ -484,6 +534,14 @@ export function createRoomRegistry(
     [...room.membersByUserId.keys()].every(
       (userId) => room.connectionsByUserId.get(userId)?.ready === true,
     );
+
+  const nextNegotiationGeneration = (room: TemporaryRoom): number => {
+    if (room.negotiationGeneration >= maxNegotiationGeneration) {
+      throw new RoomDomainError('INVALID_STATE');
+    }
+    room.negotiationGeneration += 1;
+    return room.negotiationGeneration;
+  };
 
   const createPendingReset = (
     room: TemporaryRoom,
@@ -607,6 +665,18 @@ export function createRoomRegistry(
   const idempotencyKey = (userId: string, requestId: string): string =>
     JSON.stringify([userId, requestId]);
 
+  const removeUserIdempotencyEntries = (
+    room: TemporaryRoom,
+    userId: string,
+  ): void => {
+    for (const key of [...room.requestCacheKeys]) {
+      const decoded = JSON.parse(key) as [string, string];
+      if (decoded[0] === userId) {
+        removeIdempotencyEntry(key);
+      }
+    }
+  };
+
   const addIdempotencyEntry = (key: string, entry: IdempotencyEntry): void => {
     while (idempotencyCache.size >= requestCacheMaxEntries) {
       const oldestKey = idempotencyCache.keys().next().value as
@@ -657,6 +727,43 @@ export function createRoomRegistry(
     return result;
   };
 
+  const inspectIdempotencyRequest = (input: {
+    readonly userId: string;
+    readonly requestId: string;
+    readonly operation: string;
+    readonly signature: string;
+  }): Readonly<{ key: string; cached: IdempotencyEntry | null }> => {
+    assertIdentifier(input.userId, 'userId');
+    assertIdentifier(input.requestId, 'requestId');
+    const key = idempotencyKey(input.userId, input.requestId);
+    const cached = idempotencyCache.get(key) ?? null;
+    if (
+      cached !== null &&
+      (cached.operation !== input.operation ||
+        cached.signature !== input.signature)
+    ) {
+      throw new RoomDomainError('INVALID_STATE');
+    }
+    return frozen({ key, cached });
+  };
+
+  const inspectRelayRequest = (input: {
+    readonly userId: string;
+    readonly requestId: string;
+    readonly requestDigest: string;
+    readonly operation: string;
+  }): Readonly<{ key: string; cached: IdempotencyEntry | null }> => {
+    assertRequestDigest(input.requestDigest);
+    return inspectIdempotencyRequest({
+      ...input,
+      signature: input.requestDigest,
+    });
+  };
+
+  const relayOperation = (operation: RelayRequestInput['operation']): string =>
+    `relay.${operation}`;
+  const answerRelayOperation = 'relay.webrtc.answer';
+
   const roomSessionData = (
     room: TemporaryRoom,
     userId: string,
@@ -667,6 +774,66 @@ export function createRoomRegistry(
       role: room.membersByUserId.get(userId)!.role,
       connection: connectionIdentity(connection),
     });
+
+  const reconnectMember = (
+    room: TemporaryRoom,
+    input: Readonly<{
+      userId: string;
+      displayName: string;
+      connectionId: string;
+    }>,
+  ): RoomMutationResult<RoomSessionData> => {
+    const member = requireMembership(room, input.userId);
+    assertDisplayName(input.displayName);
+    assertIdentifier(input.connectionId, 'connectionId');
+    const previous = room.connectionsByUserId.get(input.userId);
+    if (previous?.connectionId === input.connectionId) {
+      throw new RoomDomainError('INVALID_STATE');
+    }
+    const intents: RoomIntent[] = [];
+    if (previous !== undefined) {
+      const leaseIntent = releaseLeaseForConnection(
+        room,
+        input.userId,
+        previous.connectionId,
+        previous.connectionEpoch,
+      );
+      if (leaseIntent !== null) {
+        intents.push(leaseIntent);
+      }
+    }
+    const connection = allocateConnection(
+      room,
+      input.userId,
+      input.connectionId,
+    );
+    cancelGrace(room);
+    if (room.activeNegotiation?.status === 'completed') {
+      room.activeNegotiation.expectedConnectionEpochByUserId.set(
+        input.userId,
+        connection.connectionEpoch,
+      );
+    } else {
+      invalidateIncompleteNegotiation(room, 'peer_resumed');
+    }
+    room.state = room.joinerUserId === null ? 'waiting' : 'reconnecting';
+    if (previous !== undefined) {
+      intents.push({
+        type: 'connection.replaced',
+        roomId: room.id,
+        userId: input.userId,
+        replacedConnectionId: previous.connectionId,
+        replacedConnectionEpoch: previous.connectionEpoch,
+        closeCode: REPLACED_CLOSE_CODE,
+        reason: REPLACED_CLOSE_REASON,
+      });
+    }
+    member.displayName = input.displayName;
+    return mutationResult(
+      roomSessionData(room, input.userId, connection),
+      intents,
+    );
+  };
 
   const expireScreenLease = (
     room: TemporaryRoom,
@@ -758,10 +925,13 @@ export function createRoomRegistry(
         mutate: () => {
           assertIdentifier(input.connectionId, 'connectionId');
           assertDisplayName(input.displayName);
+          if (roomsById.size >= maxRooms) {
+            throw new RoomDomainError('CAPACITY_EXCEEDED');
+          }
           let code: string | null = null;
           for (let attempt = 0; attempt < maxCodeAttempts; attempt += 1) {
             const candidate = generateRoomCode({ randomInt });
-            if (!roomIdByCode.has(candidate)) {
+            if (!reservedRoomCodes.has(candidate)) {
               code = candidate;
               break;
             }
@@ -778,6 +948,7 @@ export function createRoomRegistry(
           const createdAtMs = operationTime(now);
           const room: TemporaryRoom = {
             id,
+            originalCode: code,
             creatorUserId: input.userId,
             joinerUserId: null,
             code,
@@ -797,6 +968,7 @@ export function createRoomRegistry(
             nextConnectionEpoch: 0,
             currentConnectionEpochByUserId: new Map(),
             activeNegotiation: null,
+            negotiationGeneration: 0,
             pendingNegotiationReset: null,
             resetGeneration: 0,
             screenLease: null,
@@ -813,11 +985,13 @@ export function createRoomRegistry(
           );
           roomsById.set(id, room);
           roomIdByCode.set(code, id);
+          reservedRoomCodes.add(code);
           try {
             scheduleCodeExpiry(room);
           } catch (error) {
             roomsById.delete(id);
             roomIdByCode.delete(code);
+            reservedRoomCodes.delete(code);
             throw error;
           }
           const data: CreatedRoomSessionData = frozen({
@@ -832,6 +1006,23 @@ export function createRoomRegistry(
     },
 
     join(input: JoinRoomInput) {
+      const recoveryRoomId = consumedRoomIdByJoinerCode.get(
+        JSON.stringify([input.userId, input.roomCode]),
+      );
+      const recoveryRoom =
+        recoveryRoomId === undefined
+          ? undefined
+          : roomsById.get(recoveryRoomId);
+      if (
+        recoveryRoom !== undefined &&
+        recoveryRoom?.connectionsByUserId.get(input.userId)?.connectionId !==
+          input.connectionId
+      ) {
+        const key = idempotencyKey(input.userId, input.requestId);
+        if (idempotencyCache.get(key)?.operation === 'join') {
+          removeIdempotencyEntry(key);
+        }
+      }
       return withIdempotency({
         userId: input.userId,
         requestId: input.requestId,
@@ -845,6 +1036,24 @@ export function createRoomRegistry(
         mutate: () => {
           assertIdentifier(input.connectionId, 'connectionId');
           assertDisplayName(input.displayName);
+          const recoveryRoomId = consumedRoomIdByJoinerCode.get(
+            JSON.stringify([input.userId, input.roomCode]),
+          );
+          if (recoveryRoomId !== undefined) {
+            const recoveryRoom = roomsById.get(recoveryRoomId);
+            if (
+              recoveryRoom === undefined ||
+              expireGraceIfDue(recoveryRoom) ||
+              recoveryRoom.joinerUserId !== input.userId ||
+              recoveryRoom.originalCode !== input.roomCode
+            ) {
+              consumedRoomIdByJoinerCode.delete(
+                JSON.stringify([input.userId, input.roomCode]),
+              );
+              throw new RoomDomainError('ROOM_CODE_INVALID');
+            }
+            return reconnectMember(recoveryRoom, input);
+          }
           const roomId = /^\d{6}$/u.test(input.roomCode)
             ? roomIdByCode.get(input.roomCode)
             : undefined;
@@ -870,6 +1079,10 @@ export function createRoomRegistry(
           }
 
           room.joinerUserId = input.userId;
+          consumedRoomIdByJoinerCode.set(
+            JSON.stringify([input.userId, input.roomCode]),
+            room.id,
+          );
           room.membersByUserId.set(input.userId, {
             userId: input.userId,
             displayName: input.displayName,
@@ -911,57 +1124,7 @@ export function createRoomRegistry(
         roomIdFromData: ({ room }) => room.id,
         mutate: () => {
           const room = requireRoom(input.roomId);
-          const member = requireMembership(room, input.userId);
-          assertDisplayName(input.displayName);
-          assertIdentifier(input.connectionId, 'connectionId');
-          const previous = room.connectionsByUserId.get(input.userId);
-          if (previous?.connectionId === input.connectionId) {
-            throw new RoomDomainError('INVALID_STATE');
-          }
-          const intents: RoomIntent[] = [];
-          if (previous !== undefined) {
-            const leaseIntent = releaseLeaseForConnection(
-              room,
-              input.userId,
-              previous.connectionId,
-              previous.connectionEpoch,
-            );
-            if (leaseIntent !== null) {
-              intents.push(leaseIntent);
-            }
-          }
-          const connection = allocateConnection(
-            room,
-            input.userId,
-            input.connectionId,
-          );
-          cancelGrace(room);
-          if (room.activeNegotiation?.status === 'completed') {
-            room.activeNegotiation.expectedConnectionEpochByUserId.set(
-              input.userId,
-              connection.connectionEpoch,
-            );
-          } else {
-            invalidateIncompleteNegotiation(room, 'peer_resumed');
-          }
-          room.state = room.joinerUserId === null ? 'waiting' : 'reconnecting';
-
-          if (previous !== undefined) {
-            intents.push({
-              type: 'connection.replaced',
-              roomId: room.id,
-              userId: input.userId,
-              replacedConnectionId: previous.connectionId,
-              replacedConnectionEpoch: previous.connectionEpoch,
-              closeCode: REPLACED_CLOSE_CODE,
-              reason: REPLACED_CLOSE_REASON,
-            });
-          }
-          member.displayName = input.displayName;
-          return mutationResult(
-            roomSessionData(room, input.userId, connection),
-            intents,
-          );
+          return reconnectMember(room, input);
         },
       });
     },
@@ -1034,6 +1197,7 @@ export function createRoomRegistry(
         intents.push(leaseIntent);
       }
       room.connectionsByUserId.delete(input.userId);
+      removeUserIdempotencyEntries(room, input.userId);
       invalidateIncompleteNegotiation(room, 'signaling_reset');
       room.state = room.joinerUserId === null ? 'waiting' : 'reconnecting';
       intents.push({
@@ -1044,6 +1208,12 @@ export function createRoomRegistry(
       });
       scheduleGraceIfEmpty(room);
       return mutationResult(frozen({ room: snapshotRoom(room) }), intents);
+    },
+
+    abortSessionSetup(input) {
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      cleanupRoomAsynchronously(room, 'signaling_error');
     },
 
     leave(input: LeaveRoomInput) {
@@ -1115,6 +1285,26 @@ export function createRoomRegistry(
             throw new RoomDomainError('INVALID_STATE');
           }
 
+          const existing = room.activeNegotiation;
+          const existingOffer = existing?.offerRelayIdentity;
+          if (
+            existing !== null &&
+            existingOffer?.userId === input.userId &&
+            existingOffer.requestId === input.requestId
+          ) {
+            if (
+              existingOffer.operation !== 'webrtc.offer' ||
+              existing.negotiationId !== input.negotiationId
+            ) {
+              throw new RoomDomainError('INVALID_STATE');
+            }
+            return mutationResult(
+              frozen({ negotiation: snapshotNegotiation(existing, room) }),
+              [],
+              true,
+            );
+          }
+
           const pending = room.pendingNegotiationReset;
           if (room.activeNegotiation !== null || pending !== null) {
             if (
@@ -1134,12 +1324,99 @@ export function createRoomRegistry(
             expectedConnectionEpochByUserId.set(userId, epoch);
           }
           room.activeNegotiation = {
+            generation: nextNegotiationGeneration(room),
             negotiationId: input.negotiationId,
             offererUserId: input.userId,
             expectedConnectionEpochByUserId,
             status: 'active',
+            offerState: 'awaiting',
+            answerState: 'awaiting',
+            offerRelayIdentity: null,
+            answerRelayIdentity: null,
+            answerAppliedIdentity: null,
           };
           room.pendingNegotiationReset = null;
+          room.state = 'negotiating';
+          return mutationResult(
+            frozen({
+              negotiation: snapshotNegotiation(room.activeNegotiation, room),
+            }),
+          );
+        },
+      });
+    },
+
+    beginIceRestart(input: BeginIceRestartInput) {
+      return withIdempotency({
+        userId: input.userId,
+        requestId: input.requestId,
+        operation: 'negotiation.iceRestart',
+        signature: JSON.stringify([
+          input.roomId,
+          input.connectionId,
+          input.connectionEpoch,
+          input.negotiationId,
+        ]),
+        roomIdFromData: () => input.roomId,
+        mutate: () => {
+          const room = requireRoom(input.roomId);
+          const member = requireMembership(room, input.userId);
+          requireCurrentConnection(room, input);
+          assertIdentifier(input.negotiationId, 'negotiationId');
+          if (member.role !== 'creator') {
+            throw new RoomDomainError('FORBIDDEN');
+          }
+          if (!allMembersOnlineAndReady(room)) {
+            throw new RoomDomainError('INVALID_STATE');
+          }
+          const previous = room.activeNegotiation;
+          const existingOffer = previous?.offerRelayIdentity;
+          if (
+            previous !== null &&
+            existingOffer?.userId === input.userId &&
+            existingOffer.requestId === input.requestId
+          ) {
+            if (
+              existingOffer.operation !== 'webrtc.iceRestart' ||
+              previous.negotiationId !== input.negotiationId
+            ) {
+              throw new RoomDomainError('INVALID_STATE');
+            }
+            return mutationResult(
+              frozen({ negotiation: snapshotNegotiation(previous, room) }),
+              [],
+              true,
+            );
+          }
+          if (
+            previous === null ||
+            previous.status !== 'completed' ||
+            previous.negotiationId === input.negotiationId ||
+            room.pendingNegotiationReset !== null
+          ) {
+            throw new RoomDomainError('STALE_NEGOTIATION');
+          }
+
+          const expectedConnectionEpochByUserId = new Map<string, number>();
+          for (const userId of room.membersByUserId.keys()) {
+            const epoch = room.currentConnectionEpochByUserId.get(userId);
+            if (epoch === undefined) {
+              throw new RoomDomainError('INVALID_STATE');
+            }
+            expectedConnectionEpochByUserId.set(userId, epoch);
+          }
+          room.activeNegotiation = {
+            generation: nextNegotiationGeneration(room),
+            negotiationId: input.negotiationId,
+            offererUserId: input.userId,
+            expectedConnectionEpochByUserId,
+            status: 'active',
+            offerState: 'awaiting',
+            answerState: 'awaiting',
+            offerRelayIdentity: null,
+            answerRelayIdentity: null,
+            answerAppliedIdentity: null,
+          };
           room.state = 'negotiating';
           return mutationResult(
             frozen({
@@ -1172,36 +1449,304 @@ export function createRoomRegistry(
       return snapshotNegotiation(negotiation, room);
     },
 
-    completeNegotiation(input: CompleteNegotiationInput) {
-      return withIdempotency({
+    prepareOfferRelay(input: OfferRelayInput) {
+      positiveSafeInteger(input.negotiationGeneration, 'negotiationGeneration');
+      assertRequestDigest(input.requestDigest);
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      const negotiation = room.activeNegotiation;
+      if (
+        negotiation === null ||
+        negotiation.negotiationId !== input.negotiationId ||
+        negotiation.generation !== input.negotiationGeneration ||
+        negotiation.status === 'abandoned'
+      ) {
+        throw new RoomDomainError('STALE_NEGOTIATION');
+      }
+      registry.validateNegotiation(input);
+      if (negotiation.offererUserId !== input.userId) {
+        throw new RoomDomainError('FORBIDDEN');
+      }
+      const identity = negotiation.offerRelayIdentity;
+      if (identity !== null) {
+        if (
+          identity.userId !== input.userId ||
+          identity.requestId !== input.requestId ||
+          identity.signature !== input.requestDigest ||
+          identity.operation !== input.operation
+        ) {
+          throw new RoomDomainError('INVALID_STATE');
+        }
+        return frozen({ replayed: negotiation.offerState === 'queued' });
+      }
+      if (
+        negotiation.status !== 'active' ||
+        negotiation.offerState !== 'awaiting'
+      ) {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      negotiation.offerRelayIdentity = frozen({
         userId: input.userId,
         requestId: input.requestId,
-        operation: 'negotiation.complete',
-        signature: JSON.stringify([
-          input.roomId,
-          input.connectionId,
-          input.connectionEpoch,
-          input.negotiationId,
-        ]),
-        roomIdFromData: ({ room }) => room.id,
-        mutate: () => {
-          const room = requireRoom(input.roomId);
-          const negotiation = registry.validateNegotiation(input);
-          if (negotiation.status !== 'active') {
-            throw new RoomDomainError('INVALID_STATE');
-          }
-          if (negotiation.offererUserId === input.userId) {
-            throw new RoomDomainError('INVALID_STATE');
-          }
-          room.activeNegotiation!.status = 'completed';
-          room.pendingNegotiationReset = null;
-          room.hasConnected = true;
-          room.state = allMembersOnlineAndReady(room)
-            ? 'connected'
-            : 'reconnecting';
-          return mutationResult(frozen({ room: snapshotRoom(room) }));
-        },
+        signature: input.requestDigest,
+        operation: input.operation,
       });
+      return frozen({ replayed: false });
+    },
+
+    confirmOfferRelay(input: OfferRelayInput) {
+      positiveSafeInteger(input.negotiationGeneration, 'negotiationGeneration');
+      assertRequestDigest(input.requestDigest);
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      const negotiation = room.activeNegotiation;
+      if (
+        negotiation === null ||
+        negotiation.negotiationId !== input.negotiationId ||
+        negotiation.generation !== input.negotiationGeneration ||
+        negotiation.status === 'abandoned'
+      ) {
+        throw new RoomDomainError('STALE_NEGOTIATION');
+      }
+      const identity = negotiation.offerRelayIdentity;
+      if (
+        identity === null ||
+        identity.userId !== input.userId ||
+        identity.requestId !== input.requestId ||
+        identity.signature !== input.requestDigest ||
+        identity.operation !== input.operation
+      ) {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      if (negotiation.offerState === 'queued') {
+        return false;
+      }
+      if (negotiation.status !== 'active') {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      negotiation.offerState = 'queued';
+      return true;
+    },
+
+    prepareRelay(input: RelayRequestInput) {
+      const inspected = inspectRelayRequest({
+        ...input,
+        operation: relayOperation(input.operation),
+      });
+      if (inspected.cached !== null) {
+        return frozen({ replayed: true });
+      }
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      return frozen({ replayed: false });
+    },
+
+    confirmRelay(input: RelayRequestInput) {
+      const operation = relayOperation(input.operation);
+      const inspected = inspectRelayRequest({ ...input, operation });
+      if (inspected.cached !== null) {
+        return false;
+      }
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      addIdempotencyEntry(inspected.key, {
+        operation,
+        signature: input.requestDigest,
+        roomId: room.id,
+        data: frozen({}),
+      });
+      return true;
+    },
+
+    prepareAnswerRelay(input: AnswerRelayInput) {
+      const inspected = inspectRelayRequest({
+        ...input,
+        operation: answerRelayOperation,
+      });
+      if (inspected.cached !== null) {
+        const data = inspected.cached.data as Readonly<{
+          negotiationGeneration: number;
+        }>;
+        return frozen({
+          replayed: true,
+          negotiationGeneration: data.negotiationGeneration,
+        });
+      }
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      const localIdentity = room.activeNegotiation?.answerRelayIdentity;
+      if (
+        localIdentity?.userId === input.userId &&
+        localIdentity.requestId === input.requestId
+      ) {
+        if (localIdentity.signature !== input.requestDigest) {
+          throw new RoomDomainError('INVALID_STATE');
+        }
+        return frozen({
+          replayed: true,
+          negotiationGeneration: room.activeNegotiation!.generation,
+        });
+      }
+      const negotiation = registry.validateNegotiation(input);
+      if (
+        negotiation.status !== 'active' ||
+        negotiation.offerState !== 'queued' ||
+        negotiation.answerState !== 'awaiting' ||
+        negotiation.offererUserId === input.userId
+      ) {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      return frozen({
+        replayed: false,
+        negotiationGeneration: negotiation.generation,
+      });
+    },
+
+    confirmAnswerRelay(input: ConfirmAnswerRelayInput) {
+      positiveSafeInteger(input.negotiationGeneration, 'negotiationGeneration');
+      const inspected = inspectRelayRequest({
+        ...input,
+        operation: answerRelayOperation,
+      });
+      if (inspected.cached !== null) {
+        return false;
+      }
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      const negotiation = room.activeNegotiation;
+      const localIdentity = negotiation?.answerRelayIdentity;
+      if (
+        localIdentity?.userId === input.userId &&
+        localIdentity.requestId === input.requestId
+      ) {
+        if (localIdentity.signature !== input.requestDigest) {
+          throw new RoomDomainError('INVALID_STATE');
+        }
+        return false;
+      }
+      if (
+        negotiation === null ||
+        negotiation.negotiationId !== input.negotiationId ||
+        negotiation.generation !== input.negotiationGeneration
+      ) {
+        throw new RoomDomainError('STALE_NEGOTIATION');
+      }
+      if (
+        negotiation.status !== 'active' ||
+        negotiation.offerState !== 'queued' ||
+        negotiation.answerState !== 'awaiting' ||
+        negotiation.offererUserId === input.userId
+      ) {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      addIdempotencyEntry(inspected.key, {
+        operation: answerRelayOperation,
+        signature: input.requestDigest,
+        roomId: room.id,
+        data: frozen({
+          negotiationGeneration: input.negotiationGeneration,
+        }),
+      });
+      negotiation.answerRelayIdentity = frozen({
+        userId: input.userId,
+        requestId: input.requestId,
+        signature: input.requestDigest,
+      });
+      negotiation.answerState = 'queued';
+      return true;
+    },
+
+    completeNegotiation(input: CompleteNegotiationInput) {
+      const operation = 'negotiation.complete';
+      const signature = JSON.stringify([
+        input.roomId,
+        input.connectionId,
+        input.connectionEpoch,
+        input.negotiationId,
+      ]);
+      const inspected = inspectIdempotencyRequest({
+        userId: input.userId,
+        requestId: input.requestId,
+        operation,
+        signature,
+      });
+      if (inspected.cached !== null) {
+        return mutationResult(
+          inspected.cached.data as Readonly<{ room: RoomSnapshot }>,
+          [],
+          true,
+        );
+      }
+
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      const negotiation = room.activeNegotiation;
+      const localIdentity = negotiation?.answerAppliedIdentity;
+      if (
+        localIdentity?.userId === input.userId &&
+        localIdentity.requestId === input.requestId
+      ) {
+        if (localIdentity.signature !== signature) {
+          throw new RoomDomainError('INVALID_STATE');
+        }
+        return mutationResult(frozen({ room: snapshotRoom(room) }), [], true);
+      }
+
+      const validated = registry.validateNegotiation(input);
+      if (validated.status !== 'active') {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      if (validated.answerState !== 'queued') {
+        throw new RoomDomainError('INVALID_STATE');
+      }
+      if (validated.offererUserId !== input.userId) {
+        throw new RoomDomainError('FORBIDDEN');
+      }
+      negotiation!.answerAppliedIdentity = frozen({
+        userId: input.userId,
+        requestId: input.requestId,
+        signature,
+      });
+      negotiation!.status = 'completed';
+      negotiation!.answerState = 'applied';
+      room.pendingNegotiationReset = null;
+      room.hasConnected = true;
+      room.state = allMembersOnlineAndReady(room)
+        ? 'connected'
+        : 'reconnecting';
+      const data = frozen({ room: snapshotRoom(room) });
+      addIdempotencyEntry(inspected.key, {
+        operation,
+        signature,
+        roomId: room.id,
+        data,
+      });
+      return mutationResult(data);
+    },
+
+    markNegotiationDeliveryFailed(input) {
+      const room = requireRoom(input.roomId);
+      assertIdentifier(input.negotiationId, 'negotiationId');
+      const negotiation = room.activeNegotiation;
+      if (
+        negotiation === null ||
+        negotiation.negotiationId !== input.negotiationId ||
+        negotiation.generation !== input.negotiationGeneration ||
+        negotiation.status !== 'active'
+      ) {
+        return null;
+      }
+
+      negotiation.status = 'abandoned';
+      const pending =
+        room.pendingNegotiationReset !== null &&
+        !room.pendingNegotiationReset.consumed
+          ? room.pendingNegotiationReset
+          : createPendingReset(room, 'signaling_reset');
+      room.state = allMembersOnlineAndReady(room)
+        ? 'negotiating'
+        : 'reconnecting';
+      return snapshotPendingReset(pending);
     },
 
     resetNegotiation(input: ResetNegotiationInput) {
@@ -1240,19 +1785,46 @@ export function createRoomRegistry(
       });
     },
 
-    takePendingNegotiationReset(input) {
+    peekPendingNegotiationReset(input) {
       const room = requireRoom(input.roomId);
       requireCurrentConnection(room, input);
       const reset = room.pendingNegotiationReset;
       if (reset === null || reset.consumed || !allMembersOnlineAndReady(room)) {
         return null;
       }
-      reset.consumed = true;
       return frozen({
         generation: reset.generation,
         negotiationId: reset.negotiationId,
         reason: reset.reason,
       });
+    },
+
+    confirmPendingNegotiationReset(input: ConfirmPendingNegotiationResetInput) {
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      assertIdentifier(input.negotiationId, 'negotiationId');
+      const reset = room.pendingNegotiationReset;
+      if (
+        reset === null ||
+        reset.consumed ||
+        reset.generation !== input.generation ||
+        reset.negotiationId !== input.negotiationId ||
+        !allMembersOnlineAndReady(room)
+      ) {
+        return false;
+      }
+      reset.consumed = true;
+      return true;
+    },
+
+    takePendingNegotiationReset(input) {
+      const reset = registry.peekPendingNegotiationReset(input);
+      if (reset === null) {
+        return null;
+      }
+      return registry.confirmPendingNegotiationReset({ ...input, ...reset })
+        ? reset
+        : null;
     },
 
     getScreenLease(input) {
@@ -1383,6 +1955,8 @@ export function createRoomRegistry(
         cleanupRoom(room, 'expired');
       }
       roomIdByCode.clear();
+      reservedRoomCodes.clear();
+      consumedRoomIdByJoinerCode.clear();
       idempotencyCache.clear();
     },
   };

@@ -118,6 +118,15 @@ export const createP2pAckEnvelopeSchema = <
     .strict();
 };
 
+export const protocolErrorResponseSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema.nullable(),
+    type: z.literal('protocol.error'),
+    payload: p2pFailureAckPayloadSchema,
+  })
+  .strict();
+
 export type RequestId = z.infer<typeof requestIdSchema>;
 export type EventId = z.infer<typeof eventIdSchema>;
 export type RoomId = z.infer<typeof roomIdSchema>;
@@ -130,3 +139,4 @@ export type TransportId = z.infer<typeof transportIdSchema>;
 export type ProducerId = z.infer<typeof producerIdSchema>;
 export type ConsumerId = z.infer<typeof consumerIdSchema>;
 export type LeaseId = z.infer<typeof leaseIdSchema>;
+export type ProtocolErrorResponse = z.infer<typeof protocolErrorResponseSchema>;

@@ -632,6 +632,7 @@ describe('HTTP email/password authentication', () => {
       identity: {
         userId: registered.user.userId,
         sessionId: expect.any(String),
+        accessTokenExpiresAtSeconds: expect.any(Number),
       },
     });
 

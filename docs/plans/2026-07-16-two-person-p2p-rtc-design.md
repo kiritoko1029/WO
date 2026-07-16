@@ -160,7 +160,7 @@ App Server 首版只运行一个实例。临时房间和在线连接保存在进
 
 - `room.create`、`room.join`、`room.resume`、`room.leave`、`room.end`；
 - `peer.ready`、`peer.left`；
-- `webrtc.offer`、`webrtc.answer`、`webrtc.iceCandidate`、`webrtc.iceRestart`；
+- `webrtc.offer`、`webrtc.answer`、`webrtc.answerApplied`、`webrtc.iceCandidate`、`webrtc.iceRestart`；
 - `screen.acquire`、`screen.renew`、`screen.release`、`screen.ownerChanged`；
 - `screen.bitrate`，用于授权校验、限值和诊断，不代替客户端 sender 参数更新。
 
@@ -303,4 +303,3 @@ Docker Compose 只部署服务端。Windows 和 macOS Electron 安装包通过�
 - 服务端可以用文档化的一条 Docker Compose 命令部署。
 - Windows 和 macOS 客户端可构建，并完成可获得设备范围内的真实设备证据；未验证项目被明确标记，不作虚假承诺。
 - 自动化测试、配置校验和安全检查通过。
-

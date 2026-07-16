@@ -28,8 +28,10 @@ import {
   negotiationIdSchema,
   p2pAckEnvelopeSchema,
   p2pBroadcastEnvelopeSchema,
+  p2pOutboundResponseSchema,
   p2pRequestEnvelopeSchema,
   peerReadyBroadcastSchema,
+  protocolErrorResponseSchema,
   producerCreatePayloadSchema,
   producerIdSchema,
   publicIceServerSchema,
@@ -44,6 +46,7 @@ import {
   screenLeaseSchema,
   screenOwnerChangedBroadcastSchema,
   screenSetTargetBitrateRequestSchema,
+  signalTicketResponseSchema,
   transportCreateRequestSchema,
   transportIdSchema,
   userIdSchema,
@@ -59,6 +62,7 @@ import {
   type JoinerActiveRoomSession,
   type NegotiationResetReason,
   type P2pRequestEnvelope,
+  type P2pOutboundResponse,
   type P2pRoomJoinPayload,
   type PeerJoinedBroadcast,
   type PeerJoinedPayload,
@@ -80,6 +84,7 @@ import {
   type ScreenBitrateBroadcast,
   type ScreenBitratePayload,
   type ScreenOwnerChangedPayload,
+  type SignalTicketResponse,
   type WebrtcAnswerAck,
   type WebrtcAnswerBroadcast,
   type WebrtcAnswerPayload,
@@ -107,6 +112,7 @@ import {
   type LeaseId,
   type MemberId,
   type ProducerId,
+  type ProtocolErrorResponse,
   type RequestId,
   type RoomId,
   type TransportId,
@@ -165,6 +171,9 @@ type PublicP2pSchemaTypeExports = readonly [
   ScreenBitratePayload,
   ScreenBitrateBroadcast,
   ScreenOwnerChangedPayload,
+  ProtocolErrorResponse,
+  P2pOutboundResponse,
+  SignalTicketResponse,
 ];
 
 const preservePublicP2pSchemaTypes = (
@@ -958,6 +967,19 @@ const p2pBroadcast = (type: string, payload: unknown) => ({
   payload,
 });
 
+const protocolErrorResponse = (
+  requestId: string | null,
+  code = 'VALIDATION_ERROR',
+) => ({
+  version: 1,
+  requestId,
+  type: 'protocol.error',
+  payload: {
+    ok: false,
+    error: { code, message: 'Request failed' },
+  },
+});
+
 const validRtcConfiguration = {
   iceServers: [
     { urls: ['stun:rtc.example.com:3478'] },
@@ -1170,6 +1192,68 @@ describe('HTTP email and password authentication contracts', () => {
             accessTokenExpiresInSeconds: 900,
           },
         },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('signaling ticket response contract', () => {
+  const canonicalTicket = 'A'.repeat(43);
+
+  test('accepts a canonical 32-byte unpadded base64url ticket for 30 seconds', () => {
+    const response = {
+      ticket: canonicalTicket,
+      expiresInSeconds: 30,
+    };
+
+    expect(signalTicketResponseSchema.parse(response)).toEqual(response);
+    expect(
+      signalTicketResponseSchema.safeParse({
+        ticket: `${'_'.repeat(42)}8`,
+        expiresInSeconds: 30,
+      }).success,
+    ).toBe(true);
+
+    const acceptsSignalTicketResponse = (value: SignalTicketResponse) => value;
+    expect(
+      acceptsSignalTicketResponse(signalTicketResponseSchema.parse(response)),
+    ).toEqual(response);
+  });
+
+  test.each([
+    ['too short', 'A'.repeat(42)],
+    ['too long', 'A'.repeat(44)],
+    ['padded', `${'A'.repeat(43)}=`],
+    ['standard base64 alphabet', `${'A'.repeat(42)}+`],
+    ['whitespace', `${'A'.repeat(42)} `],
+    ['noncanonical trailing bits', `${'A'.repeat(42)}B`],
+  ])('rejects a %s ticket', (_caseName, ticket) => {
+    expect(
+      signalTicketResponseSchema.safeParse({
+        ticket,
+        expiresInSeconds: 30,
+      }).success,
+    ).toBe(false);
+  });
+
+  test.each([0, -1, 1.5, 29, 31, '30'])(
+    'rejects a non-contract expiry %#',
+    (expiresInSeconds) => {
+      expect(
+        signalTicketResponseSchema.safeParse({
+          ticket: canonicalTicket,
+          expiresInSeconds,
+        }).success,
+      ).toBe(false);
+    },
+  );
+
+  test('rejects unknown response fields', () => {
+    expect(
+      signalTicketResponseSchema.safeParse({
+        ticket: canonicalTicket,
+        expiresInSeconds: 30,
+        expiresAt: '2026-07-16T00:00:30.000Z',
       }).success,
     ).toBe(false);
   });
@@ -1401,6 +1485,7 @@ describe('browser-native WebRTC relay contracts', () => {
         ...validSignalBase,
         description: validAnswer,
       }),
+      request('webrtc.answerApplied', validSignalBase),
       request('webrtc.iceCandidate', {
         ...validSignalBase,
         candidate: validBrowserCandidate,
@@ -1673,6 +1758,7 @@ describe('active P2P envelope unions', () => {
       p2pAck('peer.ready', {}),
       p2pAck('webrtc.offer', {}),
       p2pAck('webrtc.answer', {}),
+      p2pAck('webrtc.answerApplied', {}),
       p2pAck('webrtc.iceCandidate', {}),
       p2pAck('webrtc.iceRestart', {}),
       p2pAck('webrtc.restartRequested', {}),
@@ -1731,6 +1817,97 @@ describe('active P2P envelope unions', () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  test('accepts protocol errors with a valid or unavailable request ID', () => {
+    const withRequestId = protocolErrorResponse(
+      'request-1',
+      'UNSUPPORTED_PROTOCOL',
+    );
+    const withoutRequestId = protocolErrorResponse(null);
+
+    expect(protocolErrorResponseSchema.parse(withRequestId)).toEqual(
+      withRequestId,
+    );
+    expect(protocolErrorResponseSchema.parse(withoutRequestId)).toEqual(
+      withoutRequestId,
+    );
+
+    const acceptsProtocolErrorResponse = (value: ProtocolErrorResponse) =>
+      value;
+    expect(
+      acceptsProtocolErrorResponse(
+        protocolErrorResponseSchema.parse(withoutRequestId),
+      ),
+    ).toEqual(withoutRequestId);
+  });
+
+  test('requires a legal request ID when a protocol error identifies a request', () => {
+    expect(
+      protocolErrorResponseSchema.safeParse(protocolErrorResponse('')).success,
+    ).toBe(false);
+    expect(
+      protocolErrorResponseSchema.safeParse(
+        protocolErrorResponse('x'.repeat(129)),
+      ).success,
+    ).toBe(false);
+  });
+
+  test('keeps protocol error envelopes, payloads, and P2P error codes strict', () => {
+    const valid = protocolErrorResponse(null);
+
+    expect(
+      protocolErrorResponseSchema.safeParse({ ...valid, debug: true }).success,
+    ).toBe(false);
+    expect(
+      protocolErrorResponseSchema.safeParse({
+        ...valid,
+        payload: { ...valid.payload, data: {} },
+      }).success,
+    ).toBe(false);
+    expect(
+      protocolErrorResponseSchema.safeParse({
+        ...valid,
+        payload: {
+          ...valid.payload,
+          error: { ...valid.payload.error, stack: 'sensitive stack' },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      protocolErrorResponseSchema.safeParse(
+        protocolErrorResponse(null, 'MEDIA_NODE_UNAVAILABLE'),
+      ).success,
+    ).toBe(false);
+    expect(
+      protocolErrorResponseSchema.safeParse(
+        protocolErrorResponse(null, 'DATABASE_ERROR'),
+      ).success,
+    ).toBe(false);
+  });
+
+  test('accepts acknowledgements, broadcasts, and protocol errors as outbound responses', () => {
+    const acknowledgement = p2pAck('room.leave', {});
+    const broadcast = p2pBroadcast('room.closed', {
+      roomId: 'room-1',
+      reason: 'ended',
+    });
+    const error = protocolErrorResponse(null);
+
+    for (const value of [acknowledgement, broadcast, error]) {
+      expect(
+        p2pOutboundResponseSchema.safeParse(value).success,
+        value.type,
+      ).toBe(true);
+    }
+    expect(
+      p2pOutboundResponseSchema.safeParse(request('room.create', {})).success,
+    ).toBe(false);
+
+    const acceptsP2pOutboundResponse = (value: P2pOutboundResponse) => value;
+    expect(
+      acceptsP2pOutboundResponse(p2pOutboundResponseSchema.parse(error)),
+    ).toEqual(error);
   });
 
   test('accepts all peer, room, WebRTC, and screen broadcasts', () => {

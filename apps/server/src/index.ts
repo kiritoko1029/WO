@@ -14,6 +14,7 @@ import { createApp } from './app.ts';
 import { createAccessTokenService } from './modules/auth/access-token.ts';
 import { createAuthService } from './modules/auth/auth-service.ts';
 import { hashPassword } from './modules/auth/password.ts';
+import { createSignalTicketStore } from './modules/signaling/signal-ticket-store.ts';
 
 const DUMMY_LOGIN_PASSWORD = 'not a real account password';
 
@@ -73,6 +74,19 @@ export async function startServer(
       trustProxy: config.nodeEnv === 'production' ? 1 : false,
       readinessCheck: async () => {
         await databaseClient.sql`SELECT 1`;
+      },
+      realtime: {
+        identityRepository,
+        ticketStore: createSignalTicketStore(),
+        turn: {
+          urls: config.turn.urls,
+          sharedSecret: config.turn.sharedSecret,
+          credentialTtlSeconds: config.turn.credentialTtlSeconds,
+        },
+        roomRegistryOptions: {
+          roomCodeTtlMs: config.room.codeTtlSeconds * 1_000,
+          reconnectGraceMs: config.room.disconnectGraceSeconds * 1_000,
+        },
       },
     });
     await app.listen({ host: config.server.host, port: config.server.port });

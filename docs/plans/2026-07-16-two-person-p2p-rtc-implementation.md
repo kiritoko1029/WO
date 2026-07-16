@@ -1044,6 +1044,8 @@ const screen = pc.addTransceiver('video', {
 
 Assert the creator alone calls `createOffer()`, refreshes ICE servers first when credentials are expired or have less than 120 seconds remaining, calls `setConfiguration()` with the refresh result before offering, the joiner answers the received offer, remote descriptions precede candidate application, candidates are buffered until then, and mute/device changes never call `createOffer()` or add a transceiver. Include a forced-TURN test where the joiner arrives 599 seconds after room creation: the stale create-ack credential is never used for the first offer.
 
+After the creator successfully applies the current-generation answer with `setRemoteDescription()`, it sends one idempotent `webrtc.answerApplied` request. The server does not mark the negotiation completed before this acknowledgement. A timeout retries the same request ID; a stale promise from a reset or rebuilt controller generation must never send the acknowledgement.
+
 For the joiner, obtain the two transceivers created by the remote offer after `setRemoteDescription()`, map them by stable media kind/MID, set both desired directions to `sendrecv`, attach the microphone before `createAnswer()`, and apply codec preferences before creating the answer. Do not create duplicate answer-side transceivers. Assert the resulting answer contains send capability for both m-lines so the joiner can later use the existing video sender.
 
 **Step 3: Write failing voice-controller tests**
@@ -1315,6 +1317,7 @@ Cover:
 - WSS drops while WebRTC remains connected: stop any active screen sender before its lease expires, keep voice media alive, acquire a new ticket, resume the room with the same bound account, and do not otherwise rebuild media;
 - WSS closes with `4409 SESSION_REPLACED`: do not auto-resume; stop all local media and perform full-call cleanup so two devices on one account cannot enter a reconnect takeover loop;
 - WSS drops during initial offer, initial answer, or an ICE-restart answer: the server abandons the in-flight negotiation because it stores no SDP, emits `webrtc.negotiationReset` after resume, both clients rebuild the PeerConnection while preserving only the valid microphone track, and the creator starts one new negotiation ID after both are ready;
+- WSS drops after the creator applied the answer but before the `webrtc.answerApplied` ack returns: resume reports the completed negotiation, the client keeps a healthy PeerConnection, and an old-generation retry cannot complete a newer negotiation;
 - ICE `disconnected`: wait a short grace before action;
 - ICE `failed` on the creator: refresh ICE servers, call `setConfiguration()`, wait for `signalingState === 'stable'`, then call `restartIce()` (or `createOffer({ iceRestart: true })`) and send a new negotiation ID;
 - ICE `failed` on the joiner: send one idempotent `webrtc.restartRequested`; the creator performs the restart, while duplicate/in-flight requests are coalesced and a bounded timeout fails visibly;

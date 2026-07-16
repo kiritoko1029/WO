@@ -198,6 +198,16 @@ export const webrtcAnswerBroadcastSchema = createBroadcastEnvelopeSchema(
   webrtcAnswerPayloadSchema,
 );
 
+export const webrtcAnswerAppliedPayloadSchema = webrtcSignalContextSchema;
+export const webrtcAnswerAppliedRequestSchema = createRequestEnvelopeSchema(
+  'webrtc.answerApplied',
+  webrtcAnswerAppliedPayloadSchema,
+);
+export const webrtcAnswerAppliedAckSchema = createP2pAckEnvelopeSchema(
+  'webrtc.answerApplied',
+  z.object({}).strict(),
+);
+
 export const webrtcIceCandidatePayloadSchema = z
   .object({
     ...signalContextShape,
@@ -295,6 +305,15 @@ export type WebrtcAnswerPayload = z.infer<typeof webrtcAnswerPayloadSchema>;
 export type WebrtcAnswerRequest = z.infer<typeof webrtcAnswerRequestSchema>;
 export type WebrtcAnswerAck = z.infer<typeof webrtcAnswerAckSchema>;
 export type WebrtcAnswerBroadcast = z.infer<typeof webrtcAnswerBroadcastSchema>;
+export type WebrtcAnswerAppliedPayload = z.infer<
+  typeof webrtcAnswerAppliedPayloadSchema
+>;
+export type WebrtcAnswerAppliedRequest = z.infer<
+  typeof webrtcAnswerAppliedRequestSchema
+>;
+export type WebrtcAnswerAppliedAck = z.infer<
+  typeof webrtcAnswerAppliedAckSchema
+>;
 export type WebrtcIceCandidatePayload = z.infer<
   typeof webrtcIceCandidatePayloadSchema
 >;

@@ -6,6 +6,7 @@ import { HttpError } from './errors.ts';
 export interface TrustedRequestIdentity {
   readonly userId: string;
   readonly sessionId: string;
+  readonly accessTokenExpiresAtSeconds: number;
 }
 
 declare module 'fastify' {
@@ -37,6 +38,7 @@ export function registerAuthentication(
       request.authIdentity = {
         userId: identity.userId,
         sessionId: identity.sessionId,
+        accessTokenExpiresAtSeconds: identity.expiresAt,
       };
     } catch {
       throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');

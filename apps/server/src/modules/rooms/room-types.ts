@@ -1,4 +1,5 @@
 export type RoomDomainErrorCode =
+  | 'CAPACITY_EXCEEDED'
   | 'FORBIDDEN'
   | 'INVALID_STATE'
   | 'LEASE_LOST'
@@ -12,6 +13,7 @@ export type RoomDomainErrorCode =
   | 'STALE_NEGOTIATION';
 
 const roomDomainErrorMessages: Record<RoomDomainErrorCode, string> = {
+  CAPACITY_EXCEEDED: 'Room capacity is exhausted',
   FORBIDDEN: 'Operation is not permitted',
   INVALID_STATE: 'Room state does not allow this operation',
   LEASE_LOST: 'Screen-share lease is no longer owned by this connection',
@@ -37,7 +39,8 @@ export class RoomDomainError extends Error {
 
 export type RoomActiveState =
   'waiting' | 'negotiating' | 'connected' | 'reconnecting';
-export type RoomClosedReason = 'ended' | 'creator_left' | 'expired';
+export type RoomClosedReason =
+  'ended' | 'creator_left' | 'expired' | 'signaling_error';
 export type RoomRole = 'creator' | 'joiner';
 export type NegotiationResetReason = 'peer_resumed' | 'signaling_reset';
 
@@ -62,10 +65,13 @@ export interface NegotiationExpectedEpoch {
 }
 
 export interface RoomNegotiationSnapshot {
+  readonly generation: number;
   readonly negotiationId: string;
   readonly offererUserId: string;
   readonly expectedEpochs: readonly NegotiationExpectedEpoch[];
   readonly status: 'active' | 'completed' | 'abandoned';
+  readonly offerState: 'awaiting' | 'queued';
+  readonly answerState: 'awaiting' | 'queued' | 'applied';
 }
 
 export interface PendingNegotiationResetSnapshot {
@@ -208,12 +214,54 @@ export interface BeginNegotiationInput extends CurrentConnectionInput {
   readonly requestId: string;
 }
 
+export type BeginIceRestartInput = BeginNegotiationInput;
+
 export interface ValidateNegotiationInput extends CurrentConnectionInput {
   readonly negotiationId: string;
 }
 
 export interface CompleteNegotiationInput extends ValidateNegotiationInput {
   readonly requestId: string;
+}
+
+export type RelayRequestOperation =
+  'webrtc.iceCandidate' | 'webrtc.restartRequested';
+
+export interface RelayRequestInput extends CurrentConnectionInput {
+  readonly requestId: string;
+  readonly operation: RelayRequestOperation;
+  readonly requestDigest: string;
+}
+
+export interface AnswerRelayInput extends CurrentConnectionInput {
+  readonly negotiationId: string;
+  readonly requestId: string;
+  readonly requestDigest: string;
+}
+
+export type OfferRelayOperation = 'webrtc.offer' | 'webrtc.iceRestart';
+
+export interface OfferRelayInput extends CurrentConnectionInput {
+  readonly negotiationId: string;
+  readonly negotiationGeneration: number;
+  readonly requestId: string;
+  readonly requestDigest: string;
+  readonly operation: OfferRelayOperation;
+}
+
+export interface ConfirmAnswerRelayInput extends AnswerRelayInput {
+  readonly negotiationGeneration: number;
+}
+
+export interface ConfirmPendingNegotiationResetInput extends CurrentConnectionInput {
+  readonly generation: number;
+  readonly negotiationId: string;
+}
+
+export interface NegotiationDeliveryFailedInput {
+  readonly roomId: string;
+  readonly negotiationId: string;
+  readonly negotiationGeneration: number;
 }
 
 export interface ResetNegotiationInput extends CurrentConnectionInput {
@@ -250,6 +298,8 @@ export interface RoomRegistryDependencies {
   readonly reconnectGraceMs?: number;
   readonly maxCodeAttempts?: number;
   readonly requestCacheMaxEntries?: number;
+  readonly maxRooms?: number;
+  readonly maxNegotiationGeneration?: number;
 }
 
 export interface RoomRegistry {
@@ -262,6 +312,7 @@ export interface RoomRegistry {
   disconnect(
     input: DisconnectRoomInput,
   ): RoomMutationResult<Readonly<{ room: RoomSnapshot }>>;
+  abortSessionSetup(input: CurrentConnectionInput): void;
   /** Terminal calls are not replay-cached here; Task 10 owns per-connection ACK replay. */
   leave(
     input: LeaveRoomInput,
@@ -276,10 +327,25 @@ export interface RoomRegistry {
   beginNegotiation(
     input: BeginNegotiationInput,
   ): RoomMutationResult<Readonly<{ negotiation: RoomNegotiationSnapshot }>>;
+  beginIceRestart(
+    input: BeginIceRestartInput,
+  ): RoomMutationResult<Readonly<{ negotiation: RoomNegotiationSnapshot }>>;
   validateNegotiation(input: ValidateNegotiationInput): RoomNegotiationSnapshot;
+  prepareRelay(input: RelayRequestInput): Readonly<{ replayed: boolean }>;
+  confirmRelay(input: RelayRequestInput): boolean;
+  prepareOfferRelay(input: OfferRelayInput): Readonly<{ replayed: boolean }>;
+  confirmOfferRelay(input: OfferRelayInput): boolean;
+  prepareAnswerRelay(input: AnswerRelayInput): Readonly<{
+    replayed: boolean;
+    negotiationGeneration: number;
+  }>;
+  confirmAnswerRelay(input: ConfirmAnswerRelayInput): boolean;
   completeNegotiation(
     input: CompleteNegotiationInput,
   ): RoomMutationResult<Readonly<{ room: RoomSnapshot }>>;
+  markNegotiationDeliveryFailed(
+    input: NegotiationDeliveryFailedInput,
+  ): PendingNegotiationResetSnapshot | null;
   resetNegotiation(input: ResetNegotiationInput): RoomMutationResult<
     Readonly<{
       room: RoomSnapshot;
@@ -289,6 +355,12 @@ export interface RoomRegistry {
   takePendingNegotiationReset(
     input: CurrentConnectionInput,
   ): PendingNegotiationResetSnapshot | null;
+  peekPendingNegotiationReset(
+    input: CurrentConnectionInput,
+  ): PendingNegotiationResetSnapshot | null;
+  confirmPendingNegotiationReset(
+    input: ConfirmPendingNegotiationResetInput,
+  ): boolean;
   getScreenLease(input: CurrentConnectionInput): ScreenLeaseSnapshot | null;
   setScreenLease(
     input: SetScreenLeaseInput,
