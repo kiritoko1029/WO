@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "electron", "vite/client"],
+    "paths": {
+      "@wo/media-policy": ["../../packages/media-policy/src/index.ts"],
+      "@wo/protocol": ["../../packages/protocol/src/index.ts"]
+    }
+  },
+  "include": [
+    "electron.vite.config.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "test/**/*.ts",
+    "vitest.config.ts"
+  ],
+  "exclude": ["test/app.test.tsx"]
+}
