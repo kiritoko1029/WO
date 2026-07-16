@@ -422,8 +422,20 @@ button:disabled {
   background: #1aa27a;
 }
 
+.connection-dot.relay {
+  background: #1677a8;
+}
+
+.connection-dot.connecting {
+  background: #d39c22;
+}
+
 .connection-dot.reconnecting {
   background: #e26a35;
+}
+
+.connection-dot.error {
+  background: #d63845;
 }
 
 .room-code-label {
@@ -442,7 +454,7 @@ button:disabled {
 
 .call-workspace {
   display: grid;
-  grid-template-rows: 54px minmax(0, 1fr) 24px;
+  grid-template-rows: 54px 24px minmax(0, 1fr);
   min-height: 0;
   padding: 12px 18px 88px;
 }
@@ -595,6 +607,32 @@ button:disabled {
 
 .settings-popover span {
   color: #6d7881;
+}
+
+.settings-popover label {
+  display: grid;
+  gap: 5px;
+}
+
+.settings-popover select {
+  min-height: 36px;
+  font-size: 13px;
+}
+
+.output-mute-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  color: #354048;
+  background: #edf0f2;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.output-mute-button:hover {
+  background: #e0e5e8;
 }
 
 @media (max-width: 720px) {

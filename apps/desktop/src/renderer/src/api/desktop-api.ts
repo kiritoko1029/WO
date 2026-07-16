@@ -1,5 +1,3 @@
-import type { SignalTicketResponse } from '@wo/protocol';
-
 import {
   DesktopIpcError,
   unwrapDesktopIpcEnvelope,
@@ -8,6 +6,7 @@ import type {
   DesktopApi,
   DesktopBridge,
   PublicAuthSession,
+  RealtimeConnectionGrant,
 } from '../../../preload/types.js';
 
 async function unwrapBridge<Value>(
@@ -44,7 +43,7 @@ export function createRendererDesktopApi(
   });
   const realtime = Object.freeze({
     issueTicket: (accessToken: string) =>
-      unwrapBridge<SignalTicketResponse>(
+      unwrapBridge<RealtimeConnectionGrant>(
         bridge.realtime.issueTicket(accessToken),
         identity,
       ),

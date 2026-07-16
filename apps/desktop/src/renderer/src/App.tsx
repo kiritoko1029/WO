@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import type { DesktopApi } from '../../preload/types.js';
 import { createRendererDesktopApi } from './api/desktop-api.js';
@@ -6,19 +6,90 @@ import { AuthRoute } from './routes/AuthRoute.js';
 import { HomeRoute } from './routes/HomeRoute.js';
 import { RoomRoute } from './routes/RoomRoute.js';
 import { AuthProvider, useAuth } from './state/auth-store.js';
+import { RoomProvider, useRoom, type RoomGateway } from './state/room-store.js';
 import {
-  createUnavailableRoomGateway,
-  RoomProvider,
-  useRoom,
-  type RoomGateway,
-} from './state/room-store.js';
+  CallProvider,
+  createRealtimeRoomGateway,
+  type CallController,
+  type RealtimeRoomGateway,
+} from './state/call-store.js';
+import type { PublicAuthUser } from '@wo/protocol';
 
-function RoomRouter() {
+export type RoomGatewayFactory = (
+  desktop: DesktopApi,
+  user: PublicAuthUser,
+) => RealtimeRoomGateway;
+
+function RoomRouter({
+  gateway,
+  callController,
+}: {
+  readonly gateway: RoomGateway;
+  readonly callController?: CallController;
+}) {
   const room = useRoom();
-  return room.room === null ? <HomeRoute /> : <RoomRoute />;
+  return room.room === null ? (
+    <HomeRoute />
+  ) : (
+    <CallProvider
+      room={room.room}
+      gateway={gateway}
+      controller={callController}
+    >
+      <RoomRoute />
+    </CallProvider>
+  );
 }
 
-function AuthRouter({ roomGateway }: { readonly roomGateway: RoomGateway }) {
+function AuthenticatedRouter({
+  desktop,
+  roomGateway,
+  callController,
+  roomGatewayFactory,
+}: {
+  readonly desktop: DesktopApi;
+  readonly roomGateway?: RoomGateway;
+  readonly callController?: CallController;
+  readonly roomGatewayFactory?: RoomGatewayFactory;
+}) {
+  const auth = useAuth();
+  const session = auth.session!;
+  const realtimeGateway = useMemo(
+    () =>
+      roomGatewayFactory?.(desktop, session.user) ??
+      createRealtimeRoomGateway({ desktop, user: session.user }),
+    [desktop, roomGatewayFactory, session.user.userId],
+  );
+  const gateway = roomGateway ?? realtimeGateway;
+  const ownerMounts = useRef(0);
+  useEffect(() => {
+    if (roomGateway !== undefined) return;
+    ownerMounts.current += 1;
+    return () => {
+      ownerMounts.current -= 1;
+      queueMicrotask(() => {
+        if (ownerMounts.current === 0) realtimeGateway.dispose();
+      });
+    };
+  }, [realtimeGateway, roomGateway]);
+  return (
+    <RoomProvider gateway={gateway} accessToken={session.accessToken}>
+      <RoomRouter gateway={gateway} callController={callController} />
+    </RoomProvider>
+  );
+}
+
+function AuthRouter({
+  desktop,
+  roomGateway,
+  callController,
+  roomGatewayFactory,
+}: {
+  readonly desktop: DesktopApi;
+  readonly roomGateway?: RoomGateway;
+  readonly callController?: CallController;
+  readonly roomGatewayFactory?: RoomGatewayFactory;
+}) {
   const auth = useAuth();
   if (auth.status === 'restoring') {
     return (
@@ -31,27 +102,38 @@ function AuthRouter({ roomGateway }: { readonly roomGateway: RoomGateway }) {
     return <AuthRoute />;
   }
   return (
-    <RoomProvider gateway={roomGateway} accessToken={auth.session.accessToken}>
-      <RoomRouter />
-    </RoomProvider>
+    <AuthenticatedRouter
+      desktop={desktop}
+      roomGateway={roomGateway}
+      callController={callController}
+      roomGatewayFactory={roomGatewayFactory}
+    />
   );
 }
 
 export function App({
   desktop,
   roomGateway,
+  callController,
+  roomGatewayFactory,
 }: {
   readonly desktop?: DesktopApi;
   readonly roomGateway?: RoomGateway;
+  readonly callController?: CallController;
+  readonly roomGatewayFactory?: RoomGatewayFactory;
 }) {
   const api = useMemo(
     () => desktop ?? createRendererDesktopApi(window.desktop),
     [desktop],
   );
-  const fallbackGateway = useMemo(createUnavailableRoomGateway, []);
   return (
     <AuthProvider api={api}>
-      <AuthRouter roomGateway={roomGateway ?? fallbackGateway} />
+      <AuthRouter
+        desktop={api}
+        roomGateway={roomGateway}
+        callController={callController}
+        roomGatewayFactory={roomGatewayFactory}
+      />
     </AuthProvider>
   );
 }

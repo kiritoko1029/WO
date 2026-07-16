@@ -6,8 +6,10 @@ import {
   buildContentSecurityPolicy,
   createWindowOptions,
   installContentSecurityPolicy,
+  installMediaPermissionPolicy,
   installWindowSecurity,
   isAllowedRendererUrl,
+  type PermissionSession,
 } from '../src/main/window-security.js';
 
 describe('desktop window security', () => {
@@ -164,5 +166,161 @@ describe('desktop window security', () => {
     );
     expect(source).not.toContain('setCertificateVerifyProc');
     expect(source).not.toContain('certificate-error');
+  });
+
+  it('allows only trusted main-frame audio and speaker selection permissions', () => {
+    let requestHandler:
+      | ((
+          webContents: { getURL(): string },
+          permission: string,
+          callback: (allowed: boolean) => void,
+          details: {
+            mediaTypes?: readonly string[];
+            requestingUrl?: string;
+            isMainFrame?: boolean;
+          },
+        ) => void)
+      | undefined;
+    let checkHandler:
+      | ((
+          webContents: { getURL(): string } | null,
+          permission: string,
+          requestingOrigin: string,
+          details: {
+            mediaType?: string;
+            requestingUrl?: string;
+            isMainFrame?: boolean;
+          },
+        ) => boolean)
+      | undefined;
+    const session = {
+      setPermissionRequestHandler: vi.fn((handler) => {
+        requestHandler = handler;
+      }),
+      setPermissionCheckHandler: vi.fn((handler) => {
+        checkHandler = handler;
+      }),
+    };
+    const entry = 'http://127.0.0.1:5173/';
+    const trusted = { getURL: () => entry };
+    installMediaPermissionPolicy(session, entry);
+
+    const callback = vi.fn();
+    requestHandler?.(trusted, 'media', callback, {
+      mediaTypes: ['audio'],
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenLastCalledWith(true);
+    requestHandler?.(trusted, 'speaker-selection', callback, {
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenLastCalledWith(true);
+
+    for (const [contents, permission, details] of [
+      [
+        trusted,
+        'media',
+        { mediaTypes: ['video'], requestingUrl: entry, isMainFrame: true },
+      ],
+      [trusted, 'display-capture', { requestingUrl: entry, isMainFrame: true }],
+      [
+        trusted,
+        'media',
+        { mediaTypes: ['audio'], requestingUrl: entry, isMainFrame: false },
+      ],
+      [
+        { getURL: () => 'https://attacker.invalid/' },
+        'media',
+        { mediaTypes: ['audio'], requestingUrl: entry, isMainFrame: true },
+      ],
+      [
+        trusted,
+        'media',
+        {
+          mediaTypes: ['audio'],
+          requestingUrl: 'https://attacker.invalid/',
+          isMainFrame: true,
+        },
+      ],
+    ] as const) {
+      requestHandler?.(contents, permission, callback, details);
+      expect(callback).toHaveBeenLastCalledWith(false);
+    }
+
+    expect(
+      checkHandler?.(trusted, 'media', new URL(entry).origin, {
+        mediaType: 'audio',
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(true);
+    expect(
+      checkHandler?.(trusted, 'speaker-selection', new URL(entry).origin, {
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(true);
+    expect(
+      checkHandler?.(trusted, 'media', new URL(entry).origin, {
+        mediaType: 'video',
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(false);
+    expect(
+      checkHandler?.(trusted, 'media', new URL(entry).origin, {
+        mediaType: 'audio',
+        requestingUrl: entry,
+        isMainFrame: false,
+      }),
+    ).toBe(false);
+    expect(
+      checkHandler?.(trusted, 'geolocation', new URL(entry).origin, {
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(false);
+    expect(
+      checkHandler?.(null, 'media', new URL(entry).origin, {
+        mediaType: 'audio',
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts trusted packaged file main frames without relying on a file origin', () => {
+    let requestHandler:
+      | Parameters<PermissionSession['setPermissionRequestHandler']>[0]
+      | undefined;
+    let checkHandler:
+      Parameters<PermissionSession['setPermissionCheckHandler']>[0] | undefined;
+    const session = {
+      setPermissionRequestHandler: vi.fn((handler) => {
+        requestHandler = handler;
+      }),
+      setPermissionCheckHandler: vi.fn((handler) => {
+        checkHandler = handler;
+      }),
+    };
+    const entry = 'file:///C:/app/out/renderer/index.html';
+    const contents = { getURL: () => entry };
+    installMediaPermissionPolicy(session, entry);
+
+    const callback = vi.fn();
+    requestHandler?.(contents, 'media', callback, {
+      mediaTypes: ['audio'],
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenCalledWith(true);
+    expect(
+      checkHandler?.(contents, 'speaker-selection', 'file://', {
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(true);
   });
 });

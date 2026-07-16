@@ -19,7 +19,8 @@ export interface RoomSnapshot {
   readonly roomId: string;
   readonly roomCode: string;
   readonly role: 'creator' | 'joiner';
-  readonly connectionStatus: 'waiting' | 'connected' | 'reconnecting';
+  readonly connectionStatus:
+    'waiting' | 'connecting' | 'connected' | 'reconnecting';
   readonly participants: readonly RoomParticipant[];
 }
 

@@ -28,6 +28,37 @@ export interface SecuritySession {
   };
 }
 
+interface PermissionWebContents {
+  getURL(): string;
+}
+
+export interface PermissionSession {
+  setPermissionRequestHandler(
+    handler: (
+      webContents: PermissionWebContents,
+      permission: string,
+      callback: (allowed: boolean) => void,
+      details: {
+        readonly mediaTypes?: readonly string[];
+        readonly requestingUrl?: string;
+        readonly isMainFrame?: boolean;
+      },
+    ) => void,
+  ): void;
+  setPermissionCheckHandler(
+    handler: (
+      webContents: PermissionWebContents | null,
+      permission: string,
+      requestingOrigin: string,
+      details: {
+        readonly mediaType?: string;
+        readonly requestingUrl?: string;
+        readonly isMainFrame?: boolean;
+      },
+    ) => boolean,
+  ): void;
+}
+
 export function createWindowOptions(
   preloadPath: string,
 ): BrowserWindowConstructorOptions {
@@ -70,6 +101,50 @@ export function installWindowSecurity(
       event.preventDefault();
     }
   });
+}
+
+function trustedContents(
+  webContents: PermissionWebContents | null,
+  rendererEntry: string,
+): boolean {
+  return (
+    webContents !== null &&
+    isAllowedRendererUrl(webContents.getURL(), rendererEntry)
+  );
+}
+
+export function installMediaPermissionPolicy(
+  session: PermissionSession,
+  rendererEntry: string,
+): void {
+  session.setPermissionRequestHandler(
+    (webContents, permission, callback, details) => {
+      const trusted =
+        trustedContents(webContents, rendererEntry) &&
+        details.requestingUrl === rendererEntry &&
+        details.isMainFrame === true;
+      const audioOnly =
+        permission === 'media' &&
+        details.mediaTypes?.length === 1 &&
+        details.mediaTypes[0] === 'audio';
+      callback(trusted && (audioOnly || permission === 'speaker-selection'));
+    },
+  );
+  session.setPermissionCheckHandler(
+    (webContents, permission, _requestingOrigin, details) => {
+      if (
+        !trustedContents(webContents, rendererEntry) ||
+        details.requestingUrl !== rendererEntry ||
+        details.isMainFrame !== true
+      ) {
+        return false;
+      }
+      return (
+        permission === 'speaker-selection' ||
+        (permission === 'media' && details.mediaType === 'audio')
+      );
+    },
+  );
 }
 
 export function buildContentSecurityPolicy(realtimeOrigin: string): string {

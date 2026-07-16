@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from '../src/renderer/src/App.js';
+import type {
+  CallController,
+  RealtimeRoomGateway,
+} from '../src/renderer/src/state/call-store.js';
 import type {
   RoomGateway,
   RoomGatewayEvent,
@@ -274,5 +279,147 @@ describe('desktop account and room workflow', () => {
 
     await waitForAuthScreen();
     expect(desktop.auth.logout).toHaveBeenCalledOnce();
+  });
+
+  it('wires real call settings, mute, output mute and ordered hangup controls', async () => {
+    const user = userEvent.setup();
+    const order: string[] = [];
+    let cleanupPromise: Promise<void> | null = null;
+    const callSnapshot = {
+      status: 'connected' as const,
+      error: null,
+      muted: false,
+      outputMuted: false,
+      inputs: [
+        { deviceId: 'mic-1', label: '内置麦克风' },
+        { deviceId: 'mic-2', label: 'USB 麦克风' },
+      ],
+      outputs: [{ deviceId: 'speaker-1', label: '内置扬声器' }],
+      selectedInputId: 'mic-1',
+      selectedOutputId: 'speaker-1',
+      supportsOutputSelection: true,
+      microphoneRetryAvailable: false,
+    };
+    const call = {
+      getSnapshot: () => callSnapshot,
+      subscribe: vi.fn(() => () => undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      setMuted: vi.fn(),
+      switchMicrophone: vi.fn().mockResolvedValue(undefined),
+      setOutputMuted: vi.fn(),
+      selectOutput: vi.fn().mockResolvedValue(undefined),
+      cleanup: vi.fn(() => {
+        if (cleanupPromise !== null) return cleanupPromise;
+        order.push('call-cleanup');
+        cleanupPromise = Promise.reject(new Error('cleanup failed'));
+        return cleanupPromise;
+      }),
+    } satisfies CallController;
+    const gateway = createRoomGateway();
+    gateway.endRoom.mockImplementation(async () => {
+      order.push('room-end');
+    });
+    render(
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={gateway}
+        callController={call}
+      />,
+    );
+    await waitForHome();
+    await user.click(screen.getByRole('button', { name: '创建房间' }));
+    await screen.findByText('语音已连接');
+
+    await user.click(screen.getByRole('button', { name: '静音' }));
+    await user.click(screen.getByRole('button', { name: '设置' }));
+    await user.selectOptions(screen.getByLabelText('麦克风'), 'mic-2');
+    await user.selectOptions(screen.getByLabelText('扬声器'), 'speaker-1');
+    await user.click(screen.getByRole('button', { name: '静音扬声器' }));
+    await user.click(screen.getByRole('button', { name: '挂断' }));
+
+    expect(call.start).toHaveBeenCalledOnce();
+    expect(call.setMuted).toHaveBeenCalledWith(true);
+    expect(call.switchMicrophone).toHaveBeenCalledWith('mic-2');
+    expect(call.selectOutput).toHaveBeenCalledWith('speaker-1');
+    expect(call.setOutputMuted).toHaveBeenCalledWith(true);
+    expect(order).toEqual(['call-cleanup', 'room-end']);
+  });
+
+  it('keeps an owned realtime gateway alive through StrictMode and disposes it on real unmount', async () => {
+    const user = userEvent.setup();
+    const listeners = new Set<(event: RoomGatewayEvent) => void>();
+    const dispose = vi.fn(() => listeners.clear());
+    const gateway = {
+      kind: 'realtime' as const,
+      signaling: {} as RealtimeRoomGateway['signaling'],
+      createRoom: vi.fn().mockResolvedValue(waitingRoom),
+      joinRoom: vi.fn(),
+      leaveRoom: vi.fn(),
+      endRoom: vi.fn(),
+      markReady: vi.fn(),
+      getCallSession: vi.fn(() => null),
+      subscribe(listener: (event: RoomGatewayEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      dispose,
+      emit(event: RoomGatewayEvent) {
+        for (const listener of listeners) listener(event);
+      },
+    } satisfies RealtimeRoomGateway & { emit(event: RoomGatewayEvent): void };
+    const callSnapshot = {
+      status: 'connected' as const,
+      error: null,
+      muted: false,
+      outputMuted: false,
+      inputs: [],
+      outputs: [],
+      selectedInputId: '',
+      selectedOutputId: '',
+      supportsOutputSelection: false,
+      microphoneRetryAvailable: false,
+    };
+    const call = {
+      getSnapshot: () => callSnapshot,
+      subscribe: () => () => undefined,
+      start: vi.fn().mockResolvedValue(undefined),
+      setMuted: vi.fn(),
+      switchMicrophone: vi.fn(),
+      setOutputMuted: vi.fn(),
+      selectOutput: vi.fn(),
+      cleanup: vi.fn().mockResolvedValue(undefined),
+    } satisfies CallController;
+    const rendered = render(
+      <StrictMode>
+        <App
+          desktop={createDesktop(session)}
+          roomGatewayFactory={() => gateway}
+          callController={call}
+        />
+      </StrictMode>,
+    );
+    await waitForHome();
+    await user.click(screen.getByRole('button', { name: '创建房间' }));
+    gateway.emit({
+      type: 'snapshot',
+      room: {
+        ...waitingRoom,
+        connectionStatus: 'connecting',
+        participants: [
+          ...waitingRoom.participants,
+          {
+            userId: 'user-2',
+            displayName: '林远',
+            isSelf: false,
+            online: true,
+          },
+        ],
+      },
+    });
+
+    expect(await screen.findByText('林远')).toBeTruthy();
+    expect(dispose).not.toHaveBeenCalled();
+    rendered.unmount();
+    await waitFor(() => expect(dispose).toHaveBeenCalledOnce());
   });
 });

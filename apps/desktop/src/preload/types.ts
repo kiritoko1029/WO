@@ -13,6 +13,10 @@ export interface PublicAuthSession {
   readonly accessTokenExpiresAt: number;
 }
 
+export interface RealtimeConnectionGrant extends SignalTicketResponse {
+  readonly endpoint: string;
+}
+
 export interface DesktopApi {
   readonly auth: {
     register(input: AuthRegisterBody): Promise<PublicAuthSession>;
@@ -21,7 +25,7 @@ export interface DesktopApi {
     logout(): Promise<void>;
   };
   readonly realtime: {
-    issueTicket(accessToken: string): Promise<SignalTicketResponse>;
+    issueTicket(accessToken: string): Promise<RealtimeConnectionGrant>;
   };
 }
 
@@ -37,6 +41,6 @@ export interface DesktopBridge {
   readonly realtime: {
     issueTicket(
       accessToken: string,
-    ): Promise<DesktopIpcEnvelope<SignalTicketResponse>>;
+    ): Promise<DesktopIpcEnvelope<RealtimeConnectionGrant>>;
   };
 }

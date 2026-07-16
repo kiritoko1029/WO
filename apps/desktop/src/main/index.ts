@@ -14,6 +14,7 @@ import {
   buildContentSecurityPolicy,
   createWindowOptions,
   installContentSecurityPolicy,
+  installMediaPermissionPolicy,
   installWindowSecurity,
 } from './window-security.js';
 
@@ -47,6 +48,10 @@ function createMainWindow(): BrowserWindow {
     csp,
   );
   installWindowSecurity(window.webContents, runtime.rendererEntry);
+  installMediaPermissionPolicy(
+    window.webContents.session,
+    runtime.rendererEntry,
+  );
   window.once('ready-to-show', () => window.show());
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
@@ -63,7 +68,10 @@ if (ownsSingleInstance) {
   });
   const http = createMainHttpClient({ apiOrigin: runtime.apiOrigin });
   const auth = createAuthSessionBroker({ http, sessionStore });
-  const realtime = createRealtimeTicketBroker({ http });
+  const realtime = createRealtimeTicketBroker({
+    http,
+    realtimeOrigin: runtime.realtimeOrigin,
+  });
   registerDesktopIpc(ipcMain, {
     auth,
     realtime,

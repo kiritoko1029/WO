@@ -10,6 +10,7 @@ import {
   type DesktopIpcEnvelope,
 } from './ipc-envelope.js';
 import type { DesktopBridge, PublicAuthSession } from './types.js';
+import type { RealtimeConnectionGrant } from './types.js';
 
 export type Invoke = (
   channel: string,
@@ -48,6 +49,37 @@ function parsePublicAuthSession(input: unknown): PublicAuthSession {
 function parseNull(input: unknown): null {
   if (input !== null) throw new TypeError('Expected null');
   return null;
+}
+
+function parseRealtimeConnectionGrant(input: unknown): RealtimeConnectionGrant {
+  if (!isRecord(input)) throw new TypeError('Invalid realtime grant');
+  const keys = Object.keys(input);
+  if (
+    keys.length !== 3 ||
+    !keys.includes('endpoint') ||
+    !keys.includes('ticket') ||
+    !keys.includes('expiresInSeconds') ||
+    typeof input.endpoint !== 'string'
+  ) {
+    throw new TypeError('Invalid realtime grant');
+  }
+  const endpoint = new URL(input.endpoint);
+  if (
+    endpoint.protocol !== 'wss:' ||
+    endpoint.pathname !== '/v1/realtime' ||
+    endpoint.search !== '' ||
+    endpoint.hash !== '' ||
+    endpoint.username !== '' ||
+    endpoint.password !== '' ||
+    endpoint.href !== input.endpoint
+  ) {
+    throw new TypeError('Invalid realtime grant');
+  }
+  const ticket = signalTicketResponseSchema.parse({
+    ticket: input.ticket,
+    expiresInSeconds: input.expiresInSeconds,
+  });
+  return Object.freeze({ endpoint: endpoint.href, ...ticket });
 }
 
 async function invokeDesktop<Value>(
@@ -91,7 +123,7 @@ export function createDesktopApi(invoke: Invoke): Readonly<DesktopBridge> {
         invoke,
         'desktop:realtime:issue-ticket',
         [accessToken],
-        (input) => signalTicketResponseSchema.parse(input),
+        parseRealtimeConnectionGrant,
       ),
   });
   return Object.freeze({ auth, realtime });

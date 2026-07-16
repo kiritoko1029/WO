@@ -1,0 +1,161 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import {
+  configureJoinerTransceiverPlan,
+  createCreatorTransceiverPlan,
+  reorderPreferredCodecs,
+} from '../src/renderer/src/media/transceiver-plan.js';
+
+const codec = (mimeType: string, sdpFmtpLine?: string): RTCRtpCodec => ({
+  mimeType,
+  clockRate: 90_000,
+  sdpFmtpLine,
+});
+
+function transceiver(
+  kind: 'audio' | 'video',
+  mid: string | null,
+  withPreferences = true,
+) {
+  return {
+    mid,
+    direction: 'recvonly' as RTCRtpTransceiverDirection,
+    receiver: { track: { kind } },
+    sender: { replaceTrack: vi.fn().mockResolvedValue(undefined) },
+    setCodecPreferences: withPreferences ? vi.fn() : undefined,
+  };
+}
+
+describe('fixed transceiver plan', () => {
+  it('creates exactly one audio and one single-layer screen transceiver for the creator', () => {
+    const audio = transceiver('audio', '0');
+    const screen = transceiver('video', '1');
+    const pc = {
+      addTransceiver: vi
+        .fn()
+        .mockReturnValueOnce(audio)
+        .mockReturnValueOnce(screen),
+    };
+
+    const result = createCreatorTransceiverPlan(
+      pc as unknown as RTCPeerConnection,
+      {
+        audio: [codec('audio/PCMU'), codec('audio/opus')],
+        video: [
+          codec('video/VP8'),
+          codec('video/H264', 'packetization-mode=1;profile-level-id=42e01f'),
+          codec('video/rtx'),
+        ],
+      },
+    );
+
+    expect(result).toEqual({ audio, screen });
+    expect(pc.addTransceiver.mock.calls).toEqual([
+      ['audio', { direction: 'sendrecv' }],
+      [
+        'video',
+        {
+          direction: 'sendrecv',
+          sendEncodings: [
+            {
+              rid: 'f',
+              active: true,
+              maxBitrate: 8_000_000,
+              scalabilityMode: 'L1T1',
+              scaleResolutionDownBy: 1,
+            },
+          ],
+        },
+      ],
+    ]);
+    expect(audio.setCodecPreferences).toHaveBeenCalledWith([
+      expect.objectContaining({ mimeType: 'audio/opus' }),
+      expect.objectContaining({ mimeType: 'audio/PCMU' }),
+    ]);
+    expect(screen.setCodecPreferences).toHaveBeenCalledWith([
+      expect.objectContaining({ mimeType: 'video/H264' }),
+      expect.objectContaining({ mimeType: 'video/VP8' }),
+      expect.objectContaining({ mimeType: 'video/rtx' }),
+    ]);
+  });
+
+  it('reorders a preferred codec without dropping fallback, RTX, or FEC entries', () => {
+    const codecs = [
+      codec('audio/PCMU'),
+      codec('audio/red'),
+      codec('audio/opus'),
+      codec('audio/CN'),
+    ];
+
+    expect(reorderPreferredCodecs(codecs, 'audio/opus')).toEqual([
+      codecs[2],
+      codecs[0],
+      codecs[1],
+      codecs[3],
+    ]);
+    expect(reorderPreferredCodecs(codecs, 'audio/missing')).toBeNull();
+  });
+
+  it('maps joiner transceivers after the remote offer without creating duplicates', async () => {
+    const audio = transceiver('audio', '0');
+    const screen = transceiver('video', '1');
+    const microphone = { kind: 'audio' } as MediaStreamTrack;
+    const pc = {
+      addTransceiver: vi.fn(),
+      getTransceivers: vi.fn(() => [screen, audio]),
+    };
+
+    const result = await configureJoinerTransceiverPlan(
+      pc as unknown as RTCPeerConnection,
+      microphone,
+      {
+        audio: [codec('audio/opus'), codec('audio/PCMU')],
+        video: [codec('video/H264'), codec('video/VP8')],
+      },
+    );
+
+    expect(result).toEqual({ audio, screen });
+    expect(pc.addTransceiver).not.toHaveBeenCalled();
+    expect(audio.direction).toBe('sendrecv');
+    expect(screen.direction).toBe('sendrecv');
+    expect(audio.sender.replaceTrack).toHaveBeenCalledWith(microphone);
+    expect(audio.setCodecPreferences).toHaveBeenCalledBefore(
+      screen.setCodecPreferences!,
+    );
+  });
+
+  it.each([
+    [[transceiver('audio', '0')], 'exactly one audio and one video'],
+    [[transceiver('audio', null), transceiver('video', '1')], 'non-null MID'],
+    [[transceiver('audio', '0'), transceiver('video', '0')], 'unique MID'],
+  ])('rejects an ambiguous remote transceiver map', async (items, message) => {
+    await expect(
+      configureJoinerTransceiverPlan(
+        {
+          getTransceivers: () => items,
+          addTransceiver: vi.fn(),
+        } as unknown as RTCPeerConnection,
+        { kind: 'audio' } as MediaStreamTrack,
+        { audio: [], video: [] },
+      ),
+    ).rejects.toThrow(message);
+  });
+
+  it('falls back to standards negotiation when codec preferences are unsupported or absent', () => {
+    const audio = transceiver('audio', '0', false);
+    const screen = transceiver('video', '1', false);
+    const pc = {
+      addTransceiver: vi
+        .fn()
+        .mockReturnValueOnce(audio)
+        .mockReturnValueOnce(screen),
+    };
+
+    expect(() =>
+      createCreatorTransceiverPlan(pc as unknown as RTCPeerConnection, {
+        audio: [codec('audio/PCMU')],
+        video: [codec('video/VP8')],
+      }),
+    ).not.toThrow();
+  });
+});

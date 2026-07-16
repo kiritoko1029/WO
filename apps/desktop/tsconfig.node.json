@@ -16,5 +16,5 @@
     "test/**/*.ts",
     "vitest.config.ts"
   ],
-  "exclude": ["test/app.test.tsx"]
+  "exclude": ["test/app.test.tsx", "test/call-store.test.ts"]
 }
