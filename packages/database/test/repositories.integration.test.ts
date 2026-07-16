@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   afterAll,
@@ -12,12 +12,15 @@ import {
 import {
   createDatabaseClient,
   createIdentityRepository,
-  createSessionRepository,
+  createSessionRepository as createRawSessionRepository,
   migrateDatabase,
   parseRefreshTokenHash,
   type DatabaseClient,
+  type CreateRefreshSessionInput,
   type IdentityRepository,
+  type RotateRefreshSessionInput,
   type SessionRepository,
+  type SessionRepositoryDependencies,
 } from '../src/index.js';
 
 const databaseUrl = process.env['TEST_DATABASE_URL'];
@@ -31,6 +34,56 @@ if (!databaseUrl) {
 const BASE_TIME = new Date('2026-07-16T00:00:00.000Z');
 const USER_ONE_ID = '00000000-0000-4000-8000-000000000001';
 const USER_TWO_ID = '00000000-0000-4000-8000-000000000002';
+const SESSION_ONE_ID = '10000000-0000-4000-8000-000000000001';
+const FAMILY_ONE_ID = '20000000-0000-4000-8000-000000000001';
+const FAMILY_TWO_ID = '20000000-0000-4000-8000-000000000002';
+const IDENTITY_TWO_ID = '30000000-0000-4000-8000-000000000002';
+
+type TestCreateRefreshSessionInput = Omit<
+  CreateRefreshSessionInput,
+  'sessionId' | 'familyId'
+> &
+  Partial<Pick<CreateRefreshSessionInput, 'sessionId' | 'familyId'>>;
+type TestRotateRefreshSessionInput = Omit<
+  RotateRefreshSessionInput,
+  'replacementSessionId'
+> &
+  Partial<Pick<RotateRefreshSessionInput, 'replacementSessionId'>>;
+type TestSessionRepository = Omit<
+  SessionRepository,
+  'createRefreshSession' | 'rotateRefreshSession'
+> & {
+  createRefreshSession(
+    input: TestCreateRefreshSessionInput,
+  ): ReturnType<SessionRepository['createRefreshSession']>;
+  rotateRefreshSession(
+    input: TestRotateRefreshSessionInput,
+  ): ReturnType<SessionRepository['rotateRefreshSession']>;
+};
+
+function createSessionRepository(
+  client: DatabaseClient,
+  dependencies: SessionRepositoryDependencies = {},
+): TestSessionRepository {
+  const repository = createRawSessionRepository(client, dependencies);
+  return {
+    createRefreshSession: (input) =>
+      repository.createRefreshSession({
+        ...input,
+        sessionId: input.sessionId ?? randomUUID(),
+        familyId: input.familyId ?? randomUUID(),
+      }),
+    rotateRefreshSession: (input) =>
+      repository.rotateRefreshSession({
+        ...input,
+        replacementSessionId: input.replacementSessionId ?? randomUUID(),
+      }),
+    findRefreshSessionUserId: (tokenHash) =>
+      repository.findRefreshSessionUserId(tokenHash),
+    revokeRefreshTokenFamily: (input) =>
+      repository.revokeRefreshTokenFamily(input),
+  };
+}
 
 function tokenHash(value: string) {
   return parseRefreshTokenHash(
@@ -52,7 +105,7 @@ async function expectCode(
 describe('PostgreSQL identity and refresh-session repositories', () => {
   let client: DatabaseClient;
   let identityRepository: IdentityRepository;
-  let sessionRepository: SessionRepository;
+  let sessionRepository: TestSessionRepository;
   let now: Date;
 
   beforeAll(async () => {
@@ -235,6 +288,59 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
     ]);
   });
 
+  test('looks up an email credential through its canonical identity', async () => {
+    await createUser(USER_ONE_ID, '  Person@Example.COM  ');
+
+    const credential = await identityRepository.findEmailCredential(
+      ' PERSON@example.com ',
+    );
+
+    expect(credential).toEqual({
+      emailNormalized: 'person@example.com',
+      passwordHash: '$argon2id$redacted',
+      user: {
+        id: USER_ONE_ID,
+        displayName: 'Person',
+        createdAt: BASE_TIME,
+        disabledAt: null,
+      },
+    });
+    expect(
+      await identityRepository.findEmailCredential('other@example.com'),
+    ).toBeNull();
+  });
+
+  test('returns disabled state with an email credential without exposing session secrets', async () => {
+    await createUser();
+    const disabledAt = new Date('2026-07-16T04:00:00.000Z');
+    await identityRepository.disableUser(USER_ONE_ID, disabledAt);
+
+    const credential =
+      await identityRepository.findEmailCredential('person@example.com');
+
+    expect(credential?.user.disabledAt).toEqual(disabledAt);
+    expect(credential).not.toHaveProperty('tokenHash');
+    expect(credential).not.toHaveProperty('refreshTokenHash');
+  });
+
+  test('loads public email user data by user id without returning credentials', async () => {
+    await createUser(USER_ONE_ID, 'Person@Example.COM');
+
+    const publicUser = await identityRepository.findEmailUserById(USER_ONE_ID);
+
+    expect(publicUser).toEqual({
+      emailNormalized: 'person@example.com',
+      user: {
+        id: USER_ONE_ID,
+        displayName: 'Person',
+        createdAt: BASE_TIME,
+        disabledAt: null,
+      },
+    });
+    expect(publicUser).not.toHaveProperty('passwordHash');
+    expect(await identityRepository.findEmailUserById(USER_TWO_ID)).toBeNull();
+  });
+
   test('maps duplicate normalized email identities to a stable domain error and rolls back', async () => {
     await createUser(USER_ONE_ID, '  Person@Example.COM ');
 
@@ -396,17 +502,123 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
     const hashedToken = tokenHash(rawToken);
 
     const session = await sessionRepository.createRefreshSession({
+      sessionId: SESSION_ONE_ID,
+      familyId: FAMILY_ONE_ID,
       userId: USER_ONE_ID,
       tokenHash: hashedToken,
       expiresAt: new Date('2026-08-16T00:00:00.000Z'),
     });
 
+    expect(session.id).toBe(SESSION_ONE_ID);
+    expect(session.familyId).toBe(FAMILY_ONE_ID);
     expect(session).not.toHaveProperty('tokenHash');
     const [stored] = await client.sql<{ token_hash: string }[]>`
       SELECT token_hash FROM refresh_sessions WHERE id = ${session.id}
     `;
     expect(stored?.token_hash).toBe(hashedToken);
     expect(stored?.token_hash).not.toContain(rawToken);
+  });
+
+  test('finds only the refresh-session user id without returning token material', async () => {
+    await createUser();
+    const hashedToken = tokenHash('lookup-principal');
+    await sessionRepository.createRefreshSession({
+      sessionId: SESSION_ONE_ID,
+      familyId: FAMILY_ONE_ID,
+      userId: USER_ONE_ID,
+      tokenHash: hashedToken,
+      expiresAt: new Date('2026-08-16T00:00:00.000Z'),
+    });
+
+    expect(sessionRepository).toHaveProperty('findRefreshSessionUserId');
+    await expect(
+      sessionRepository.findRefreshSessionUserId(hashedToken),
+    ).resolves.toBe(USER_ONE_ID);
+    await expect(
+      sessionRepository.findRefreshSessionUserId(tokenHash('missing')),
+    ).resolves.toBeNull();
+  });
+
+  test('rejects noncanonical application-generated session UUIDs before persistence', async () => {
+    await createUser();
+
+    await expect(
+      sessionRepository.createRefreshSession({
+        sessionId: 'not-a-uuid',
+        familyId: FAMILY_ONE_ID,
+        userId: USER_ONE_ID,
+        tokenHash: tokenHash('invalid-session-id'),
+        expiresAt: new Date('2026-08-16T00:00:00.000Z'),
+      }),
+    ).rejects.toThrow(/session id.*uuid/iu);
+
+    const [{ count }] = await client.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM refresh_sessions
+    `;
+    expect(count).toBe(0);
+  });
+
+  test('rolls back all four authentication tables when initial session persistence conflicts', async () => {
+    await createUser();
+    await sessionRepository.createRefreshSession({
+      sessionId: SESSION_ONE_ID,
+      familyId: FAMILY_ONE_ID,
+      userId: USER_ONE_ID,
+      tokenHash: tokenHash('existing-session'),
+      expiresAt: new Date('2026-08-16T00:00:00.000Z'),
+    });
+    const before = await client.sql<
+      {
+        users: number;
+        identities: number;
+        credentials: number;
+        sessions: number;
+      }[]
+    >`
+      SELECT
+        (SELECT count(*)::int FROM users) AS users,
+        (SELECT count(*)::int FROM auth_identities) AS identities,
+        (SELECT count(*)::int FROM password_credentials) AS credentials,
+        (SELECT count(*)::int FROM refresh_sessions) AS sessions
+    `;
+
+    expect(identityRepository).toHaveProperty(
+      'createEmailUserWithRefreshSession',
+    );
+    await expect(
+      identityRepository.createEmailUserWithRefreshSession({
+        userId: USER_TWO_ID,
+        identityId: IDENTITY_TWO_ID,
+        emailNormalized: 'second@example.com',
+        displayName: 'Second',
+        passwordHash: '$argon2id$redacted',
+        session: {
+          sessionId: SESSION_ONE_ID,
+          familyId: FAMILY_TWO_ID,
+          tokenHash: tokenHash('new-session'),
+          expiresAt: new Date('2026-08-16T00:00:00.000Z'),
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'REFRESH_SESSION_CONFLICT' });
+
+    const after = await client.sql<
+      {
+        users: number;
+        identities: number;
+        credentials: number;
+        sessions: number;
+      }[]
+    >`
+      SELECT
+        (SELECT count(*)::int FROM users) AS users,
+        (SELECT count(*)::int FROM auth_identities) AS identities,
+        (SELECT count(*)::int FROM password_credentials) AS credentials,
+        (SELECT count(*)::int FROM refresh_sessions) AS sessions
+    `;
+    expect(after).toEqual(before);
+    await expect(
+      identityRepository.findEmailCredential('second@example.com'),
+    ).resolves.toBeNull();
   });
 
   test('snapshots create-session clock and expiry before awaiting the transaction', async () => {
@@ -529,6 +741,62 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
     `;
     expect(timestampIso(stored?.created_at ?? null)).toBe(originalClock);
     expect(timestampIso(stored?.expires_at ?? null)).toBe(originalExpiry);
+  });
+
+  test('revokes one refresh-token family by a presented token and is idempotent', async () => {
+    await createUser();
+    const originalHash = tokenHash('logout-original');
+    const replacementHash = tokenHash('logout-replacement');
+    const otherFamilyHash = tokenHash('other-family');
+    const original = await sessionRepository.createRefreshSession({
+      userId: USER_ONE_ID,
+      tokenHash: originalHash,
+      expiresAt: new Date('2026-08-16T00:00:00.000Z'),
+    });
+    await sessionRepository.rotateRefreshSession({
+      presentedTokenHash: originalHash,
+      replacementTokenHash: replacementHash,
+      replacementExpiresAt: new Date('2026-08-16T00:00:00.000Z'),
+    });
+    await sessionRepository.createRefreshSession({
+      userId: USER_ONE_ID,
+      tokenHash: otherFamilyHash,
+      expiresAt: new Date('2026-08-16T00:00:00.000Z'),
+    });
+
+    now = new Date('2026-07-16T00:15:00.000Z');
+    const first = await sessionRepository.revokeRefreshTokenFamily({
+      presentedTokenHash: replacementHash,
+    });
+    const second = await sessionRepository.revokeRefreshTokenFamily({
+      presentedTokenHash: originalHash,
+    });
+
+    expect(first).toEqual({
+      userId: USER_ONE_ID,
+      familyId: original.familyId,
+      revokedAt: now,
+    });
+    expect(second).toEqual(first);
+    expect(first).not.toHaveProperty('tokenHash');
+
+    const rows = await client.sql<
+      { family_id: string; revoked_at: Date | string | null }[]
+    >`
+      SELECT family_id, revoked_at
+      FROM refresh_sessions
+      ORDER BY created_at, id
+    `;
+    expect(
+      rows
+        .filter(({ family_id }) => family_id === original.familyId)
+        .every(
+          ({ revoked_at }) => timestampIso(revoked_at) === now.toISOString(),
+        ),
+    ).toBe(true);
+    expect(
+      rows.find(({ family_id }) => family_id !== original.familyId)?.revoked_at,
+    ).toBeNull();
   });
 
   test('rejects invalid repository dates before changing persistence', async () => {

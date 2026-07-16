@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import type postgres from 'postgres';
 
 import {
@@ -8,6 +6,7 @@ import {
   toUtcTimestamp,
   type DatabaseClient,
 } from './client.js';
+import { assertCanonicalUuid } from './database-uuid.js';
 
 declare const refreshTokenHashBrand: unique symbol;
 
@@ -65,20 +64,32 @@ export interface RefreshSessionRecord {
 }
 
 export interface CreateRefreshSessionInput {
+  readonly sessionId: string;
+  readonly familyId: string;
   readonly userId: string;
   readonly tokenHash: RefreshTokenHash;
   readonly expiresAt: Date;
 }
 
 export interface RotateRefreshSessionInput {
+  readonly replacementSessionId: string;
   readonly presentedTokenHash: RefreshTokenHash;
   readonly replacementTokenHash: RefreshTokenHash;
   readonly replacementExpiresAt: Date;
 }
 
+export interface RevokeRefreshTokenFamilyInput {
+  readonly presentedTokenHash: RefreshTokenHash;
+}
+
+export interface RefreshTokenFamilyRevocationRecord {
+  readonly userId: string;
+  readonly familyId: string;
+  readonly revokedAt: Date;
+}
+
 export interface SessionRepositoryDependencies {
   readonly now?: () => Date;
-  readonly randomUUID?: () => string;
 }
 
 export interface SessionRepository {
@@ -88,6 +99,10 @@ export interface SessionRepository {
   rotateRefreshSession(
     input: RotateRefreshSessionInput,
   ): Promise<RefreshSessionRecord>;
+  findRefreshSessionUserId(tokenHash: RefreshTokenHash): Promise<string | null>;
+  revokeRefreshTokenFamily(
+    input: RevokeRefreshTokenFamilyInput,
+  ): Promise<RefreshTokenFamilyRevocationRecord>;
 }
 
 interface PostgreSqlError {
@@ -105,6 +120,13 @@ interface LockedSessionRow {
 
 type SessionOutcome =
   | { readonly ok: true; readonly session: RefreshSessionRecord }
+  | { readonly ok: false; readonly code: SessionRepositoryErrorCode };
+
+type RevocationOutcome =
+  | {
+      readonly ok: true;
+      readonly revocation: RefreshTokenFamilyRevocationRecord;
+    }
   | { readonly ok: false; readonly code: SessionRepositoryErrorCode };
 
 function isUniqueViolation(error: unknown): error is PostgreSqlError {
@@ -154,6 +176,15 @@ function throwIfFailed(outcome: SessionOutcome): RefreshSessionRecord {
   return outcome.session;
 }
 
+function throwIfRevocationFailed(
+  outcome: RevocationOutcome,
+): RefreshTokenFamilyRevocationRecord {
+  if (!outcome.ok) {
+    throw new SessionRepositoryError(outcome.code);
+  }
+  return outcome.revocation;
+}
+
 type TransactionSql = postgres.TransactionSql;
 
 async function lockUser(
@@ -174,17 +205,19 @@ export function createSessionRepository(
   dependencies: SessionRepositoryDependencies = {},
 ): SessionRepository {
   const now = dependencies.now ?? (() => new Date());
-  const createUuid = dependencies.randomUUID ?? randomUUID;
 
   return {
     async createRefreshSession(input) {
       assertTokenHash(input.tokenHash);
+      assertCanonicalUuid(input.sessionId, 'Session id');
+      assertCanonicalUuid(input.familyId, 'Session family id');
+      assertCanonicalUuid(input.userId, 'User id');
       const createdAt = cloneValidDate(now());
       const expiresAt = cloneValidDate(input.expiresAt);
       const createdAtTimestamp = toUtcTimestamp(createdAt);
       const expiresAtTimestamp = toUtcTimestamp(expiresAt);
-      const id = createUuid();
-      const familyId = createUuid();
+      const id = input.sessionId;
+      const familyId = input.familyId;
 
       try {
         const outcome = await withDeadlockRetry(async () =>
@@ -246,6 +279,7 @@ export function createSessionRepository(
     async rotateRefreshSession(input) {
       assertTokenHash(input.presentedTokenHash);
       assertTokenHash(input.replacementTokenHash);
+      assertCanonicalUuid(input.replacementSessionId, 'Replacement session id');
       const rotatedAt = cloneValidDate(now());
       const replacementExpiresAt = cloneValidDate(input.replacementExpiresAt);
       const rotatedAtTimestamp = toUtcTimestamp(rotatedAt);
@@ -309,7 +343,7 @@ export function createSessionRepository(
               return { ok: false, code: 'REFRESH_SESSION_EXPIRED' };
             }
 
-            const replacementId = createUuid();
+            const replacementId = input.replacementSessionId;
             await transaction`
             UPDATE refresh_sessions
             SET rotated_at = ${rotatedAtTimestamp}
@@ -359,6 +393,79 @@ export function createSessionRepository(
         }
         throw error;
       }
+    },
+
+    async findRefreshSessionUserId(tokenHash) {
+      assertTokenHash(tokenHash);
+      const rows = await client.sql<{ user_id: string }[]>`
+        SELECT user_id
+        FROM refresh_sessions
+        WHERE token_hash = ${tokenHash}
+      `;
+      return rows[0]?.user_id ?? null;
+    },
+
+    async revokeRefreshTokenFamily(input) {
+      assertTokenHash(input.presentedTokenHash);
+      const revokedAt = cloneValidDate(now());
+      const revokedAtTimestamp = toUtcTimestamp(revokedAt);
+
+      const outcome = await withDeadlockRetry(async () =>
+        client.sql.begin<RevocationOutcome>(async (transaction) => {
+          const identities = await transaction<{ user_id: string }[]>`
+            SELECT user_id
+            FROM refresh_sessions
+            WHERE token_hash = ${input.presentedTokenHash}
+          `;
+          const identity = identities[0];
+          if (!identity) {
+            return { ok: false, code: 'REFRESH_SESSION_NOT_FOUND' };
+          }
+
+          const user = await lockUser(transaction, identity.user_id);
+          if (!user) {
+            return { ok: false, code: 'REFRESH_SESSION_NOT_FOUND' };
+          }
+
+          const rows = await transaction<LockedSessionRow[]>`
+            SELECT
+              id,
+              user_id,
+              family_id,
+              expires_at,
+              rotated_at,
+              revoked_at
+            FROM refresh_sessions
+            WHERE
+              token_hash = ${input.presentedTokenHash}
+              AND user_id = ${identity.user_id}
+            FOR UPDATE
+          `;
+          const presented = rows[0];
+          if (!presented) {
+            return { ok: false, code: 'REFRESH_SESSION_NOT_FOUND' };
+          }
+
+          await transaction`
+            UPDATE refresh_sessions
+            SET revoked_at = COALESCE(revoked_at, ${revokedAtTimestamp})
+            WHERE family_id = ${presented.family_id}
+          `;
+
+          return {
+            ok: true,
+            revocation: {
+              userId: presented.user_id,
+              familyId: presented.family_id,
+              revokedAt:
+                presented.revoked_at === null
+                  ? revokedAt
+                  : fromDatabaseTimestamp(presented.revoked_at),
+            },
+          };
+        }),
+      );
+      return throwIfRevocationFailed(outcome);
     },
   };
 }

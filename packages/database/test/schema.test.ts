@@ -122,6 +122,7 @@ describe('identity schema', () => {
 
     await expect(
       repository.rotateRefreshSession({
+        replacementSessionId: '00000000-0000-4000-8000-000000000001',
         presentedTokenHash: parseRefreshTokenHash('a'.repeat(64)),
         replacementTokenHash: parseRefreshTokenHash('b'.repeat(64)),
         replacementExpiresAt: new Date('2026-08-16T00:00:00.000Z'),
