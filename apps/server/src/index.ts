@@ -86,6 +86,8 @@ export async function startServer(
         roomRegistryOptions: {
           roomCodeTtlMs: config.room.codeTtlSeconds * 1_000,
           reconnectGraceMs: config.room.disconnectGraceSeconds * 1_000,
+          screenLeaseTtlMs: config.screen.leaseTtlSeconds * 1_000,
+          screenBitrateRange: config.screen.bitrateRange,
         },
       },
     });

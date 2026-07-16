@@ -530,15 +530,13 @@ describe('connection epochs, replacement, and room lifetime', () => {
       connectionId: 'creator-connection-2',
       requestId: 'creator-resume-1',
     }).data;
-    registry.setScreenLease({
+    const lease = registry.acquireScreenLease({
       roomId: created.room.id,
       userId: 'creator',
       connectionId: resumed.connection.connectionId,
       connectionEpoch: resumed.connection.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
-    });
+    }).data.lease;
     const staleInput = {
       roomId: created.room.id,
       userId: 'creator',
@@ -561,7 +559,7 @@ describe('connection epochs, replacement, and room lifetime', () => {
         connectionId: resumed.connection.connectionId,
         connectionEpoch: resumed.connection.connectionEpoch,
       }).screenLease?.leaseId,
-    ).toBe('lease-1');
+    ).toBe(lease.leaseId);
   });
 
   test('returns replacement closure as data without invoking an external handle', () => {
@@ -1715,7 +1713,6 @@ describe('negotiation epochs and reset delivery', () => {
       connectionEpoch: resumed.connection.connectionEpoch,
       requestId: 'creator-ready-2',
     });
-
     const snapshot = registry.getCurrentConnectionSnapshot({
       roomId: fixture.roomId,
       userId: 'creator',
@@ -1763,6 +1760,20 @@ describe('negotiation epochs and reset delivery', () => {
         connectionEpoch: fixture.created.connection.connectionEpoch,
       }),
     ).toEqual(reset);
+    registry.bindReady({
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+      requestId: 'creator-ready-after-explicit-reset',
+    });
+    registry.bindReady({
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+      requestId: 'joiner-ready-after-explicit-reset',
+    });
 
     expect(
       registry.beginNegotiation({
@@ -2001,7 +2012,7 @@ describe('negotiation epochs and reset delivery', () => {
     expect(nextReset.negotiationId).not.toBe(consumed.negotiationId);
   });
 
-  test('delivers the latest pending reset once when both replacement sockets are ready', () => {
+  test('delivers the latest pending reset once both replacement sockets are online', () => {
     const { registry } = createHarness();
     const fixture = createJoinedRoom(registry);
     markBothReady(registry, fixture);
@@ -2021,14 +2032,13 @@ describe('negotiation epochs and reset delivery', () => {
       requestId: 'creator-resume-1',
     }).data;
 
-    expect(
-      registry.takePendingNegotiationReset({
-        roomId: fixture.roomId,
-        userId: 'joiner',
-        connectionId: fixture.joined.connection.connectionId,
-        connectionEpoch: fixture.joined.connection.connectionEpoch,
-      }),
-    ).toBeNull();
+    const reset = registry.takePendingNegotiationReset({
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+    });
+    expect(reset).toMatchObject({ generation: 1, reason: 'peer_resumed' });
     registry.bindReady({
       roomId: fixture.roomId,
       userId: 'creator',
@@ -2036,13 +2046,13 @@ describe('negotiation epochs and reset delivery', () => {
       connectionEpoch: resumed.connection.connectionEpoch,
       requestId: 'creator-ready-2',
     });
-    const reset = registry.takePendingNegotiationReset({
+    registry.bindReady({
       roomId: fixture.roomId,
-      userId: 'creator',
-      connectionId: resumed.connection.connectionId,
-      connectionEpoch: resumed.connection.connectionEpoch,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+      requestId: 'joiner-ready-after-reset',
     });
-    expect(reset).toMatchObject({ generation: 1, reason: 'peer_resumed' });
     expect(
       registry.takePendingNegotiationReset({
         roomId: fixture.roomId,
@@ -2093,14 +2103,14 @@ describe('negotiation epochs and reset delivery', () => {
       requestId: 'begin-negotiation-1',
     });
 
-    registry.resetNegotiation({
+    const firstReset = registry.resetNegotiation({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: fixture.created.connection.connectionId,
       connectionEpoch: fixture.created.connection.connectionEpoch,
       reason: 'signaling_reset',
       requestId: 'reset-negotiation-1',
-    });
+    }).data.reset;
     const serialized = JSON.stringify(
       registry.getMemberSnapshotForBroadcast({
         roomId: fixture.roomId,
@@ -2110,6 +2120,24 @@ describe('negotiation epochs and reset delivery', () => {
     expect(serialized).not.toContain('sdp');
     expect(serialized).not.toContain('candidate');
     expect(serialized).toContain('signaling_reset');
+    expect(
+      registry
+        .getMemberSnapshotForBroadcast({
+          roomId: fixture.roomId,
+          userId: 'creator',
+        })
+        .members.map(({ ready }) => ready),
+    ).toEqual([false, false]);
+
+    const repeated = registry.resetNegotiation({
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+      reason: 'signaling_reset',
+      requestId: 'reset-negotiation-2',
+    }).data.reset;
+    expect(repeated).toEqual(firstReset);
   });
 });
 
@@ -2119,15 +2147,13 @@ describe('connection-bound screen leases', () => {
     const fixture = createJoinedRoom(registry);
     const creator = fixture.created.connection;
 
-    registry.setScreenLease({
+    const lease = registry.acquireScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
-    });
+    }).data.lease;
     expect(
       readScreenLease(
         registry,
@@ -2139,16 +2165,17 @@ describe('connection-bound screen leases', () => {
       ownerUserId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
+      leaseId: lease.leaseId,
       expiresAtMs: 15_000,
+      targetBitrateBps: 4_000_000,
     });
-    registry.setScreenLease({
+    vi.advanceTimersByTime(5_000);
+    registry.renewScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 20_000,
+      leaseId: lease.leaseId,
       requestId: 'lease-renew-1',
     });
     expect(
@@ -2161,7 +2188,7 @@ describe('connection-bound screen leases', () => {
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
+      leaseId: lease.leaseId,
       requestId: 'lease-release-1',
     });
     expect(
@@ -2179,25 +2206,21 @@ describe('connection-bound screen leases', () => {
     const fixture = createJoinedRoom(registry);
     const creator = fixture.created.connection;
     const joiner = fixture.joined.connection;
-    registry.setScreenLease({
+    const lease = registry.acquireScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
-    });
+    }).data.lease;
 
     expectRoomError(
       () =>
-        registry.setScreenLease({
+        registry.acquireScreenLease({
           roomId: fixture.roomId,
           userId: 'joiner',
           connectionId: joiner.connectionId,
           connectionEpoch: joiner.connectionEpoch,
-          leaseId: 'lease-2',
-          expiresAtMs: 15_000,
           requestId: 'lease-set-2',
         }),
       'SCREEN_SHARE_BUSY',
@@ -2216,20 +2239,18 @@ describe('connection-bound screen leases', () => {
     );
     expect(
       readScreenLease(registry, fixture.roomId, 'creator', creator)?.leaseId,
-    ).toBe('lease-1');
+    ).toBe(lease.leaseId);
   });
 
   test('replacement releases only the replaced connection lease', () => {
     const { registry } = createHarness();
     const fixture = createJoinedRoom(registry);
     const creator = fixture.created.connection;
-    registry.setScreenLease({
+    registry.acquireScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
     });
 
@@ -2261,13 +2282,11 @@ describe('connection-bound screen leases', () => {
     const { registry, asyncIntents } = createHarness();
     const fixture = createJoinedRoom(registry);
     const creator = fixture.created.connection;
-    registry.setScreenLease({
+    registry.acquireScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
     });
     vi.advanceTimersByTime(14_999);
@@ -2292,13 +2311,11 @@ describe('connection-bound screen leases', () => {
     const { registry, asyncIntents } = createHarness();
     const fixture = createJoinedRoom(registry);
     const creator = fixture.created.connection;
-    registry.setScreenLease({
+    registry.acquireScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
     });
 
@@ -2418,13 +2435,11 @@ describe('timer dependency failures', () => {
     const creator = fixture.created.connection;
 
     expect(() =>
-      registry.setScreenLease({
+      registry.acquireScreenLease({
         roomId: fixture.roomId,
         userId: 'creator',
         connectionId: creator.connectionId,
         connectionEpoch: creator.connectionEpoch,
-        leaseId: 'lease-1',
-        expiresAtMs: 15_000,
         requestId: 'lease-set-1',
       }),
     ).toThrow('timer failed');
@@ -2447,24 +2462,21 @@ describe('timer dependency failures', () => {
     });
     const fixture = createJoinedRoom(registry);
     const creator = fixture.created.connection;
-    registry.setScreenLease({
+    const lease = registry.acquireScreenLease({
       roomId: fixture.roomId,
       userId: 'creator',
       connectionId: creator.connectionId,
       connectionEpoch: creator.connectionEpoch,
-      leaseId: 'lease-1',
-      expiresAtMs: 15_000,
       requestId: 'lease-set-1',
-    });
+    }).data.lease;
 
     expect(() =>
-      registry.setScreenLease({
+      registry.renewScreenLease({
         roomId: fixture.roomId,
         userId: 'creator',
         connectionId: creator.connectionId,
         connectionEpoch: creator.connectionEpoch,
-        leaseId: 'lease-1',
-        expiresAtMs: 20_000,
+        leaseId: lease.leaseId,
         requestId: 'lease-renew-1',
       }),
     ).toThrow('timer failed');

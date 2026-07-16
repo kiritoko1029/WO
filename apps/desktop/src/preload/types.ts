@@ -17,6 +17,21 @@ export interface RealtimeConnectionGrant extends SignalTicketResponse {
   readonly endpoint: string;
 }
 
+export interface CaptureSourceSummary {
+  readonly token: string;
+  readonly name: string;
+  readonly kind: 'screen' | 'window';
+  readonly thumbnailDataUrl: string;
+}
+
+export type ScreenPermissionStatus =
+  'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
+
+export interface ScreenPermissionSnapshot {
+  readonly status: ScreenPermissionStatus;
+  readonly canOpenSettings: boolean;
+}
+
 export interface DesktopApi {
   readonly auth: {
     register(input: AuthRegisterBody): Promise<PublicAuthSession>;
@@ -26,6 +41,12 @@ export interface DesktopApi {
   };
   readonly realtime: {
     issueTicket(accessToken: string): Promise<RealtimeConnectionGrant>;
+  };
+  readonly capture: {
+    list(): Promise<readonly CaptureSourceSummary[]>;
+    select(token: string): Promise<void>;
+    permission(): Promise<ScreenPermissionSnapshot>;
+    openSettings(): Promise<void>;
   };
 }
 
@@ -42,5 +63,11 @@ export interface DesktopBridge {
     issueTicket(
       accessToken: string,
     ): Promise<DesktopIpcEnvelope<RealtimeConnectionGrant>>;
+  };
+  readonly capture: {
+    list(): Promise<DesktopIpcEnvelope<readonly CaptureSourceSummary[]>>;
+    select(token: string): Promise<DesktopIpcEnvelope<null>>;
+    permission(): Promise<DesktopIpcEnvelope<ScreenPermissionSnapshot>>;
+    openSettings(): Promise<DesktopIpcEnvelope<null>>;
   };
 }

@@ -102,6 +102,12 @@ function createDesktop() {
     realtime: {
       issueTicket: vi.fn<DesktopApi['realtime']['issueTicket']>(),
     },
+    capture: {
+      list: vi.fn<DesktopApi['capture']['list']>(),
+      select: vi.fn<DesktopApi['capture']['select']>(),
+      permission: vi.fn<DesktopApi['capture']['permission']>(),
+      openSettings: vi.fn<DesktopApi['capture']['openSettings']>(),
+    },
   } satisfies DesktopApi;
 }
 
@@ -221,6 +227,11 @@ describe('typed signaling client', () => {
             iceTransportPolicy: 'relay',
           },
           iceCredentialsExpiresAt: '2026-07-16T15:30:00.000Z',
+          screen: {
+            owner: null,
+            leaseId: null,
+            leaseExpiresAt: null,
+          },
         },
       },
     });

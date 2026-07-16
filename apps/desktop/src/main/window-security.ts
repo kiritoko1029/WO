@@ -127,7 +127,17 @@ export function installMediaPermissionPolicy(
         permission === 'media' &&
         details.mediaTypes?.length === 1 &&
         details.mediaTypes[0] === 'audio';
-      callback(trusted && (audioOnly || permission === 'speaker-selection'));
+      // Electron 43 on Windows reports getDisplayMedia as media with no types.
+      const displayCaptureFallback =
+        permission === 'media' &&
+        (details.mediaTypes === undefined || details.mediaTypes.length === 0);
+      callback(
+        trusted &&
+          (audioOnly ||
+            displayCaptureFallback ||
+            permission === 'speaker-selection' ||
+            permission === 'display-capture'),
+      );
     },
   );
   session.setPermissionCheckHandler(
@@ -141,6 +151,7 @@ export function installMediaPermissionPolicy(
       }
       return (
         permission === 'speaker-selection' ||
+        permission === 'display-capture' ||
         (permission === 'media' && details.mediaType === 'audio')
       );
     },

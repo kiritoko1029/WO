@@ -6,7 +6,10 @@ import {
   createBroadcastEnvelopeSchema,
   createP2pAckEnvelopeSchema,
   createRequestEnvelopeSchema,
+  isoDateTimeSchema,
+  leaseIdSchema,
   memberIdSchema,
+  negotiationIdSchema,
   roomIdSchema,
   userIdSchema,
 } from './envelope.js';
@@ -101,6 +104,30 @@ export const peerSummarySchema = z
   })
   .strict();
 
+export const screenOwnerSnapshotSchema = z
+  .object({
+    owner: peerSummarySchema.nullable(),
+    leaseId: leaseIdSchema.nullable(),
+    leaseExpiresAt: isoDateTimeSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const allNull =
+      value.owner === null &&
+      value.leaseId === null &&
+      value.leaseExpiresAt === null;
+    const allPresent =
+      value.owner !== null &&
+      value.leaseId !== null &&
+      value.leaseExpiresAt !== null;
+    if (!allNull && !allPresent) {
+      context.addIssue({
+        code: 'custom',
+        message: 'screen owner and lease fields must change together',
+      });
+    }
+  });
+
 export const roomActiveStateSchema = z.enum([
   'negotiating',
   'connected',
@@ -113,6 +140,7 @@ const roomSessionCommonShape = {
   rtcConfiguration: iceConfigurationDataSchema.shape.rtcConfiguration,
   iceCredentialsExpiresAt:
     iceConfigurationDataSchema.shape.iceCredentialsExpiresAt,
+  screen: screenOwnerSnapshotSchema,
 } as const;
 
 export const creatorWaitingRoomSessionSchema = z
@@ -185,9 +213,44 @@ export const roomResumeRequestSchema = createRequestEnvelopeSchema(
   'room.resume',
   roomResumePayloadSchema,
 );
+
+export const roomResumeDispositionSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('none') }).strict(),
+  z
+    .object({
+      status: z.literal('completed'),
+      negotiationId: negotiationIdSchema,
+      negotiationGeneration: z
+        .number()
+        .int()
+        .positive()
+        .max(Number.MAX_SAFE_INTEGER),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('reset_required'),
+      negotiationId: negotiationIdSchema,
+      resetGeneration: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      reason: z.enum(['peer_resumed', 'signaling_reset']),
+    })
+    .strict(),
+]);
+
+export const roomResumeAckDataSchema = z.union([
+  creatorWaitingRoomSessionSchema.extend({
+    resume: roomResumeDispositionSchema,
+  }),
+  creatorActiveRoomSessionSchema.extend({
+    resume: roomResumeDispositionSchema,
+  }),
+  joinerActiveRoomSessionSchema.extend({
+    resume: roomResumeDispositionSchema,
+  }),
+]);
 export const roomResumeAckSchema = createP2pAckEnvelopeSchema(
   'room.resume',
-  roomSessionAckDataSchema,
+  roomResumeAckDataSchema,
 );
 
 export const p2pRoomLeaveRequestSchema = createRequestEnvelopeSchema(
@@ -299,6 +362,7 @@ export type JoinerActiveRoomSession = z.infer<
   typeof joinerActiveRoomSessionSchema
 >;
 export type RoomSessionAckData = z.infer<typeof roomSessionAckDataSchema>;
+export type ScreenOwnerSnapshot = z.infer<typeof screenOwnerSnapshotSchema>;
 export type RoomCreatePayload = z.infer<typeof roomCreatePayloadSchema>;
 export type RoomCreateAckData = z.infer<typeof roomCreateAckDataSchema>;
 export type RoomCreateRequest = z.infer<typeof roomCreateRequestSchema>;
@@ -309,6 +373,8 @@ export type P2pRoomJoinAckData = z.infer<typeof p2pRoomJoinAckDataSchema>;
 export type P2pRoomJoinAck = z.infer<typeof p2pRoomJoinAckSchema>;
 export type RoomResumePayload = z.infer<typeof roomResumePayloadSchema>;
 export type RoomResumeRequest = z.infer<typeof roomResumeRequestSchema>;
+export type RoomResumeDisposition = z.infer<typeof roomResumeDispositionSchema>;
+export type RoomResumeAckData = z.infer<typeof roomResumeAckDataSchema>;
 export type RoomResumeAck = z.infer<typeof roomResumeAckSchema>;
 export type P2pRoomLeaveRequest = z.infer<typeof p2pRoomLeaveRequestSchema>;
 export type P2pRoomLeaveAck = z.infer<typeof p2pRoomLeaveAckSchema>;

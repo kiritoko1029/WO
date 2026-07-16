@@ -1,5 +1,7 @@
 # 1080p60 Media Lab Matrix
 
+> Current product certification status (P2P): **NOT CERTIFIED**. The table below begins with legacy same-host SFU evidence and must not be used as evidence for the current two-person P2P product. The current P2P claim matrix is maintained in [../support-matrix.md](../support-matrix.md); every row remains `NOT TESTED` until the Task 17 two-physical-device harness records a 45-second preflight and a separate 600-second formal run.
+
 This matrix tracks reproducible hardware validation for the local publisher and receiver lab. Automated tests, a mediasoup Worker smoke, and an Electron build do not satisfy a hardware gate.
 
 ## Hardware status

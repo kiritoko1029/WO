@@ -24,6 +24,15 @@ function cloneBridge(bridge: DesktopBridge): DesktopBridge {
       issueTicket: async (accessToken) =>
         structuredClone(await bridge.realtime.issueTicket(accessToken)),
     },
+    capture: {
+      list: async () => structuredClone(await bridge.capture.list()),
+      select: async (token) =>
+        structuredClone(await bridge.capture.select(token)),
+      permission: async () =>
+        structuredClone(await bridge.capture.permission()),
+      openSettings: async () =>
+        structuredClone(await bridge.capture.openSettings()),
+    },
   };
 }
 
@@ -48,14 +57,47 @@ function createHarness() {
       .fn()
       .mockResolvedValue({ ticket: 'A'.repeat(43), expiresInSeconds: 30 }),
   };
-  registerDesktopIpc(ipcMain, { auth, realtime, rendererEntry });
+  const capture = {
+    list: vi.fn().mockResolvedValue([
+      {
+        token: '00000000-0000-4000-8000-000000000001',
+        name: 'Editor',
+        kind: 'window',
+        thumbnailDataUrl: 'data:image/png;base64,AAAA',
+      },
+    ]),
+    select: vi.fn(),
+    clear: vi.fn(),
+  };
+  const permissions = {
+    status: vi.fn(() => ({
+      status: 'granted' as const,
+      canOpenSettings: false,
+    })),
+    openSettings: vi.fn(async () => undefined),
+  };
+  registerDesktopIpc(ipcMain, {
+    auth,
+    realtime,
+    capture,
+    permissions,
+    rendererEntry,
+  });
   const mainFrame = { url: rendererEntry };
-  const event = { senderFrame: mainFrame, sender: { mainFrame } };
-  return { auth, event, handlers, ipcMain, realtime };
+  const event = { senderFrame: mainFrame, sender: { id: 7, mainFrame } };
+  return {
+    auth,
+    capture,
+    event,
+    handlers,
+    ipcMain,
+    permissions,
+    realtime,
+  };
 }
 
 describe('desktop IPC boundary', () => {
-  it('registers exactly the five explicitly allowlisted handlers', () => {
+  it('registers exactly the explicitly allowlisted handlers', () => {
     const { handlers } = createHarness();
 
     expect([...handlers.keys()]).toEqual([...DESKTOP_IPC_CHANNELS]);
@@ -65,11 +107,16 @@ describe('desktop IPC boundary', () => {
       'desktop:auth:refresh',
       'desktop:auth:logout',
       'desktop:realtime:issue-ticket',
+      'desktop:capture:list',
+      'desktop:capture:select',
+      'desktop:capture:permission',
+      'desktop:capture:open-settings',
     ]);
   });
 
   it('validates arguments before invoking every broker operation', async () => {
-    const { auth, event, handlers, realtime } = createHarness();
+    const { auth, capture, event, handlers, permissions, realtime } =
+      createHarness();
 
     await expect(
       handlers.get('desktop:auth:register')?.(event, {
@@ -103,6 +150,41 @@ describe('desktop IPC boundary', () => {
       value: { ticket: 'A'.repeat(43), expiresInSeconds: 30 },
     });
     expect(realtime.issueTicket).toHaveBeenCalledWith('access-token');
+    await expect(
+      handlers.get('desktop:capture:list')?.(event),
+    ).resolves.toEqual({
+      ok: true,
+      value: [
+        {
+          token: '00000000-0000-4000-8000-000000000001',
+          name: 'Editor',
+          kind: 'window',
+          thumbnailDataUrl: 'data:image/png;base64,AAAA',
+        },
+      ],
+    });
+    expect(capture.list).toHaveBeenCalledWith(7);
+    await expect(
+      handlers.get('desktop:capture:select')?.(
+        event,
+        '00000000-0000-4000-8000-000000000001',
+      ),
+    ).resolves.toEqual({ ok: true, value: null });
+    expect(capture.select).toHaveBeenCalledWith(
+      7,
+      '00000000-0000-4000-8000-000000000001',
+    );
+    await expect(
+      handlers.get('desktop:capture:permission')?.(event),
+    ).resolves.toEqual({
+      ok: true,
+      value: { status: 'granted', canOpenSettings: false },
+    });
+    expect(permissions.status).toHaveBeenCalledOnce();
+    await expect(
+      handlers.get('desktop:capture:open-settings')?.(event),
+    ).resolves.toEqual({ ok: true, value: null });
+    expect(permissions.openSettings).toHaveBeenCalledOnce();
 
     const invalidArguments = {
       ok: false,
@@ -122,6 +204,9 @@ describe('desktop IPC boundary', () => {
     ).resolves.toEqual(invalidArguments);
     await expect(
       handlers.get('desktop:realtime:issue-ticket')?.(event, ''),
+    ).resolves.toEqual(invalidArguments);
+    await expect(
+      handlers.get('desktop:capture:select')?.(event, 'window:101:0'),
     ).resolves.toEqual(invalidArguments);
   });
 

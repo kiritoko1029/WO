@@ -1,0 +1,59 @@
+appId: cn.wo.desktop
+productName: WO
+asar: true
+forceCodeSigning: true
+
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/main/**/*
+  - out/preload/**/*
+  - out/renderer/**/*
+  - package.json
+  - '!node_modules/**/*'
+  - '!**/*.map'
+  - '!**/*.map.*'
+
+extraMetadata:
+  main: out/main/index.js
+
+win:
+  target:
+    - nsis
+    - portable
+
+nsis:
+  artifactName: WO-${version}-setup-${arch}.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+portable:
+  artifactName: WO-${version}-portable-${arch}.${ext}
+
+mac:
+  target:
+    - dmg
+    - zip
+  artifactName: WO-${version}-mac-${arch}.${ext}
+  category: public.app-category.social-networking
+  hardenedRuntime: true
+  notarize: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: WO uses the microphone for voice calls.
+    NSScreenCaptureUsageDescription: WO uses screen capture when you share your desktop.
+
+dmg:
+  sign: true
+  writeUpdateInfo: false

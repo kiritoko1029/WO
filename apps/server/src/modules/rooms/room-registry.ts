@@ -6,6 +6,7 @@ import {
 import { generateRoomCode } from './room-code.ts';
 import {
   RoomDomainError,
+  type AcquireScreenLeaseInput,
   type BeginIceRestartInput,
   type BeginNegotiationInput,
   type AnswerRelayInput,
@@ -26,6 +27,7 @@ import {
   type ReadyRoomInput,
   type RelayRequestInput,
   type ReleaseScreenLeaseInput,
+  type RenewScreenLeaseInput,
   type ResetNegotiationInput,
   type ResumeRoomInput,
   type RoomActiveState,
@@ -42,7 +44,7 @@ import {
   type RoomSessionData,
   type RoomSnapshot,
   type ScreenLeaseSnapshot,
-  type SetScreenLeaseInput,
+  type SetScreenBitrateInput,
   type ValidateNegotiationInput,
 } from './room-types.ts';
 
@@ -51,6 +53,11 @@ const DEFAULT_RECONNECT_GRACE_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_CODE_ATTEMPTS = 32;
 const DEFAULT_REQUEST_CACHE_MAX_ENTRIES = 4_096;
 const DEFAULT_MAX_ROOMS = 10_000;
+const DEFAULT_SCREEN_LEASE_TTL_MS = 15_000;
+const DEFAULT_SCREEN_BITRATE_MIN_BPS = 1_000_000;
+const DEFAULT_SCREEN_BITRATE_MAX_BPS = 10_000_000;
+const DEFAULT_SCREEN_BITRATE_BPS = 4_000_000;
+const DEFAULT_MAX_SCREEN_ACQUIRE_REQUEST_IDS = 4_096;
 const REPLACED_CLOSE_CODE = 4409;
 const REPLACED_CLOSE_REASON = 'SESSION_REPLACED';
 
@@ -98,9 +105,28 @@ interface PendingNegotiationResetState extends PendingNegotiationResetSnapshot {
   consumed: boolean;
 }
 
-interface ScreenLeaseState extends ScreenLeaseSnapshot {
+interface ScreenLeaseState {
+  readonly ownerUserId: string;
+  readonly connectionId: string;
+  readonly connectionEpoch: number;
+  readonly leaseId: string;
+  readonly expiresAtMs: number;
+  targetBitrateBps: number;
   timer: ManagedTimer | null;
+  readonly requestCacheKeys: Set<string>;
 }
+
+type ScreenAcquireRequestState =
+  | Readonly<{
+      signature: string;
+      outcome: 'SCREEN_SHARE_BUSY';
+    }>
+  | Readonly<{
+      signature: string;
+      outcome: 'acquired';
+      leaseId: string;
+      data: Readonly<{ lease: ScreenLeaseSnapshot }>;
+    }>;
 
 interface TemporaryRoom {
   readonly id: string;
@@ -123,6 +149,7 @@ interface TemporaryRoom {
   codeTimer: ManagedTimer | null;
   graceTimer: ManagedTimer | null;
   readonly requestCacheKeys: Set<string>;
+  readonly screenAcquireRequests: Map<string, ScreenAcquireRequestState>;
   hasConnected: boolean;
 }
 
@@ -131,6 +158,7 @@ interface IdempotencyEntry {
   readonly signature: string;
   readonly roomId: string;
   readonly data: unknown;
+  readonly terminalError?: 'LEASE_LOST';
 }
 
 function positiveSafeInteger(value: number, name: string): number {
@@ -243,6 +271,26 @@ export function createRoomRegistry(
     dependencies.maxNegotiationGeneration ?? Number.MAX_SAFE_INTEGER,
     'maxNegotiationGeneration',
   );
+  const screenLeaseTtlMs = positiveSafeInteger(
+    dependencies.screenLeaseTtlMs ?? DEFAULT_SCREEN_LEASE_TTL_MS,
+    'screenLeaseTtlMs',
+  );
+  const screenBitrateMin = positiveSafeInteger(
+    dependencies.screenBitrateRange?.min ?? DEFAULT_SCREEN_BITRATE_MIN_BPS,
+    'screenBitrateRange.min',
+  );
+  const screenBitrateMax = positiveSafeInteger(
+    dependencies.screenBitrateRange?.max ?? DEFAULT_SCREEN_BITRATE_MAX_BPS,
+    'screenBitrateRange.max',
+  );
+  if (screenBitrateMin > screenBitrateMax) {
+    throw new RangeError('screenBitrateRange must be ordered');
+  }
+  const maxScreenAcquireRequestIds = positiveSafeInteger(
+    dependencies.maxScreenAcquireRequestIds ??
+      DEFAULT_MAX_SCREEN_ACQUIRE_REQUEST_IDS,
+    'maxScreenAcquireRequestIds',
+  );
 
   const roomsById = new Map<string, TemporaryRoom>();
   const roomIdByCode = new Map<string, string>();
@@ -304,7 +352,25 @@ export function createRoomRegistry(
       return;
     }
     idempotencyCache.delete(key);
-    roomsById.get(entry.roomId)?.requestCacheKeys.delete(key);
+    const room = roomsById.get(entry.roomId);
+    room?.requestCacheKeys.delete(key);
+    room?.screenLease?.requestCacheKeys.delete(key);
+  };
+
+  const terminalizeLeaseRequests = (lease: ScreenLeaseState): void => {
+    for (const key of lease.requestCacheKeys) {
+      const entry = idempotencyCache.get(key);
+      if (entry !== undefined) {
+        idempotencyCache.set(key, {
+          operation: entry.operation,
+          signature: entry.signature,
+          roomId: entry.roomId,
+          data: null,
+          terminalError: 'LEASE_LOST',
+        });
+      }
+    }
+    lease.requestCacheKeys.clear();
   };
 
   const cleanupRoom = (
@@ -464,6 +530,7 @@ export function createRoomRegistry(
       connectionEpoch: lease.connectionEpoch,
       leaseId: lease.leaseId,
       expiresAtMs: lease.expiresAtMs,
+      targetBitrateBps: lease.targetBitrateBps,
     });
   };
 
@@ -535,6 +602,12 @@ export function createRoomRegistry(
       (userId) => room.connectionsByUserId.get(userId)?.ready === true,
     );
 
+  const allMembersOnline = (room: TemporaryRoom): boolean =>
+    room.joinerUserId !== null &&
+    [...room.membersByUserId.keys()].every((userId) =>
+      room.connectionsByUserId.has(userId),
+    );
+
   const nextNegotiationGeneration = (room: TemporaryRoom): number => {
     if (room.negotiationGeneration >= maxNegotiationGeneration) {
       throw new RoomDomainError('INVALID_STATE');
@@ -576,13 +649,19 @@ export function createRoomRegistry(
     if (room.activeNegotiation.status === 'active') {
       room.activeNegotiation.status = 'abandoned';
     }
+    let reset: PendingNegotiationResetState;
     if (
       room.pendingNegotiationReset !== null &&
       !room.pendingNegotiationReset.consumed
     ) {
-      return room.pendingNegotiationReset;
+      reset = room.pendingNegotiationReset;
+    } else {
+      reset = createPendingReset(room, reason);
     }
-    return createPendingReset(room, reason);
+    for (const connection of room.connectionsByUserId.values()) {
+      connection.ready = false;
+    }
+    return reset;
   };
 
   const releaseLeaseForConnection = (
@@ -601,6 +680,7 @@ export function createRoomRegistry(
       return null;
     }
     cancelTimer(lease.timer);
+    terminalizeLeaseRequests(lease);
     room.screenLease = null;
     return {
       type: 'screen.ownerChanged',
@@ -708,6 +788,9 @@ export function createRoomRegistry(
         cached.signature !== input.signature
       ) {
         throw new RoomDomainError('INVALID_STATE');
+      }
+      if (cached.terminalError !== undefined) {
+        throw new RoomDomainError(cached.terminalError);
       }
       idempotencyCache.delete(key);
       idempotencyCache.set(key, cached);
@@ -844,6 +927,7 @@ export function createRoomRegistry(
     }
     cancelTimer(lease.timer);
     lease.timer = null;
+    terminalizeLeaseRequests(lease);
     room.screenLease = null;
     emitAsyncIntent({
       type: 'screen.ownerChanged',
@@ -976,6 +1060,7 @@ export function createRoomRegistry(
             codeTimer: null,
             graceTimer: null,
             requestCacheKeys: new Set(),
+            screenAcquireRequests: new Map(),
             hasConnected: false,
           };
           const connection = allocateConnection(
@@ -1767,7 +1852,12 @@ export function createRoomRegistry(
           if (room.activeNegotiation !== null) {
             room.activeNegotiation.status = 'abandoned';
           }
-          const reset = createPendingReset(room, input.reason);
+          const reset =
+            room.pendingNegotiationReset ??
+            createPendingReset(room, input.reason);
+          for (const connection of room.connectionsByUserId.values()) {
+            connection.ready = false;
+          }
           room.state = allMembersOnlineAndReady(room)
             ? 'negotiating'
             : 'reconnecting';
@@ -1789,7 +1879,7 @@ export function createRoomRegistry(
       const room = requireRoom(input.roomId);
       requireCurrentConnection(room, input);
       const reset = room.pendingNegotiationReset;
-      if (reset === null || reset.consumed || !allMembersOnlineAndReady(room)) {
+      if (reset === null || reset.consumed || !allMembersOnline(room)) {
         return null;
       }
       return frozen({
@@ -1806,13 +1896,13 @@ export function createRoomRegistry(
       const reset = room.pendingNegotiationReset;
       if (
         reset === null ||
-        reset.consumed ||
         reset.generation !== input.generation ||
         reset.negotiationId !== input.negotiationId ||
-        !allMembersOnlineAndReady(room)
+        !allMembersOnline(room)
       ) {
         return false;
       }
+      if (reset.consumed) return true;
       reset.consumed = true;
       return true;
     },
@@ -1834,75 +1924,160 @@ export function createRoomRegistry(
       return snapshotLease(room.screenLease);
     },
 
-    setScreenLease(input: SetScreenLeaseInput) {
-      return withIdempotency({
+    acquireScreenLease(input: AcquireScreenLeaseInput) {
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      expireLeaseIfDue(room);
+      const requestKey = idempotencyKey(input.userId, input.requestId);
+      const signature = JSON.stringify([
+        input.roomId,
+        input.connectionId,
+        input.connectionEpoch,
+      ]);
+      const previousRequest = room.screenAcquireRequests.get(requestKey);
+      if (previousRequest !== undefined) {
+        if (previousRequest.signature !== signature) {
+          throw new RoomDomainError('INVALID_STATE');
+        }
+        if (previousRequest.outcome === 'SCREEN_SHARE_BUSY') {
+          throw new RoomDomainError('SCREEN_SHARE_BUSY');
+        }
+        const activeLease = room.screenLease;
+        if (
+          activeLease !== null &&
+          activeLease.leaseId === previousRequest.leaseId &&
+          activeLease.ownerUserId === input.userId &&
+          activeLease.connectionId === input.connectionId &&
+          activeLease.connectionEpoch === input.connectionEpoch
+        ) {
+          return mutationResult(previousRequest.data, [], true);
+        }
+        throw new RoomDomainError('LEASE_LOST');
+      }
+      if (room.screenAcquireRequests.size >= maxScreenAcquireRequestIds) {
+        throw new RoomDomainError('CAPACITY_EXCEEDED');
+      }
+      const result = withIdempotency({
         userId: input.userId,
         requestId: input.requestId,
-        operation: 'screen.set',
-        signature: JSON.stringify([
-          input.roomId,
-          input.connectionId,
-          input.connectionEpoch,
-          input.leaseId,
-          input.expiresAtMs,
-        ]),
+        operation: 'screen.acquire',
+        signature,
         roomIdFromData: () => input.roomId,
         mutate: () => {
-          const room = requireRoom(input.roomId);
           requireCurrentConnection(room, input);
-          assertIdentifier(input.leaseId, 'leaseId');
-          const currentTime = operationTime(now);
-          if (
-            !Number.isSafeInteger(input.expiresAtMs) ||
-            input.expiresAtMs <= currentTime
-          ) {
-            throw new RoomDomainError('INVALID_STATE');
-          }
           expireLeaseIfDue(room);
-          const previous = room.screenLease;
-          const isRenewal =
-            previous !== null &&
-            previous.ownerUserId === input.userId &&
-            previous.connectionId === input.connectionId &&
-            previous.connectionEpoch === input.connectionEpoch;
-          if (previous !== null && !isRenewal) {
+          if (room.screenLease !== null) {
+            room.screenAcquireRequests.set(requestKey, {
+              signature,
+              outcome: 'SCREEN_SHARE_BUSY',
+            });
             throw new RoomDomainError('SCREEN_SHARE_BUSY');
           }
-          if (previous !== null && previous.leaseId !== input.leaseId) {
-            throw new RoomDomainError('LEASE_LOST');
+          const leaseId = randomUUID();
+          assertIdentifier(leaseId, 'leaseId');
+          const expiresAtMs = operationTime(now) + screenLeaseTtlMs;
+          if (!Number.isSafeInteger(expiresAtMs)) {
+            throw new RoomDomainError('INVALID_STATE');
           }
           const lease: ScreenLeaseState = {
             ownerUserId: input.userId,
             connectionId: input.connectionId,
             connectionEpoch: input.connectionEpoch,
-            leaseId: input.leaseId,
-            expiresAtMs: input.expiresAtMs,
+            leaseId,
+            expiresAtMs,
+            targetBitrateBps: Math.min(
+              screenBitrateMax,
+              Math.max(screenBitrateMin, DEFAULT_SCREEN_BITRATE_BPS),
+            ),
             timer: null,
+            requestCacheKeys: new Set(),
           };
           scheduleLeaseExpiry(room, lease);
-          if (previous !== null) {
-            cancelTimer(previous.timer);
-          }
           room.screenLease = lease;
-          return mutationResult(
-            frozen({ lease: snapshotLease(lease)! }),
-            isRenewal
-              ? []
-              : [
-                  {
-                    type: 'screen.ownerChanged',
-                    roomId: room.id,
-                    ownerUserId: input.userId,
-                    leaseId: input.leaseId,
-                  },
-                ],
-          );
+          const data = frozen({ lease: snapshotLease(lease)! });
+          room.screenAcquireRequests.set(requestKey, {
+            signature,
+            outcome: 'acquired',
+            leaseId,
+            data,
+          });
+          return mutationResult(data, [
+            {
+              type: 'screen.ownerChanged',
+              roomId: room.id,
+              ownerUserId: input.userId,
+              leaseId,
+            },
+          ]);
         },
       });
+      if (!result.replayed) {
+        room.screenLease?.requestCacheKeys.add(requestKey);
+      }
+      return result;
+    },
+
+    renewScreenLease(input: RenewScreenLeaseInput) {
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      expireLeaseIfDue(room);
+      const result = withIdempotency({
+        userId: input.userId,
+        requestId: input.requestId,
+        operation: 'screen.renew',
+        signature: JSON.stringify([
+          input.roomId,
+          input.connectionId,
+          input.connectionEpoch,
+          input.leaseId,
+        ]),
+        roomIdFromData: () => input.roomId,
+        mutate: () => {
+          requireCurrentConnection(room, input);
+          expireLeaseIfDue(room);
+          const previous = room.screenLease;
+          if (
+            previous === null ||
+            previous.ownerUserId !== input.userId ||
+            previous.connectionId !== input.connectionId ||
+            previous.connectionEpoch !== input.connectionEpoch ||
+            previous.leaseId !== input.leaseId
+          ) {
+            throw new RoomDomainError('LEASE_LOST');
+          }
+          const expiresAtMs = operationTime(now) + screenLeaseTtlMs;
+          if (!Number.isSafeInteger(expiresAtMs)) {
+            throw new RoomDomainError('INVALID_STATE');
+          }
+          const lease: ScreenLeaseState = {
+            ownerUserId: previous.ownerUserId,
+            connectionId: previous.connectionId,
+            connectionEpoch: previous.connectionEpoch,
+            leaseId: previous.leaseId,
+            expiresAtMs,
+            targetBitrateBps: previous.targetBitrateBps,
+            timer: null,
+            requestCacheKeys: previous.requestCacheKeys,
+          };
+          scheduleLeaseExpiry(room, lease);
+          cancelTimer(previous.timer);
+          room.screenLease = lease;
+          return mutationResult(frozen({ lease: snapshotLease(lease)! }));
+        },
+      });
+      if (!result.replayed) {
+        room.screenLease?.requestCacheKeys.add(
+          idempotencyKey(input.userId, input.requestId),
+        );
+      }
+      return result;
     },
 
     releaseScreenLease(input: ReleaseScreenLeaseInput) {
-      return withIdempotency({
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      expireLeaseIfDue(room);
+      const result = withIdempotency({
         userId: input.userId,
         requestId: input.requestId,
         operation: 'screen.release',
@@ -1914,7 +2089,6 @@ export function createRoomRegistry(
         ]),
         roomIdFromData: () => input.roomId,
         mutate: () => {
-          const room = requireRoom(input.roomId);
           requireCurrentConnection(room, input);
           expireLeaseIfDue(room);
           const lease = room.screenLease;
@@ -1928,6 +2102,7 @@ export function createRoomRegistry(
             throw new RoomDomainError('LEASE_LOST');
           }
           cancelTimer(lease.timer);
+          terminalizeLeaseRequests(lease);
           room.screenLease = null;
           return mutationResult(frozen({ lease: null }), [
             {
@@ -1939,6 +2114,66 @@ export function createRoomRegistry(
           ]);
         },
       });
+      return result;
+    },
+
+    setScreenBitrate(input: SetScreenBitrateInput) {
+      const room = requireRoom(input.roomId);
+      requireCurrentConnection(room, input);
+      expireLeaseIfDue(room);
+      const result = withIdempotency({
+        userId: input.userId,
+        requestId: input.requestId,
+        operation: 'screen.bitrate',
+        signature: JSON.stringify([
+          input.roomId,
+          input.connectionId,
+          input.connectionEpoch,
+          input.leaseId,
+          input.bitrateBps,
+        ]),
+        roomIdFromData: () => input.roomId,
+        mutate: () => {
+          requireCurrentConnection(room, input);
+          expireLeaseIfDue(room);
+          const lease = room.screenLease;
+          if (
+            lease === null ||
+            lease.ownerUserId !== input.userId ||
+            lease.connectionId !== input.connectionId ||
+            lease.connectionEpoch !== input.connectionEpoch ||
+            lease.leaseId !== input.leaseId
+          ) {
+            throw new RoomDomainError('LEASE_LOST');
+          }
+          if (
+            !Number.isSafeInteger(input.bitrateBps) ||
+            input.bitrateBps <= 0
+          ) {
+            throw new RoomDomainError('INVALID_STATE');
+          }
+          const bitrateBps = Math.min(
+            screenBitrateMax,
+            Math.max(screenBitrateMin, input.bitrateBps),
+          );
+          lease.targetBitrateBps = bitrateBps;
+          return mutationResult(frozen({ bitrateBps }), [
+            {
+              type: 'screen.bitrateChanged',
+              roomId: room.id,
+              ownerUserId: input.userId,
+              leaseId: lease.leaseId,
+              bitrateBps,
+            },
+          ]);
+        },
+      });
+      if (!result.replayed) {
+        room.screenLease?.requestCacheKeys.add(
+          idempotencyKey(input.userId, input.requestId),
+        );
+      }
+      return result;
     },
 
     getStats(): RoomRegistryStats {

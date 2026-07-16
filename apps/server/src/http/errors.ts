@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { ZodError } from 'zod';
 
 import { AuthServiceError } from '../modules/auth/auth-service.ts';
+import { safeErrorMetadata } from '../logging.ts';
 
 export type HttpErrorCode =
   | 'AUTH_REQUIRED'
@@ -36,20 +37,6 @@ function statusCodeOf(error: unknown): number | undefined {
   }
   const statusCode = (error as StatusError).statusCode;
   return typeof statusCode === 'number' ? statusCode : undefined;
-}
-
-function safeErrorMetadata(error: unknown): Record<string, string> {
-  if (typeof error !== 'object' || error === null) {
-    return { errorName: 'UnknownError' };
-  }
-  const candidate = error as StatusError;
-  return {
-    errorName:
-      typeof candidate.name === 'string' ? candidate.name : 'UnknownError',
-    ...(typeof candidate.code === 'string'
-      ? { errorCode: candidate.code }
-      : {}),
-  };
 }
 
 function mapError(error: unknown): HttpError {

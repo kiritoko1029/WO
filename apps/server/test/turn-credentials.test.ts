@@ -100,6 +100,7 @@ describe('public ICE configuration', () => {
       'stun:turn.example.test:3478',
       'turn:turn.example.test:3478?transport=udp',
       'turn:turn.example.test:3478?transport=tcp',
+      'turns:turn.example.test:5349?transport=tcp',
     ];
     const turnCredentials = createTurnCredentials(TURN_INPUT);
 
@@ -116,6 +117,7 @@ describe('public ICE configuration', () => {
             urls: [
               'turn:turn.example.test:3478?transport=udp',
               'turn:turn.example.test:3478?transport=tcp',
+              'turns:turn.example.test:5349?transport=tcp',
             ],
             username: turnCredentials.username,
             credential: turnCredentials.credential,

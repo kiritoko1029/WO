@@ -1,0 +1,77 @@
+name: wo-integration
+
+services:
+  caddy:
+    environment:
+      ACME_EMAIL: integration@localhost.invalid
+      APP_DOMAIN: rtc.localhost
+    ports: !override
+      - target: 80
+        published: '80'
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 443
+        published: '443'
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes: !override
+      - ./caddy/Caddyfile.integration:/etc/caddy/Caddyfile:ro
+      - caddy_integration_data:/data
+      - caddy_integration_config:/config
+
+  server:
+    environment:
+      NODE_ENV: test
+      PUBLIC_URL: https://rtc.localhost
+      TURN_REALM: turn.localhost
+      TURN_HOST: turn.localhost
+      TURN_URLS: stun:turn.localhost:3478,turn:turn.localhost:3478?transport=udp,turn:turn.localhost:3478?transport=tcp,turns:turn.localhost:5349?transport=tcp
+
+  postgres:
+    volumes: !override
+      - postgres_integration_data:/var/lib/postgresql/data
+
+  coturn:
+    environment:
+      TURN_EXTERNAL_IP: 127.0.0.1
+      TURN_LISTEN_PORT: '3478'
+      TURN_TLS_LISTEN_PORT: '5349'
+      TURN_REALM: turn.localhost
+    ports: !override
+      - target: 3478
+        published: '3478'
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 3478
+        published: '3478'
+        host_ip: 127.0.0.1
+        protocol: udp
+      - target: 5349
+        published: '5349'
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 5349
+        published: '5349'
+        host_ip: 127.0.0.1
+        protocol: udp
+      - 127.0.0.1:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
+    volumes: !override
+      - ./coturn/entrypoint.sh:/opt/wo/turn-entrypoint.sh:ro
+      - ./coturn/turnserver.integration.conf:/etc/coturn/turnserver.wo.conf:ro
+
+volumes:
+  caddy_integration_config: {}
+  caddy_integration_data: {}
+  postgres_integration_data: {}
+
+secrets:
+  jwt_access_secret:
+    file: ./secrets.integration/jwt_access_secret
+  postgres_password:
+    file: ./secrets.integration/postgres_password
+  turn_shared_secret:
+    file: ./secrets.integration/turn_shared_secret
+  turn_tls_cert:
+    file: ./secrets.integration/turn_tls_cert.pem
+  turn_tls_key:
+    file: ./secrets.integration/turn_tls_key.pem

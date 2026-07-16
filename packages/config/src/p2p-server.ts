@@ -78,7 +78,7 @@ const requiredEnvironmentFields = Object.keys(
 ) as (keyof z.infer<typeof rawEnvironmentSchema>)[];
 
 const iceServerUriPattern =
-  /^(stun|turn):(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::([0-9]+))?(?:\?([^#]*))?$/u;
+  /^(stun|turn|turns):(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::([0-9]+))?(?:\?([^#]*))?$/u;
 const hostnameSchema = z.hostname();
 const ipv4Schema = z.ipv4();
 const ipv6Schema = z.ipv6();
@@ -248,7 +248,7 @@ const validateProductionGeneratedSecret = (
 };
 
 type ParsedIceServerUrl = Readonly<{
-  scheme: 'stun' | 'turn';
+  scheme: 'stun' | 'turn' | 'turns';
   hostname: string;
   duplicateKey: string;
 }>;
@@ -268,7 +268,10 @@ const parseIceServerUrl = (value: string): ParsedIceServerUrl | undefined => {
   }
 
   const [, scheme, host, port, query] = match;
-  if ((scheme !== 'stun' && scheme !== 'turn') || host === undefined) {
+  if (
+    (scheme !== 'stun' && scheme !== 'turn' && scheme !== 'turns') ||
+    host === undefined
+  ) {
     return undefined;
   }
 
@@ -282,7 +285,7 @@ const parseIceServerUrl = (value: string): ParsedIceServerUrl | undefined => {
     return undefined;
   }
 
-  let portNumber = 3_478;
+  let portNumber = scheme === 'turns' ? 5_349 : 3_478;
   if (port !== undefined) {
     if (port.length > 1 && port.startsWith('0')) {
       return undefined;
@@ -296,15 +299,23 @@ const parseIceServerUrl = (value: string): ParsedIceServerUrl | undefined => {
   const queryIsValid =
     scheme === 'stun'
       ? query === undefined
-      : query === undefined ||
-        query === 'transport=udp' ||
-        query === 'transport=tcp';
+      : scheme === 'turns'
+        ? query === undefined || query === 'transport=tcp'
+        : query === undefined ||
+          query === 'transport=udp' ||
+          query === 'transport=tcp';
   if (!queryIsValid) {
     return undefined;
   }
 
   const transport =
-    scheme === 'turn' ? (query === 'transport=tcp' ? 'tcp' : 'udp') : undefined;
+    scheme === 'turn'
+      ? query === 'transport=tcp'
+        ? 'tcp'
+        : 'udp'
+      : scheme === 'turns'
+        ? 'tcp'
+        : undefined;
   const duplicateKey = JSON.stringify([
     scheme,
     normalizedHost,
@@ -334,11 +345,11 @@ const parseTurnUrls = (
       addIssue(
         issues,
         'TURN_URLS',
-        'must contain only valid canonical stun: or turn: URLs',
+        'must contain only valid canonical stun:, turn:, or turns: URLs',
       );
       continue;
     }
-    if (parsed.scheme === 'turn') {
+    if (parsed.scheme === 'turn' || parsed.scheme === 'turns') {
       hasTurnUrl = true;
     }
     if (expectedHost !== undefined && parsed.hostname !== expectedHost) {
@@ -351,7 +362,11 @@ const parseTurnUrls = (
     }
   }
   if (!hasTurnUrl) {
-    addIssue(issues, 'TURN_URLS', 'must contain at least one turn: URL');
+    addIssue(
+      issues,
+      'TURN_URLS',
+      'must contain at least one turn: or turns: URL',
+    );
   }
 
   return urls;

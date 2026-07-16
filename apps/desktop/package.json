@@ -6,11 +6,20 @@
   "main": "./out/main/index.js",
   "scripts": {
     "build": "electron-vite build",
+    "build:acceptance": "electron-vite build --config electron.vite.acceptance.config.ts",
     "postbuild": "node scripts/verify-build.mjs",
+    "package:win": "node scripts/build-platform.mjs --platform=win",
+    "package:win:dir": "node scripts/build-platform.mjs --platform=win --dir",
+    "package:win:unsigned-development": "node scripts/build-platform.mjs --platform=win --unsigned-development",
+    "package:win:dir:unsigned-development": "node scripts/build-platform.mjs --platform=win --dir --unsigned-development",
+    "package:mac": "node scripts/build-platform.mjs --platform=mac",
+    "package:mac:unsigned-development": "node scripts/build-platform.mjs --platform=mac --unsigned-development",
+    "verify:package": "node scripts/verify-package.mjs",
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
     "test": "vitest run --config vitest.config.ts",
-    "lint": "eslint . --max-warnings=0",
+    "test:e2e": "playwright test --config playwright.config.ts",
+    "lint": "eslint . --ignore-pattern out-acceptance --max-warnings=0",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
   },
   "dependencies": {
@@ -21,6 +30,8 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@electron/notarize": "2.5.0",
+    "@playwright/test": "^1.61.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/node": "^24.0.0",
@@ -28,8 +39,10 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "electron": "43.1.1",
+    "electron-builder": "^26.15.3",
     "electron-vite": "5.0.0",
     "jsdom": "^29.1.1",
+    "playwright": "^1.61.1",
     "vite": "^7.3.6"
   }
 }

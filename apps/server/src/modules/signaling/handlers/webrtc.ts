@@ -310,16 +310,13 @@ export function createWebrtcRequestHandler(
           if (dependencies.roomRegistry.prepareRelay(relayInput).replayed) {
             return { data: {} };
           }
-          const negotiation = dependencies.roomRegistry.validateNegotiation({
+          dependencies.roomRegistry.validateNegotiation({
             ...current,
             negotiationId: request.payload.negotiationId,
           });
           const room =
             dependencies.roomRegistry.getCurrentConnectionSnapshot(current);
-          if (
-            memberRole(room, current.userId) !== 'joiner' ||
-            negotiation.status !== 'completed'
-          ) {
+          if (memberRole(room, current.userId) !== 'joiner') {
             throw new SignalingHandlerError('INVALID_STATE');
           }
           return relay(
@@ -397,6 +394,46 @@ export function createWebrtcRequestHandler(
               userId: current.userId,
               connectionEpoch: current.connectionEpoch,
             }),
+          };
+        }
+        case 'webrtc.recoveryReset': {
+          const current = currentRoomInput(
+            context,
+            request.payload.roomId,
+            request.payload.connectionEpoch,
+          );
+          dependencies.roomRegistry.validateNegotiation({
+            ...current,
+            negotiationId: request.payload.negotiationId,
+          });
+          const reset = dependencies.roomRegistry.resetNegotiation({
+            ...current,
+            reason: 'signaling_reset',
+            requestId: request.requestId,
+          }).data.reset;
+          return {
+            data: {
+              negotiationId: reset.negotiationId,
+              resetGeneration: reset.generation,
+              reason: reset.reason,
+            },
+            effects: {
+              intents: [
+                {
+                  type: 'webrtc.negotiationReset',
+                  roomId: current.roomId,
+                  negotiationId: reset.negotiationId,
+                  generation: reset.generation,
+                  reason: reset.reason,
+                },
+              ],
+              confirmations: [
+                {
+                  type: 'negotiationReset.consume',
+                  input: { ...current, ...reset },
+                },
+              ],
+            },
           };
         }
         default:

@@ -1,10 +1,16 @@
 import {
   peerSummarySchema,
+  roomResumeAckDataSchema,
+  roomResumeDispositionSchema,
   roomSessionAckDataSchema,
+  screenOwnerSnapshotSchema,
   type IceConfigurationData,
   type P2pRequestEnvelope,
   type PeerSummary,
+  type RoomResumeAckData,
+  type RoomResumeDisposition,
   type RoomSessionAckData,
+  type ScreenOwnerSnapshot,
 } from '@wo/protocol';
 
 import type { JoinAttemptLimiter } from '../../rooms/join-attempt-limiter.ts';
@@ -90,6 +96,32 @@ function peerSummary(
       });
 }
 
+function screenOwnerSnapshot(session: RoomSessionData): ScreenOwnerSnapshot {
+  const lease = session.room.screenLease;
+  if (lease === null) {
+    return screenOwnerSnapshotSchema.parse({
+      owner: null,
+      leaseId: null,
+      leaseExpiresAt: null,
+    });
+  }
+  const owner = session.room.members.find(
+    (member) => member.userId === lease.ownerUserId,
+  );
+  if (owner === undefined) {
+    throw new Error('Screen lease owner is not a room member');
+  }
+  return screenOwnerSnapshotSchema.parse({
+    owner: peerSummarySchema.parse({
+      userId: owner.userId,
+      displayName: owner.displayName,
+      ready: owner.ready,
+    }),
+    leaseId: lease.leaseId,
+    leaseExpiresAt: new Date(lease.expiresAtMs).toISOString(),
+  });
+}
+
 function publicRoomSession(
   session: RoomSessionData,
   userId: string,
@@ -101,6 +133,7 @@ function publicRoomSession(
     state: session.room.state,
     connectionEpoch: session.connection.connectionEpoch,
     peer: peerSummary(session, userId),
+    screen: screenOwnerSnapshot(session),
     ...ice,
   });
 }
@@ -137,6 +170,44 @@ function compensatedPublicRoomSession(
     });
     throw error;
   }
+}
+
+function resumeDisposition(session: RoomSessionData): RoomResumeDisposition {
+  const reset = session.room.pendingNegotiationReset;
+  if (reset !== null) {
+    return roomResumeDispositionSchema.parse({
+      status: 'reset_required',
+      negotiationId: reset.negotiationId,
+      resetGeneration: reset.generation,
+      reason: reset.reason,
+    });
+  }
+  const negotiation = session.room.activeNegotiation;
+  if (negotiation === null) return Object.freeze({ status: 'none' });
+  if (negotiation.status === 'completed') {
+    return roomResumeDispositionSchema.parse({
+      status: 'completed',
+      negotiationId: negotiation.negotiationId,
+      negotiationGeneration: negotiation.generation,
+    });
+  }
+  throw new Error('Resumed room has no recoverable negotiation disposition');
+}
+
+function compensatedResumeSession(
+  dependencies: RoomRequestHandlerDependencies,
+  session: RoomSessionData,
+  userId: string,
+): RoomResumeAckData {
+  const publicSession = compensatedPublicRoomSession(
+    dependencies,
+    session,
+    userId,
+  );
+  return roomResumeAckDataSchema.parse({
+    ...publicSession,
+    resume: resumeDisposition(session),
+  });
 }
 
 export function createRoomRequestHandler(
@@ -216,18 +287,47 @@ export function createRoomRequestHandler(
             connectionId: context.connectionId,
             requestId: request.requestId,
           });
+          const data = compensatedResumeSession(
+            dependencies,
+            result.data,
+            identity.userId,
+          );
+          const current = {
+            roomId: result.data.room.id,
+            userId: identity.userId,
+            connectionId: context.connectionId,
+            connectionEpoch: result.data.connection.connectionEpoch,
+          };
+          const reset =
+            dependencies.roomRegistry.peekPendingNegotiationReset(current);
+          const intents: RoomIntent[] = [...result.intents];
+          if (reset !== null) {
+            intents.push({
+              type: 'webrtc.negotiationReset',
+              roomId: current.roomId,
+              negotiationId: reset.negotiationId,
+              generation: reset.generation,
+              reason: reset.reason,
+            });
+          }
           return {
-            data: compensatedPublicRoomSession(
-              dependencies,
-              result.data,
-              identity.userId,
-            ),
+            data,
             effects: {
               binding: {
                 roomId: result.data.room.id,
                 connectionEpoch: result.data.connection.connectionEpoch,
               },
-              intents: result.intents,
+              intents,
+              ...(reset === null
+                ? {}
+                : {
+                    confirmations: [
+                      {
+                        type: 'negotiationReset.consume' as const,
+                        input: { ...current, ...reset },
+                      },
+                    ],
+                  }),
             },
           };
         }
@@ -257,33 +357,9 @@ export function createRoomRequestHandler(
             ...current,
             requestId: request.requestId,
           });
-          const reset =
-            dependencies.roomRegistry.peekPendingNegotiationReset(current);
-          const intents: RoomIntent[] = [...result.intents];
-          if (reset !== null) {
-            intents.push({
-              type: 'webrtc.negotiationReset',
-              roomId: current.roomId,
-              negotiationId: reset.negotiationId,
-              generation: reset.generation,
-              reason: reset.reason,
-            });
-          }
           return {
             data: {},
-            effects: {
-              intents,
-              ...(reset === null
-                ? {}
-                : {
-                    confirmations: [
-                      {
-                        type: 'negotiationReset.consume' as const,
-                        input: { ...current, ...reset },
-                      },
-                    ],
-                  }),
-            },
+            effects: { intents: result.intents },
           };
         }
         default:

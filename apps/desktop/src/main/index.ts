@@ -1,14 +1,34 @@
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  desktopCapturer,
+  ipcMain,
+  safeStorage,
+  shell,
+  systemPreferences,
+} from 'electron';
 
 import { createAuthSessionBroker } from './auth-session-broker.js';
+import { createCaptureSourceBroker } from './capture-policy.js';
+import {
+  createCaptureSourceService,
+  installDisplayMediaHandler,
+} from './capture-sources.js';
 import { createMainHttpClient } from './http-client.js';
 import { registerDesktopIpc } from './ipc.js';
 import { establishDesktopLifecycle } from './lifecycle.js';
+import {
+  resolvePackageSmokeRequest,
+  waitForPackageSmokeRendererReady,
+  writePackageSmokeReady,
+} from './package-smoke.js';
 import { createRealtimeTicketBroker } from './realtime-ticket-broker.js';
 import { loadRuntimeConfig } from './runtime-config.js';
+import { createScreenPermissionService } from './permissions.js';
 import { createSecureSessionStore } from './secure-session-store.js';
 import {
   buildContentSecurityPolicy,
@@ -27,6 +47,11 @@ const runtime = loadRuntimeConfig({
   environment: process.env,
   packagedRendererEntry,
 });
+const packageSmokeRequest = resolvePackageSmokeRequest({
+  argumentsList: process.argv,
+  environment: process.env,
+  temporaryRoot: tmpdir(),
+});
 
 let mainWindow: BrowserWindow | null = null;
 const ownsSingleInstance = establishDesktopLifecycle({
@@ -36,6 +61,24 @@ const ownsSingleInstance = establishDesktopLifecycle({
 });
 
 app.enableSandbox();
+
+const captureBroker =
+  createCaptureSourceBroker<Electron.DesktopCapturerSource>();
+const capture = createCaptureSourceService({
+  broker: captureBroker,
+  desktopCapturer: {
+    getSources: (options) =>
+      desktopCapturer.getSources({
+        ...options,
+        types: [...options.types],
+      }),
+  },
+});
+const permissions = createScreenPermissionService({
+  platform: process.platform,
+  systemPreferences,
+  shell,
+});
 
 function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow(
@@ -52,11 +95,21 @@ function createMainWindow(): BrowserWindow {
     window.webContents.session,
     runtime.rendererEntry,
   );
-  window.once('ready-to-show', () => window.show());
+  installDisplayMediaHandler({
+    session: window.webContents.session,
+    webContents: window.webContents,
+    rendererEntry: runtime.rendererEntry,
+    broker: captureBroker,
+  });
+  const clearCaptureSources = (): void => capture.clear(window.webContents.id);
+  window.webContents.on('did-start-navigation', clearCaptureSources);
+  window.webContents.once('destroyed', clearCaptureSources);
+  if (packageSmokeRequest === null) {
+    window.once('ready-to-show', () => window.show());
+  }
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });
-  void window.loadURL(runtime.rendererEntry);
   return window;
 }
 
@@ -75,20 +128,41 @@ if (ownsSingleInstance) {
   registerDesktopIpc(ipcMain, {
     auth,
     realtime,
+    capture,
+    permissions,
     rendererEntry: runtime.rendererEntry,
   });
 
-  void app.whenReady().then(() => {
-    mainWindow = createMainWindow();
-  });
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+  const appReady = app.whenReady();
+  void appReady
+    .then(async () => {
       mainWindow = createMainWindow();
-    }
-  });
+      await mainWindow.loadURL(runtime.rendererEntry);
+      if (packageSmokeRequest !== null) {
+        await waitForPackageSmokeRendererReady(mainWindow.webContents);
+        await writePackageSmokeReady(packageSmokeRequest);
+        app.quit();
+      }
+    })
+    .catch(() => {
+      process.stderr.write(
+        packageSmokeRequest === null
+          ? 'DESKTOP_STARTUP_FAILED\n'
+          : 'DESKTOP_PACKAGE_SMOKE_FAILED\n',
+      );
+      app.exit(1);
+    });
 
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
-  });
+  if (packageSmokeRequest === null) {
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        mainWindow = createMainWindow();
+        void mainWindow.loadURL(runtime.rendererEntry);
+      }
+    });
+
+    app.on('window-all-closed', () => {
+      if (process.platform !== 'darwin') app.quit();
+    });
+  }
 }

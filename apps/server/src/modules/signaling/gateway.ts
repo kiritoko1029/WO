@@ -356,6 +356,7 @@ export function registerSignalingGateway(
             {
               roomId: intent.roomId,
               negotiationId: intent.negotiationId,
+              resetGeneration: intent.generation,
               reason: intent.reason,
             },
             {
@@ -391,6 +392,13 @@ export function registerSignalingGateway(
           });
           return true;
         }
+        case 'screen.bitrateChanged':
+          broadcast(intent.roomId, intent.ownerUserId, 'screen.bitrate', {
+            roomId: intent.roomId,
+            leaseId: intent.leaseId,
+            bitrate: intent.bitrateBps,
+          });
+          return true;
       }
     } catch (error) {
       if (error instanceof RoomDomainError && error.code === 'ROOM_CLOSED') {
@@ -586,15 +594,22 @@ export function registerSignalingGateway(
         'Signaling is temporarily unavailable',
         true,
       );
-      sendSerialized(connectionId, fallback);
+      const needsFreshSocket =
+        Object.hasOwn(dispatched.effects, 'binding') &&
+        dispatched.effects.binding !== null;
+      if (needsFreshSocket) {
+        closeAndCleanup(connectionId, 1011, 'SIGNALING_RECOVERY_FAILED');
+      } else {
+        sendSerialized(connectionId, fallback);
+      }
     }
   };
 
-  const closeAndCleanup = (
+  function closeAndCleanup(
     connectionId: string,
     code: number,
     reason: string,
-  ): void => {
+  ): void {
     const connection = connectionRegistry.get(connectionId);
     if (connection === null) {
       return;
@@ -609,7 +624,7 @@ export function registerSignalingGateway(
       }
     }
     cleanupConnection(connectionId);
-  };
+  }
 
   const preValidateUpgrade = async (request: FastifyRequest): Promise<void> => {
     if (!request.ws) {

@@ -367,6 +367,109 @@ describe('voice capture and playback', () => {
     expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(second);
   });
 
+  it('reattaches the current microphone when a joiner sender was attached earlier', async () => {
+    const initial = track();
+    const replacement = track();
+    const audioSender = sender();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([initial]))
+          .mockResolvedValueOnce(stream([replacement])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start();
+    await audioSender.replaceTrack(initial);
+
+    await voice.switchMicrophone('mic-2');
+    await voice.bindSender(audioSender, true);
+
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(replacement);
+    expect(initial.stop).toHaveBeenCalledOnce();
+    expect(replacement.stop).not.toHaveBeenCalled();
+    expect(voice.microphoneTrack).toBe(replacement);
+  });
+
+  it('serializes a joiner sender bind behind an in-flight microphone switch', async () => {
+    const initial = track();
+    const replacement = track();
+    const replace = deferred<void>();
+    const audioSender = sender();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([initial]))
+          .mockResolvedValueOnce(stream([replacement])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(audioSender);
+    audioSender.replaceTrack.mockReturnValueOnce(replace.promise);
+
+    const switching = voice.switchMicrophone('mic-2');
+    await vi.waitFor(() =>
+      expect(audioSender.replaceTrack).toHaveBeenCalledWith(replacement),
+    );
+    const binding = voice.bindSender(audioSender, true);
+    replace.resolve();
+
+    await expect(switching).resolves.toBe(replacement);
+    await expect(binding).resolves.toBeUndefined();
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(replacement);
+    expect(replacement.stop).not.toHaveBeenCalled();
+    expect(voice.microphoneTrack).toBe(replacement);
+  });
+
+  it('stops an uncommitted capture after a successful sender rebind', async () => {
+    const initial = track();
+    const stale = track();
+    const newestCapture = deferred<MediaStream>();
+    const forwardReplace = deferred<void>();
+    const firstSender = sender();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([initial]))
+          .mockResolvedValueOnce(stream([stale]))
+          .mockReturnValueOnce(newestCapture.promise),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(firstSender);
+    firstSender.replaceTrack
+      .mockReturnValueOnce(forwardReplace.promise)
+      .mockRejectedValueOnce(new Error('rollback failed'));
+
+    const staleSwitch = voice.switchMicrophone('mic-stale');
+    await vi.waitFor(() =>
+      expect(firstSender.replaceTrack).toHaveBeenCalledWith(stale),
+    );
+    const newestSwitch = voice.switchMicrophone('mic-newest');
+    forwardReplace.resolve();
+    await expect(staleSwitch).rejects.toThrow('rollback failed');
+    expect(stale.stop).not.toHaveBeenCalled();
+
+    const nextSender = sender();
+    await voice.bindSender(nextSender, true);
+    expect(nextSender.replaceTrack).toHaveBeenCalledWith(initial);
+    expect(stale.stop).toHaveBeenCalledOnce();
+
+    newestCapture.reject(
+      Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+    );
+    await expect(newestSwitch).rejects.toMatchObject({
+      code: 'MICROPHONE_PERMISSION_DENIED',
+    });
+    await voice.cleanup();
+  });
+
   it('refuses remote playback after the owned audio output is cleaned', async () => {
     const element = audioElement();
     const playback = output(element);

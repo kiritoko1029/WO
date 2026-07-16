@@ -1,19 +1,25 @@
 import {
   p2pAckEnvelopeSchema,
   p2pRoomJoinAckSchema,
+  p2pScreenAcquireAckSchema,
+  p2pScreenReleaseAckSchema,
+  p2pScreenRenewAckSchema,
   p2pRequestEnvelopeSchema,
   roomCreateAckSchema,
+  screenBitrateAckSchema,
   type IceConfigurationData,
   type P2pRequestEnvelope,
 } from '@wo/protocol';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { createRoomRegistry } from '../src/modules/rooms/room-registry.ts';
+import { createScreenLeaseRegistry } from '../src/modules/screen/screen-lease-registry.ts';
 import {
   createSignalingDispatcher,
   type SignalingRequestContext,
 } from '../src/modules/signaling/dispatcher.ts';
 import { createRoomRequestHandler } from '../src/modules/signaling/handlers/room.ts';
+import { createScreenRequestHandler } from '../src/modules/signaling/handlers/screen.ts';
 import { createWebrtcRequestHandler } from '../src/modules/signaling/handlers/webrtc.ts';
 
 const fixedIceConfiguration = (suffix: number): IceConfigurationData => ({
@@ -97,6 +103,9 @@ function createHarness(
     webrtcHandler: createWebrtcRequestHandler({
       roomRegistry: registry,
       createFreshIce,
+    }),
+    screenHandler: createScreenRequestHandler({
+      leases: createScreenLeaseRegistry({ roomRegistry: registry }),
     }),
   });
   return {
@@ -409,6 +418,20 @@ describe('P2P signaling dispatcher', () => {
     }
     registry.confirmOfferRelay(offerConfirmation.input);
 
+    const queuedRestart = dispatch(
+      dispatcher,
+      joiner,
+      request('webrtc.restartRequested', 'restart-during-negotiation', {
+        roomId,
+        connectionEpoch: joiner.binding!.connectionEpoch,
+        negotiationId: 'negotiation-1',
+      }),
+    );
+    expect(queuedRestart.effects.relays[0]).toMatchObject({
+      targetUserId: 'creator',
+      type: 'webrtc.restartRequested',
+    });
+
     const conflictingAnswer = dispatch(
       dispatcher,
       joiner,
@@ -540,21 +563,151 @@ describe('P2P signaling dispatcher', () => {
       ok: true,
       data: { rtcConfiguration: { iceTransportPolicy: 'all' } },
     });
+
+    const recoveryReset = dispatch(
+      dispatcher,
+      joiner,
+      request('webrtc.recoveryReset', 'recovery-reset-1', {
+        roomId,
+        connectionEpoch: joiner.binding!.connectionEpoch,
+        negotiationId: 'negotiation-2',
+      }),
+    );
+    expect(
+      p2pAckEnvelopeSchema.parse(recoveryReset.response).payload,
+    ).toMatchObject({
+      ok: true,
+      data: {
+        negotiationId: expect.any(String),
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+    expect(recoveryReset.effects.intents).toEqual([
+      expect.objectContaining({
+        type: 'webrtc.negotiationReset',
+        roomId,
+        generation: 1,
+        reason: 'signaling_reset',
+      }),
+    ]);
+    expect(
+      registry
+        .getCurrentConnectionSnapshot({
+          roomId,
+          userId: 'joiner',
+          connectionId: joiner.connectionId,
+          connectionEpoch: joiner.binding!.connectionEpoch,
+        })
+        .members.map(({ ready }) => ready),
+    ).toEqual([false, false]);
     registry.clear();
   });
 
-  test('returns a normalized unsupported error for screen requests before Task 13', () => {
+  test('acquires, renews, updates, and releases a trusted socket screen lease', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
     const { registry, dispatcher } = createHarness();
-    const result = dispatch(
+    let creator = createContext('creator', 'Creator', 'creator-connection');
+    let joiner = createContext('joiner', 'Joiner', 'joiner-connection');
+    const created = dispatch(
       dispatcher,
-      createContext('creator', 'Creator', 'creator-connection'),
-      request('screen.acquire', 'screen-1', { roomId: 'room-1' }),
+      creator,
+      request('room.create', 'create-screen-room', {}),
     );
+    const createAck = roomCreateAckSchema.parse(created.response);
+    if (!createAck.payload.ok || created.effects.binding == null) {
+      throw new Error('expected create success');
+    }
+    creator = withBinding(creator, created.effects.binding);
+    const joined = dispatch(
+      dispatcher,
+      joiner,
+      request('room.join', 'join-screen-room', {
+        roomCode: createAck.payload.data.roomCode,
+      }),
+    );
+    if (joined.effects.binding == null)
+      throw new Error('expected join success');
+    joiner = withBinding(joiner, joined.effects.binding);
+    const roomId = createAck.payload.data.roomId;
 
-    expect(p2pAckEnvelopeSchema.parse(result.response).payload).toMatchObject({
-      ok: false,
-      error: { code: 'UNSUPPORTED_PROTOCOL' },
+    const acquired = dispatch(
+      dispatcher,
+      creator,
+      request('screen.acquire', 'screen-acquire', { roomId }),
+    );
+    const acquireAck = p2pScreenAcquireAckSchema.parse(acquired.response);
+    if (!acquireAck.payload.ok) throw new Error('expected acquire success');
+    expect(acquireAck.payload.data.lease).toMatchObject({
+      roomId,
+      holderId: 'creator',
+      expiresAt: '1970-01-01T00:00:15.000Z',
     });
+    expect(acquired.effects.intents).toContainEqual({
+      type: 'screen.ownerChanged',
+      roomId,
+      ownerUserId: 'creator',
+      leaseId: acquireAck.payload.data.lease.leaseId,
+    });
+
+    const busy = dispatch(
+      dispatcher,
+      joiner,
+      request('screen.acquire', 'screen-busy', { roomId }),
+    );
+    expect(p2pAckEnvelopeSchema.parse(busy.response).payload).toMatchObject({
+      ok: false,
+      error: { code: 'SCREEN_SHARE_BUSY' },
+    });
+
+    vi.advanceTimersByTime(5_000);
+    const leaseId = acquireAck.payload.data.lease.leaseId;
+    const renewed = dispatch(
+      dispatcher,
+      creator,
+      request('screen.renew', 'screen-renew', { roomId, leaseId }),
+    );
+    expect(
+      p2pScreenRenewAckSchema.parse(renewed.response).payload,
+    ).toMatchObject({
+      ok: true,
+      data: {
+        lease: { holderId: 'creator', expiresAt: '1970-01-01T00:00:20.000Z' },
+      },
+    });
+
+    const bitrate = dispatch(
+      dispatcher,
+      creator,
+      request('screen.bitrate', 'screen-bitrate', {
+        roomId,
+        leaseId,
+        bitrate: 8_000_000,
+      }),
+    );
+    expect(screenBitrateAckSchema.parse(bitrate.response).payload).toEqual({
+      ok: true,
+      data: { bitrate: 8_000_000 },
+    });
+    expect(bitrate.effects.intents).toContainEqual({
+      type: 'screen.bitrateChanged',
+      roomId,
+      ownerUserId: 'creator',
+      leaseId,
+      bitrateBps: 8_000_000,
+    });
+
+    const released = dispatch(
+      dispatcher,
+      creator,
+      request('screen.release', 'screen-release', { roomId, leaseId }),
+    );
+    expect(p2pScreenReleaseAckSchema.parse(released.response).payload).toEqual({
+      ok: true,
+      data: {},
+    });
+
     registry.clear();
   });
 });

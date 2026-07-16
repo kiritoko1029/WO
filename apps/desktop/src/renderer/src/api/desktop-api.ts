@@ -5,8 +5,10 @@ import {
 import type {
   DesktopApi,
   DesktopBridge,
+  CaptureSourceSummary,
   PublicAuthSession,
   RealtimeConnectionGrant,
+  ScreenPermissionSnapshot,
 } from '../../../preload/types.js';
 
 async function unwrapBridge<Value>(
@@ -48,5 +50,29 @@ export function createRendererDesktopApi(
         identity,
       ),
   });
-  return Object.freeze({ auth, realtime });
+  const capture = Object.freeze({
+    list: () =>
+      unwrapBridge<readonly CaptureSourceSummary[]>(
+        bridge.capture.list(),
+        identity,
+      ),
+    select: async (token: string) => {
+      await unwrapBridge<null>(bridge.capture.select(token), (value) => {
+        if (value !== null) throw new TypeError('Expected null');
+        return null;
+      });
+    },
+    permission: () =>
+      unwrapBridge<ScreenPermissionSnapshot>(
+        bridge.capture.permission(),
+        identity,
+      ),
+    openSettings: async () => {
+      await unwrapBridge<null>(bridge.capture.openSettings(), (value) => {
+        if (value !== null) throw new TypeError('Expected null');
+        return null;
+      });
+    },
+  });
+  return Object.freeze({ auth, realtime, capture });
 }

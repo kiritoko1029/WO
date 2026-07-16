@@ -19,11 +19,13 @@ import {
   createJoinAttemptLimiter,
   type JoinAttemptLimiter,
 } from './modules/rooms/join-attempt-limiter.ts';
+import { safeErrorMetadata, SERVER_LOGGER_OPTIONS } from './logging.ts';
 import { createRoomRegistry } from './modules/rooms/room-registry.ts';
 import type {
   RoomIntent,
   RoomRegistryDependencies,
 } from './modules/rooms/room-types.ts';
+import { createScreenLeaseRegistry } from './modules/screen/screen-lease-registry.ts';
 import {
   createSignalingDispatcher,
   type SignalingDispatcher,
@@ -36,6 +38,7 @@ import {
   createRoomRequestHandler,
   type CreateFreshIce,
 } from './modules/signaling/handlers/room.ts';
+import { createScreenRequestHandler } from './modules/signaling/handlers/screen.ts';
 import { createWebrtcRequestHandler } from './modules/signaling/handlers/webrtc.ts';
 import { registerSignalTicketRoutes } from './modules/signaling/signal-ticket-routes.ts';
 import type { SignalTicketStore } from './modules/signaling/signal-ticket-store.ts';
@@ -47,31 +50,6 @@ const DEFAULT_AUTH_RATE_LIMIT: AuthRateLimit = Object.freeze({
   max: 20,
   timeWindow: 60_000,
 });
-
-const DEFAULT_LOGGER = {
-  level: 'info',
-  redact: {
-    paths: [
-      'req.headers.authorization',
-      'request.headers.authorization',
-      'req.body',
-      'request.body',
-      'email',
-      'password',
-      'accessToken',
-      'refreshToken',
-      'tokenHash',
-      'req.headers.sec-websocket-protocol',
-      'request.headers.sec-websocket-protocol',
-      'ticket',
-      'sdp',
-      'candidate',
-      'username',
-      'credential',
-    ],
-    censor: '[Redacted]',
-  },
-};
 
 export interface RealtimeAppDependencies {
   readonly identityRepository: Pick<IdentityRepository, 'findEmailUserById'>;
@@ -107,7 +85,7 @@ export async function createApp(
   dependencies: AppDependencies,
 ): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: dependencies.logger ?? DEFAULT_LOGGER,
+    logger: dependencies.logger ?? SERVER_LOGGER_OPTIONS,
     bodyLimit: dependencies.bodyLimit ?? DEFAULT_BODY_LIMIT,
     trustProxy: dependencies.trustProxy ?? false,
   });
@@ -120,7 +98,7 @@ export async function createApp(
         protocols.has('wo-v1') ? 'wo-v1' : false,
     },
     errorHandler(error, socket) {
-      app.log.error({ errorName: error.name }, 'WebSocket handler failed');
+      app.log.error(safeErrorMetadata(error), 'WebSocket handler failed');
       socket.close(1011, 'SIGNALING_UNAVAILABLE');
     },
   });
@@ -182,12 +160,12 @@ export async function createApp(
         roomRegistry,
         createFreshIce,
       }),
+      screenHandler: createScreenRequestHandler({
+        leases: createScreenLeaseRegistry({ roomRegistry }),
+      }),
       onInternalError(error, requestType) {
         app.log.error(
-          {
-            errorName: error instanceof Error ? error.name : 'UnknownError',
-            requestType,
-          },
+          { ...safeErrorMetadata(error), requestType },
           'Signaling request failed',
         );
       },
@@ -199,10 +177,7 @@ export async function createApp(
       options: { ...realtime.gatewayOptions, now },
       onInternalError(error, operation) {
         app.log.error(
-          {
-            errorName: error instanceof Error ? error.name : 'UnknownError',
-            operation,
-          },
+          { ...safeErrorMetadata(error), operation },
           'Signaling gateway failed',
         );
       },

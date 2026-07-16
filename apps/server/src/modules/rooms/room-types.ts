@@ -86,6 +86,7 @@ export interface ScreenLeaseSnapshot {
   readonly connectionEpoch: number;
   readonly leaseId: string;
   readonly expiresAtMs: number;
+  readonly targetBitrateBps: number;
 }
 
 export interface RoomSnapshot {
@@ -153,6 +154,13 @@ export type RoomIntent =
       roomId: string;
       ownerUserId: string | null;
       leaseId: string | null;
+    }>
+  | Readonly<{
+      type: 'screen.bitrateChanged';
+      roomId: string;
+      ownerUserId: string;
+      leaseId: string;
+      bitrateBps: number;
     }>
   | Readonly<{
       type: 'connection.replaced';
@@ -269,15 +277,20 @@ export interface ResetNegotiationInput extends CurrentConnectionInput {
   readonly requestId: string;
 }
 
-export interface SetScreenLeaseInput extends CurrentConnectionInput {
-  readonly leaseId: string;
-  readonly expiresAtMs: number;
+export interface AcquireScreenLeaseInput extends CurrentConnectionInput {
   readonly requestId: string;
 }
 
-export interface ReleaseScreenLeaseInput extends CurrentConnectionInput {
+export interface LeaseMutationInput extends CurrentConnectionInput {
   readonly leaseId: string;
   readonly requestId: string;
+}
+
+export type RenewScreenLeaseInput = LeaseMutationInput;
+export type ReleaseScreenLeaseInput = LeaseMutationInput;
+
+export interface SetScreenBitrateInput extends LeaseMutationInput {
+  readonly bitrateBps: number;
 }
 
 export interface RoomRegistryStats {
@@ -300,6 +313,9 @@ export interface RoomRegistryDependencies {
   readonly requestCacheMaxEntries?: number;
   readonly maxRooms?: number;
   readonly maxNegotiationGeneration?: number;
+  readonly screenLeaseTtlMs?: number;
+  readonly screenBitrateRange?: Readonly<{ min: number; max: number }>;
+  readonly maxScreenAcquireRequestIds?: number;
 }
 
 export interface RoomRegistry {
@@ -362,12 +378,18 @@ export interface RoomRegistry {
     input: ConfirmPendingNegotiationResetInput,
   ): boolean;
   getScreenLease(input: CurrentConnectionInput): ScreenLeaseSnapshot | null;
-  setScreenLease(
-    input: SetScreenLeaseInput,
+  acquireScreenLease(
+    input: AcquireScreenLeaseInput,
+  ): RoomMutationResult<Readonly<{ lease: ScreenLeaseSnapshot }>>;
+  renewScreenLease(
+    input: RenewScreenLeaseInput,
   ): RoomMutationResult<Readonly<{ lease: ScreenLeaseSnapshot }>>;
   releaseScreenLease(
     input: ReleaseScreenLeaseInput,
   ): RoomMutationResult<Readonly<{ lease: null }>>;
+  setScreenBitrate(
+    input: SetScreenBitrateInput,
+  ): RoomMutationResult<Readonly<{ bitrateBps: number }>>;
   getStats(): RoomRegistryStats;
   clear(): void;
 }

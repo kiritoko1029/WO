@@ -9,6 +9,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import type { VoiceDevice } from '../media/voice-controller.js';
+import type { ScreenShareState } from '../media/screen-controller.js';
 
 export function CallToolbar({
   busy,
@@ -20,12 +21,16 @@ export function CallToolbar({
   selectedOutputId,
   supportsOutputSelection,
   retryAvailable,
+  screenState,
+  screenDisabled,
+  screenOwnerName,
   onHangup,
   onMutedChange,
   onInputChange,
   onOutputChange,
   onOutputMutedChange,
   onRetry,
+  onScreenShare,
 }: {
   readonly busy: boolean;
   readonly muted: boolean;
@@ -36,12 +41,16 @@ export function CallToolbar({
   readonly selectedOutputId: string;
   readonly supportsOutputSelection: boolean;
   readonly retryAvailable: boolean;
+  readonly screenState: ScreenShareState;
+  readonly screenDisabled: boolean;
+  readonly screenOwnerName: string | null;
   readonly onHangup: () => void;
   readonly onMutedChange: (muted: boolean) => void;
   readonly onInputChange: (deviceId: string) => void;
   readonly onOutputChange: (deviceId: string) => void;
   readonly onOutputMutedChange: (muted: boolean) => void;
   readonly onRetry: () => void;
+  readonly onScreenShare: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -52,6 +61,16 @@ export function CallToolbar({
     }
     onMutedChange(!muted);
   };
+  const screenActive =
+    screenState === 'acquiring' ||
+    screenState === 'picking' ||
+    screenState === 'capturing' ||
+    screenState === 'sharing';
+  const screenLabel = screenDisabled
+    ? `${screenOwnerName ?? '对方'}正在共享`
+    : screenActive
+      ? '停止共享'
+      : '共享屏幕';
 
   return (
     <div className="toolbar-wrap">
@@ -114,11 +133,12 @@ export function CallToolbar({
           {retryAvailable || muted ? <MicOff size={21} /> : <Mic size={21} />}
         </button>
         <button
-          className="tool-button"
+          className={`tool-button${screenActive ? ' active' : ''}`}
           type="button"
-          title="共享屏幕"
-          aria-label="共享屏幕"
-          disabled
+          title={screenLabel}
+          aria-label={screenLabel}
+          disabled={busy || screenDisabled}
+          onClick={onScreenShare}
         >
           <MonitorUp size={21} />
         </button>

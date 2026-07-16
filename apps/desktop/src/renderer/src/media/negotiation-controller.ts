@@ -7,12 +7,16 @@ import {
   webrtcAnswerPayloadSchema,
   webrtcIceCandidateAckSchema,
   webrtcIceCandidatePayloadSchema,
+  webrtcIceRestartAckSchema,
   webrtcIceServersRefreshAckSchema,
   webrtcOfferAckSchema,
   webrtcOfferPayloadSchema,
+  webrtcRestartRequestedAckSchema,
+  webrtcRecoveryResetAckSchema,
   type IceCandidateInit,
   type P2pRequestEnvelope,
   type WebrtcIceServersRefreshAck,
+  type WebrtcRecoveryResetAck,
 } from '@wo/protocol';
 
 import type { PeerConnectionController } from './peer-connection-controller.js';
@@ -54,7 +58,11 @@ export interface NegotiationControllerOptions {
 }
 
 export interface NegotiationController {
-  startCreatorOffer(): Promise<void>;
+  startCreatorOffer(negotiationId?: string): Promise<void>;
+  refreshIceServers(): Promise<void>;
+  restartCreatorIce(negotiationId?: string): Promise<void>;
+  requestCreatorRestart(requestId: string): Promise<void>;
+  requestRecoveryReset(requestId: string): Promise<RecoveryResetResult>;
   handleOffer(payload: unknown): Promise<void>;
   handleAnswer(payload: unknown): Promise<void>;
   handleRemoteCandidate(payload: unknown): Promise<void>;
@@ -65,6 +73,12 @@ export interface NegotiationController {
   subscribeNegotiationReady(listener: () => void): () => void;
   reset(): void;
   dispose(): void;
+}
+
+export interface RecoveryResetResult {
+  readonly negotiationId: string;
+  readonly resetGeneration: number;
+  readonly reason: 'peer_resumed' | 'signaling_reset';
 }
 
 interface SignalGuard {
@@ -143,6 +157,10 @@ export function createNegotiationController(
   let localState: LocalCandidateState | null = null;
   const localStateByUfrag = new Map<string, LocalCandidateState>();
   let creatorOffer: {
+    readonly contextKey: string;
+    readonly promise: Promise<void>;
+  } | null = null;
+  let creatorRestart: {
     readonly contextKey: string;
     readonly promise: Promise<void>;
   } | null = null;
@@ -262,6 +280,7 @@ export function createNegotiationController(
   const clearNegotiationState = (): void => {
     controllerGeneration += 1;
     creatorOffer = null;
+    creatorRestart = null;
     offerOperations.clear();
     answerOperations.clear();
     localState = null;
@@ -270,14 +289,7 @@ export function createNegotiationController(
     remoteCandidateChain = Promise.resolve();
   };
 
-  const ensureFreshIce = async (guard: SignalGuard): Promise<void> => {
-    const expiresAt = Date.parse(options.peer.iceCredentialsExpiresAt);
-    if (
-      Number.isFinite(expiresAt) &&
-      expiresAt - now() >= ICE_REFRESH_MARGIN_MS
-    ) {
-      return;
-    }
+  const refreshIceServers = async (guard: SignalGuard): Promise<void> => {
     const response =
       await options.signaling.request<WebrtcIceServersRefreshAck>(
         'webrtc.iceServers.refresh',
@@ -297,6 +309,57 @@ export function createNegotiationController(
     );
   };
 
+  const ensureFreshIce = async (guard: SignalGuard): Promise<void> => {
+    const expiresAt = Date.parse(options.peer.iceCredentialsExpiresAt);
+    if (
+      Number.isFinite(expiresAt) &&
+      expiresAt - now() >= ICE_REFRESH_MARGIN_MS
+    ) {
+      return;
+    }
+    await refreshIceServers(guard);
+  };
+
+  const createAndSendCreatorOffer = async (
+    negotiationId: string,
+    type: 'webrtc.offer' | 'webrtc.iceRestart',
+  ): Promise<void> => {
+    resetRemoteContext();
+    if (type === 'webrtc.iceRestart') options.peer.restartIce();
+    options.peer.beginNegotiation(negotiationId);
+    const guard = guardFor(negotiationId);
+    const candidates = beginLocalCandidates(guard);
+    if (type === 'webrtc.offer') await ensureFreshIce(guard);
+    if (!current(guard)) return;
+    const description = await pc.createOffer();
+    if (!current(guard)) return;
+    bindLocalDescription(candidates, description);
+    await pc.setLocalDescription(description);
+    if (!current(guard)) return;
+    const payload = {
+      roomId: options.roomId,
+      negotiationId,
+      connectionEpoch: guard.connectionEpoch,
+      description,
+    };
+    const response =
+      type === 'webrtc.offer'
+        ? await options.signaling.request(type, payload, webrtcOfferAckSchema, {
+            requestId: makeRequestId(),
+            retryTimeouts: 1,
+          })
+        : await options.signaling.request(
+            type,
+            payload,
+            webrtcIceRestartAckSchema,
+            { requestId: makeRequestId(), retryTimeouts: 1 },
+          );
+    assertSuccessfulAck(response);
+    if (!current(guard)) return;
+    candidates.ready = true;
+    await flushLocalCandidates(candidates);
+  };
+
   const markNegotiationReady = (): void => {
     for (const listener of readyListeners) {
       try {
@@ -308,7 +371,7 @@ export function createNegotiationController(
   };
 
   const controller: NegotiationController = {
-    startCreatorOffer: async () => {
+    startCreatorOffer: async (requestedNegotiationId) => {
       if (disposed) throw new Error('Negotiation controller is disposed');
       if (options.peer.role !== 'creator') {
         throw new Error('Only the creator may create an offer');
@@ -317,44 +380,96 @@ export function createNegotiationController(
         options.peer.mediaGeneration,
         options.peer.signalingGeneration,
         options.peer.connectionEpoch,
+        requestedNegotiationId ?? null,
       ]);
       if (creatorOffer?.contextKey === contextKey) {
         return creatorOffer.promise;
       }
-      const operation = (async () => {
-        resetRemoteContext();
-        const negotiationId = makeNegotiationId();
-        options.peer.beginNegotiation(negotiationId);
-        const guard = guardFor(negotiationId);
-        const candidates = beginLocalCandidates(guard);
-        await ensureFreshIce(guard);
-        if (!current(guard)) return;
-        const description = await pc.createOffer();
-        if (!current(guard)) return;
-        bindLocalDescription(candidates, description);
-        await pc.setLocalDescription(description);
-        if (!current(guard)) return;
-        const response = await options.signaling.request(
-          'webrtc.offer',
-          {
-            roomId: options.roomId,
-            negotiationId,
-            connectionEpoch: guard.connectionEpoch,
-            description,
-          },
-          webrtcOfferAckSchema,
-          { requestId: makeRequestId(), retryTimeouts: 1 },
-        );
-        assertSuccessfulAck(response);
-        if (!current(guard)) return;
-        candidates.ready = true;
-        await flushLocalCandidates(candidates);
-      })();
+      const operation = createAndSendCreatorOffer(
+        requestedNegotiationId ?? makeNegotiationId(),
+        'webrtc.offer',
+      );
       creatorOffer = { contextKey, promise: operation };
       void operation.catch(() => {
         if (creatorOffer?.promise === operation) creatorOffer = null;
       });
       return operation;
+    },
+    refreshIceServers: async () => {
+      if (disposed) throw new Error('Negotiation controller is disposed');
+      const negotiationId = options.peer.currentNegotiationId;
+      if (negotiationId === null) {
+        throw new Error('No active negotiation is available for ICE refresh');
+      }
+      await refreshIceServers(guardFor(negotiationId));
+    },
+    restartCreatorIce: async (requestedNegotiationId) => {
+      if (disposed) throw new Error('Negotiation controller is disposed');
+      if (options.peer.role !== 'creator') {
+        throw new Error('Only the creator may restart ICE');
+      }
+      const negotiationId = requestedNegotiationId ?? makeNegotiationId();
+      const contextKey = JSON.stringify([
+        options.peer.mediaGeneration,
+        options.peer.signalingGeneration,
+        options.peer.connectionEpoch,
+        negotiationId,
+      ]);
+      if (creatorRestart?.contextKey === contextKey) {
+        return creatorRestart.promise;
+      }
+      const operation = createAndSendCreatorOffer(
+        negotiationId,
+        'webrtc.iceRestart',
+      );
+      creatorRestart = { contextKey, promise: operation };
+      void operation.catch(() => {
+        if (creatorRestart?.promise === operation) creatorRestart = null;
+      });
+      return operation;
+    },
+    requestCreatorRestart: async (requestId) => {
+      if (disposed) throw new Error('Negotiation controller is disposed');
+      if (options.peer.role !== 'joiner') {
+        throw new Error('Only the joiner may request an ICE restart');
+      }
+      const negotiationId = options.peer.currentNegotiationId;
+      if (negotiationId === null) {
+        throw new Error('No active negotiation is available for ICE restart');
+      }
+      const response = await options.signaling.request(
+        'webrtc.restartRequested',
+        {
+          roomId: options.roomId,
+          negotiationId,
+          connectionEpoch: options.peer.connectionEpoch,
+        },
+        webrtcRestartRequestedAckSchema,
+        { requestId, retryTimeouts: 1 },
+      );
+      assertSuccessfulAck(response);
+    },
+    requestRecoveryReset: async (requestId) => {
+      if (disposed) throw new Error('Negotiation controller is disposed');
+      const negotiationId = options.peer.currentNegotiationId;
+      if (negotiationId === null) {
+        throw new Error('No active negotiation is available for recovery');
+      }
+      const response = await options.signaling.request<WebrtcRecoveryResetAck>(
+        'webrtc.recoveryReset',
+        {
+          roomId: options.roomId,
+          negotiationId,
+          connectionEpoch: options.peer.connectionEpoch,
+        },
+        webrtcRecoveryResetAckSchema,
+        { requestId, retryTimeouts: 1 },
+      );
+      assertSuccessfulAck(response);
+      if (!response.payload.ok) {
+        throw new Error('Recovery reset was rejected');
+      }
+      return Object.freeze({ ...response.payload.data });
     },
     handleOffer: async (input) => {
       if (disposed) return;

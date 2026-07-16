@@ -95,6 +95,7 @@ export class SignalingHandlerError extends Error {
 export interface SignalingDispatcherDependencies {
   readonly roomHandler: SignalingRequestHandler;
   readonly webrtcHandler: SignalingRequestHandler;
+  readonly screenHandler: SignalingRequestHandler;
   readonly onInternalError?: (error: unknown, requestType: string) => void;
 }
 
@@ -184,7 +185,8 @@ export function createSignalingDispatcher(
       try {
         const result =
           dependencies.roomHandler.handle(context, request) ??
-          dependencies.webrtcHandler.handle(context, request);
+          dependencies.webrtcHandler.handle(context, request) ??
+          dependencies.screenHandler.handle(context, request);
         if (result === null) {
           throw new SignalingHandlerError('UNSUPPORTED_PROTOCOL');
         }

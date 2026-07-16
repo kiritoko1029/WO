@@ -76,6 +76,8 @@ import {
   webrtcRestartRequestedAckSchema,
   webrtcRestartRequestedBroadcastSchema,
   webrtcRestartRequestedRequestSchema,
+  webrtcRecoveryResetAckSchema,
+  webrtcRecoveryResetRequestSchema,
 } from './webrtc.js';
 
 export * from './auth.js';
@@ -139,6 +141,7 @@ export const p2pRequestEnvelopeSchema = z.discriminatedUnion('type', [
   webrtcIceRestartRequestSchema,
   webrtcRestartRequestedRequestSchema,
   webrtcIceServersRefreshRequestSchema,
+  webrtcRecoveryResetRequestSchema,
   screenAcquireRequestSchema,
   screenRenewRequestSchema,
   screenReleaseRequestSchema,
@@ -159,6 +162,7 @@ export const p2pAckEnvelopeSchema = z.discriminatedUnion('type', [
   webrtcIceRestartAckSchema,
   webrtcRestartRequestedAckSchema,
   webrtcIceServersRefreshAckSchema,
+  webrtcRecoveryResetAckSchema,
   p2pScreenAcquireAckSchema,
   p2pScreenRenewAckSchema,
   p2pScreenReleaseAckSchema,

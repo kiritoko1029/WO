@@ -29,6 +29,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+!deploy/.env.integration.example
 **/.certs/
 
 # Local media-lab evidence (the directory itself remains documented)

@@ -527,6 +527,203 @@ afterEach(async () => {
 });
 
 describe('authenticated signaling gateway', () => {
+  test('returns the current screen owner in join and resume acknowledgements', async () => {
+    const fixture = await createFixture();
+    const creator = await openClient(fixture, 'user-1');
+    sendRequest(creator, 'room.create', 'screen-snapshot-create', {});
+    const createAck = await creator.next(isAck('screen-snapshot-create'));
+    expect(createAck.payload).toEqual({ ok: true, data: expect.anything() });
+    const created = successData(createAck);
+    const roomId = String(created['roomId']);
+
+    sendRequest(creator, 'screen.acquire', 'screen-snapshot-acquire', {
+      roomId,
+    });
+    const acquired = successData(
+      await creator.next(isAck('screen-snapshot-acquire')),
+    );
+    const lease = acquired['lease'] as Record<string, unknown>;
+    await creator.next(isBroadcast('screen.ownerChanged'));
+
+    const joiner = await openClient(fixture, 'user-2');
+    sendRequest(joiner, 'room.join', 'screen-snapshot-join', {
+      roomCode: created['roomCode'],
+    });
+    const joined = successData(
+      await joiner.next(isAck('screen-snapshot-join')),
+    );
+    expect(joined['screen']).toEqual({
+      owner: {
+        userId: 'user-1',
+        displayName: 'Person One',
+        ready: false,
+      },
+      leaseId: lease['leaseId'],
+      leaseExpiresAt: lease['expiresAt'],
+    });
+    await creator.next(isBroadcast('peer.joined'));
+
+    joiner.socket.terminate();
+    await creator.next(isBroadcast('peer.left'));
+    const resumed = await openClient(fixture, 'user-2');
+    sendRequest(resumed, 'room.resume', 'screen-snapshot-resume', { roomId });
+    const resumedData = successData(
+      await resumed.next(isAck('screen-snapshot-resume')),
+    );
+    expect(resumedData['screen']).toEqual(joined['screen']);
+  });
+
+  test('arbitrates one screen owner and broadcasts bitrate only to the peer', async () => {
+    const fixture = await createFixture({ maxAckEntriesPerConnection: 1 });
+    const { creator, joiner, roomId, creatorEpoch } =
+      await openReadyPair(fixture);
+
+    sendRequest(creator, 'screen.acquire', 'screen-acquire', { roomId });
+    const acquired = successData(await creator.next(isAck('screen-acquire')));
+    const lease = acquired['lease'] as Record<string, unknown>;
+    const leaseId = String(lease['leaseId']);
+    expect(lease).toMatchObject({ roomId, holderId: 'user-1' });
+    await creator.next(isBroadcast('screen.ownerChanged'));
+    await joiner.next(isBroadcast('screen.ownerChanged'));
+
+    sendRequest(joiner, 'screen.acquire', 'screen-busy', { roomId });
+    expect(await joiner.next(isAck('screen-busy'))).toMatchObject({
+      payload: { ok: false, error: { code: 'SCREEN_SHARE_BUSY' } },
+    });
+
+    sendRequest(creator, 'screen.bitrate', 'screen-bitrate', {
+      roomId,
+      leaseId,
+      bitrate: 8_000_000,
+    });
+    expect(await creator.next(isAck('screen-bitrate'))).toMatchObject({
+      payload: { ok: true, data: { bitrate: 8_000_000 } },
+    });
+    expect(await joiner.next(isBroadcast('screen.bitrate'))).toMatchObject({
+      payload: { roomId, leaseId, bitrate: 8_000_000 },
+    });
+    expect(creator.has(isBroadcast('screen.bitrate'))).toBe(false);
+
+    sendRequest(creator, 'screen.release', 'screen-release', {
+      roomId,
+      leaseId,
+    });
+    expect(await creator.next(isAck('screen-release'))).toMatchObject({
+      payload: { ok: true, data: {} },
+    });
+    await creator.next(isBroadcast('screen.ownerChanged'));
+    await joiner.next(isBroadcast('screen.ownerChanged'));
+
+    sendRequest(joiner, 'screen.acquire', 'screen-next', { roomId });
+    const next = successData(await joiner.next(isAck('screen-next')));
+    const nextLeaseId = String(
+      (next['lease'] as Record<string, unknown>)['leaseId'],
+    );
+    await creator.next(isBroadcast('screen.ownerChanged'));
+    await joiner.next(isBroadcast('screen.ownerChanged'));
+    sendRequest(creator, 'peer.ready', 'evict-release-ack', {
+      roomId,
+      connectionEpoch: creatorEpoch,
+    });
+    await creator.next(isAck('evict-release-ack'));
+
+    sendRequest(creator, 'screen.release', 'screen-release', {
+      roomId,
+      leaseId,
+    });
+    expect(await creator.next(isAck('screen-release'))).toMatchObject({
+      payload: { ok: true, data: {} },
+    });
+    expect(creator.has(isBroadcast('screen.ownerChanged'))).toBe(false);
+    expect(joiner.has(isBroadcast('screen.ownerChanged'))).toBe(false);
+    sendRequest(joiner, 'screen.renew', 'screen-next-renew', {
+      roomId,
+      leaseId: nextLeaseId,
+    });
+    expect(await joiner.next(isAck('screen-next-renew'))).toMatchObject({
+      payload: { ok: true },
+    });
+  });
+
+  test('broadcasts screen release when the owning connection disconnects', async () => {
+    const fixture = await createFixture();
+    const { creator, joiner, roomId } = await openReadyPair(fixture);
+    sendRequest(creator, 'screen.acquire', 'screen-acquire-disconnect', {
+      roomId,
+    });
+    await creator.next(isAck('screen-acquire-disconnect'));
+    await creator.next(isBroadcast('screen.ownerChanged'));
+    await joiner.next(isBroadcast('screen.ownerChanged'));
+
+    creator.socket.close();
+
+    expect(await joiner.next(isBroadcast('screen.ownerChanged'))).toMatchObject(
+      {
+        payload: {
+          roomId,
+          owner: null,
+          leaseId: null,
+          leaseExpiresAt: null,
+        },
+      },
+    );
+  });
+
+  test('can replay an expired gateway acquire ack but rejects it after LRU eviction', async () => {
+    const fixture = await createFixture({
+      requestCacheMaxEntries: 1,
+      maxAckEntriesPerConnection: 1,
+    });
+    const { creator, joiner, roomId, creatorEpoch } =
+      await openReadyPair(fixture);
+    const acquirePayload = { roomId };
+    sendRequest(creator, 'screen.acquire', 'expired-acquire', acquirePayload);
+    const firstAck = await creator.next(isAck('expired-acquire'));
+    const firstData = successData(firstAck);
+    await creator.next(isBroadcast('screen.ownerChanged'));
+    await joiner.next(isBroadcast('screen.ownerChanged'));
+    fixture.advance(15_000);
+
+    sendRequest(creator, 'screen.acquire', 'expired-acquire', acquirePayload);
+    const staleGatewayReplay = await creator.next(isAck('expired-acquire'));
+    expect(successData(staleGatewayReplay)).toEqual(firstData);
+
+    sendRequest(joiner, 'screen.acquire', 'replacement-acquire', { roomId });
+    expect(await joiner.next(isAck('replacement-acquire'))).toMatchObject({
+      payload: { ok: true, data: { lease: { holderId: 'user-2' } } },
+    });
+    await creator.next(
+      (message) =>
+        isBroadcast('screen.ownerChanged')(message) &&
+        (message.payload as { owner?: unknown }).owner === null,
+    );
+    await creator.next(
+      (message) =>
+        isBroadcast('screen.ownerChanged')(message) &&
+        (message.payload as { owner?: unknown }).owner !== null,
+    );
+    await joiner.next(
+      (message) =>
+        isBroadcast('screen.ownerChanged')(message) &&
+        (message.payload as { owner?: unknown }).owner === null,
+    );
+    await joiner.next(
+      (message) =>
+        isBroadcast('screen.ownerChanged')(message) &&
+        (message.payload as { owner?: unknown }).owner !== null,
+    );
+    sendRequest(creator, 'peer.ready', 'evict-expired-acquire', {
+      roomId,
+      connectionEpoch: creatorEpoch,
+    });
+    await creator.next(isAck('evict-expired-acquire'));
+
+    sendRequest(creator, 'screen.acquire', 'expired-acquire', acquirePayload);
+    expect(await creator.next(isAck('expired-acquire'))).toMatchObject({
+      payload: { ok: false, error: { code: 'LEASE_LOST' } },
+    });
+  });
+
   test('negotiates only wo-v1 and consumes a query-free ticket once', async () => {
     const fixture = await createFixture();
     const issued = await issueTicket(fixture, 'user-1');
@@ -1010,6 +1207,15 @@ describe('authenticated signaling gateway', () => {
     const intermediateSession = successData(
       await intermediate.next(isAck('resume-1')),
     );
+    const firstResetAtIntermediate = await intermediate.next(
+      isBroadcast('webrtc.negotiationReset'),
+    );
+    const firstResetAtJoiner = await joiner.next(
+      isBroadcast('webrtc.negotiationReset'),
+    );
+    expect(firstResetAtIntermediate.payload).toEqual(
+      firstResetAtJoiner.payload,
+    );
     const intermediateEpoch = Number(intermediateSession['connectionEpoch']);
     expect(intermediateEpoch).toBeGreaterThan(creatorEpoch);
     expect(turnUsername(intermediateSession)).not.toBe(turnUsername(created));
@@ -1025,6 +1231,13 @@ describe('authenticated signaling gateway', () => {
     const replacement = await openClient(fixture, 'user-1');
     sendRequest(replacement, 'room.resume', 'resume-2', { roomId });
     const resumed = successData(await replacement.next(isAck('resume-2')));
+    const resetAtReplacement = await replacement.next(
+      isBroadcast('webrtc.negotiationReset'),
+    );
+    const resetAtJoiner = await joiner.next(
+      isBroadcast('webrtc.negotiationReset'),
+    );
+    expect(resetAtJoiner.payload).toEqual(resetAtReplacement.payload);
     const replacementEpoch = Number(resumed['connectionEpoch']);
     expect(replacementEpoch).toBeGreaterThan(intermediateEpoch);
     expect(turnUsername(resumed)).not.toBe(turnUsername(intermediateSession));
@@ -1038,13 +1251,11 @@ describe('authenticated signaling gateway', () => {
       connectionEpoch: replacementEpoch,
     });
     await replacement.next(isAck('replacement-ready'));
-    const resetAtReplacement = await replacement.next(
-      isBroadcast('webrtc.negotiationReset'),
-    );
-    const resetAtJoiner = await joiner.next(
-      isBroadcast('webrtc.negotiationReset'),
-    );
-    expect(resetAtJoiner.payload).toEqual(resetAtReplacement.payload);
+    sendRequest(joiner, 'peer.ready', 'joiner-ready-after-reset', {
+      roomId,
+      connectionEpoch: joinerEpoch,
+    });
+    await joiner.next(isAck('joiner-ready-after-reset'));
     const resetId = String(
       (resetAtReplacement.payload as Record<string, unknown>)['negotiationId'],
     );
@@ -1111,6 +1322,11 @@ describe('authenticated signaling gateway', () => {
     sendRequest(joiner, 'room.resume', 'joiner-resume-1', { roomId });
     joined = successData(await joiner.next(isAck('joiner-resume-1')));
     joinerEpoch = Number(joined['connectionEpoch']);
+    expect(joined['resume']).toMatchObject({
+      status: 'reset_required',
+      reason: 'signaling_reset',
+      resetGeneration: 1,
+    });
     sendRequest(joiner, 'peer.ready', 'joiner-ready-2', {
       roomId,
       connectionEpoch: joinerEpoch,
@@ -1123,11 +1339,25 @@ describe('authenticated signaling gateway', () => {
       isBroadcast('webrtc.negotiationReset'),
     );
     expect(initialResetAtJoiner.payload).toEqual(initialResetAtCreator.payload);
+    expect(initialResetAtCreator.payload).toMatchObject({
+      negotiationId: (joined['resume'] as Record<string, unknown>)[
+        'negotiationId'
+      ],
+      resetGeneration: (joined['resume'] as Record<string, unknown>)[
+        'resetGeneration'
+      ],
+    });
     const initialResetId = String(
       (initialResetAtCreator.payload as Record<string, unknown>)[
         'negotiationId'
       ],
     );
+
+    sendRequest(creator, 'peer.ready', 'creator-ready-after-initial-reset', {
+      roomId,
+      connectionEpoch: creatorEpoch,
+    });
+    await creator.next(isAck('creator-ready-after-initial-reset'));
 
     sendRequest(creator, 'webrtc.offer', 'offer-after-initial-reset', {
       roomId,
@@ -1574,6 +1804,11 @@ describe('authenticated signaling gateway', () => {
     const resumed = successData(
       await replacement.next(isAck('resume-after-late-callback')),
     );
+    expect(resumed['resume']).toMatchObject({
+      status: 'completed',
+      negotiationId: 'late-callback-negotiation',
+      negotiationGeneration: 1,
+    });
     const replacementEpoch = Number(resumed['connectionEpoch']);
     sendRequest(replacement, 'peer.ready', 'ready-after-late-callback', {
       roomId,
@@ -1809,7 +2044,7 @@ describe('authenticated signaling gateway', () => {
     await creator.next(isBroadcast('webrtc.restartRequested'));
   });
 
-  test('keeps a negotiation reset pending until both current peers queue it', async () => {
+  test('closes a newly bound resume socket when immediate reset delivery fails', async () => {
     const fixture = await createFixture();
     const { creator, joiner, roomId, creatorEpoch } =
       await openReadyPair(fixture);
@@ -1824,32 +2059,35 @@ describe('authenticated signaling gateway', () => {
     joiner.socket.terminate();
     await creator.next(isBroadcast('peer.left'));
 
-    const firstReplacement = await openClient(fixture, 'user-2');
-    sendRequest(firstReplacement, 'room.resume', 'joiner-resume-1', { roomId });
-    const firstResume = successData(
-      await firstReplacement.next(isAck('joiner-resume-1')),
-    );
-    const sockets = serverSockets(fixture);
-    const firstReplacementServerSocket = sockets.at(-1);
-    expect(firstReplacementServerSocket).toBeDefined();
+    const [creatorServerSocket] = serverSockets(fixture);
+    expect(creatorServerSocket).toBeDefined();
     failNextServerDelivery(
-      firstReplacementServerSocket!,
+      creatorServerSocket!,
       'webrtc.negotiationReset',
       'throw',
     );
+    const creatorClosed = new Promise<number>((resolve) =>
+      creator.socket.once('close', (code) => resolve(code)),
+    );
+    const firstReplacement = await openClient(fixture, 'user-2');
     const firstReplacementClosed = new Promise<number>((resolve) =>
       firstReplacement.socket.once('close', (code) => resolve(code)),
     );
-    sendRequest(firstReplacement, 'peer.ready', 'joiner-ready-1', {
+    sendRequest(firstReplacement, 'room.resume', 'joiner-resume-1', { roomId });
+    expect(await firstReplacementClosed).toBe(1011);
+    expect(await creatorClosed).toBe(1006);
+
+    const creatorReplacement = await openClient(fixture, 'user-1');
+    sendRequest(creatorReplacement, 'room.resume', 'creator-resume-2', {
       roomId,
-      connectionEpoch: Number(firstResume['connectionEpoch']),
     });
-    await creator.next(isBroadcast('peer.ready'));
-    const partiallyQueuedReset = await creator.next(
-      isBroadcast('webrtc.negotiationReset'),
+    const creatorResume = successData(
+      await creatorReplacement.next(isAck('creator-resume-2')),
     );
-    expect(await firstReplacementClosed).toBe(1006);
-    await creator.next(isBroadcast('peer.left'));
+    expect(creatorResume['resume']).toMatchObject({
+      status: 'reset_required',
+      resetGeneration: 1,
+    });
 
     const secondReplacement = await openClient(fixture, 'user-2');
     sendRequest(secondReplacement, 'room.resume', 'joiner-resume-2', {
@@ -1858,19 +2096,20 @@ describe('authenticated signaling gateway', () => {
     const secondResume = successData(
       await secondReplacement.next(isAck('joiner-resume-2')),
     );
-    sendRequest(secondReplacement, 'peer.ready', 'joiner-ready-2', {
-      roomId,
-      connectionEpoch: Number(secondResume['connectionEpoch']),
-    });
-    await secondReplacement.next(isAck('joiner-ready-2'));
-    const retriedAtCreator = await creator.next(
+    const retriedAtCreator = await creatorReplacement.next(
       isBroadcast('webrtc.negotiationReset'),
     );
     const retriedAtReplacement = await secondReplacement.next(
       isBroadcast('webrtc.negotiationReset'),
     );
-    expect(retriedAtCreator).toEqual(partiallyQueuedReset);
-    expect(retriedAtReplacement).toEqual(partiallyQueuedReset);
+    expect(retriedAtCreator.payload).toEqual(retriedAtReplacement.payload);
+    expect(retriedAtCreator.payload).toMatchObject({
+      negotiationId: (creatorResume['resume'] as Record<string, unknown>)[
+        'negotiationId'
+      ],
+      resetGeneration: 1,
+    });
+    expect(secondResume['resume']).toEqual(creatorResume['resume']);
   });
 
   test('normalizes malformed frames and enforces binary, size, heartbeat, and backpressure', async () => {

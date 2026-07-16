@@ -38,7 +38,7 @@ export const browserIceCandidateSchema = z
 export const iceCandidateInitSchema = browserIceCandidateSchema.nullable();
 
 const iceServerUriPattern =
-  /^(stun|turn):(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::([0-9]+))?(?:\?([^#]*))?$/u;
+  /^(stun|turn|turns):(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::([0-9]+))?(?:\?([^#]*))?$/u;
 const hostnameSchema = z.hostname();
 const ipv4Schema = z.ipv4();
 const ipv6Schema = z.ipv6();
@@ -87,6 +87,10 @@ const isValidIceServerUri = (value: string): boolean => {
     return query === undefined;
   }
 
+  if (scheme === 'turns') {
+    return query === undefined || query === 'transport=tcp';
+  }
+
   return (
     query === undefined ||
     query === 'transport=udp' ||
@@ -120,7 +124,9 @@ export const publicIceServerSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    const hasTurnUrl = value.urls.some((url) => url.startsWith('turn:'));
+    const hasTurnUrl = value.urls.some(
+      (url) => url.startsWith('turn:') || url.startsWith('turns:'),
+    );
     const hasUsername = value.username !== undefined;
     const hasCredential = value.credential !== undefined;
 
@@ -271,14 +277,26 @@ export const webrtcIceServersRefreshAckSchema = createP2pAckEnvelopeSchema(
   iceConfigurationDataSchema,
 );
 
+export const webrtcRecoveryResetPayloadSchema = webrtcSignalContextSchema;
+export const webrtcRecoveryResetRequestSchema = createRequestEnvelopeSchema(
+  'webrtc.recoveryReset',
+  webrtcRecoveryResetPayloadSchema,
+);
+
 export const negotiationResetReasonSchema = z.enum([
   'peer_resumed',
   'signaling_reset',
 ]);
+export const resetGenerationSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER);
 export const webrtcNegotiationResetPayloadSchema = z
   .object({
     roomId: roomIdSchema,
     negotiationId: negotiationIdSchema,
+    resetGeneration: resetGenerationSchema,
     reason: negotiationResetReasonSchema,
   })
   .strict();
@@ -287,6 +305,10 @@ export const webrtcNegotiationResetBroadcastSchema =
     'webrtc.negotiationReset',
     webrtcNegotiationResetPayloadSchema,
   );
+export const webrtcRecoveryResetAckSchema = createP2pAckEnvelopeSchema(
+  'webrtc.recoveryReset',
+  webrtcNegotiationResetPayloadSchema.omit({ roomId: true }),
+);
 
 export type OfferDescription = z.infer<typeof offerDescriptionSchema>;
 export type AnswerDescription = z.infer<typeof answerDescriptionSchema>;
@@ -354,6 +376,15 @@ export type WebrtcIceServersRefreshRequest = z.infer<
 >;
 export type WebrtcIceServersRefreshAck = z.infer<
   typeof webrtcIceServersRefreshAckSchema
+>;
+export type WebrtcRecoveryResetPayload = z.infer<
+  typeof webrtcRecoveryResetPayloadSchema
+>;
+export type WebrtcRecoveryResetRequest = z.infer<
+  typeof webrtcRecoveryResetRequestSchema
+>;
+export type WebrtcRecoveryResetAck = z.infer<
+  typeof webrtcRecoveryResetAckSchema
 >;
 export type NegotiationResetReason = z.infer<
   typeof negotiationResetReasonSchema

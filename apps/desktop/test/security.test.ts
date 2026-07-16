@@ -166,9 +166,15 @@ describe('desktop window security', () => {
     );
     expect(source).not.toContain('setCertificateVerifyProc');
     expect(source).not.toContain('certificate-error');
+    expect(source).toContain('createCaptureSourceBroker');
+    expect(source).toContain('createCaptureSourceService');
+    expect(source).toContain('installDisplayMediaHandler');
+    expect(source).toContain('createScreenPermissionService');
+    expect(source).toContain("webContents.on('did-start-navigation'");
+    expect(source).toContain("webContents.once('destroyed'");
   });
 
-  it('allows only trusted main-frame audio and speaker selection permissions', () => {
+  it('allows only trusted main-frame audio, display capture, and speaker permissions', () => {
     let requestHandler:
       | ((
           webContents: { getURL(): string },
@@ -217,6 +223,22 @@ describe('desktop window security', () => {
       isMainFrame: true,
     });
     expect(callback).toHaveBeenLastCalledWith(true);
+    requestHandler?.(trusted, 'display-capture', callback, {
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenLastCalledWith(true);
+    requestHandler?.(trusted, 'media', callback, {
+      mediaTypes: [],
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenLastCalledWith(true);
+    requestHandler?.(trusted, 'media', callback, {
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenLastCalledWith(true);
 
     for (const [contents, permission, details] of [
       [
@@ -224,7 +246,25 @@ describe('desktop window security', () => {
         'media',
         { mediaTypes: ['video'], requestingUrl: entry, isMainFrame: true },
       ],
-      [trusted, 'display-capture', { requestingUrl: entry, isMainFrame: true }],
+      [
+        trusted,
+        'display-capture',
+        { requestingUrl: entry, isMainFrame: false },
+      ],
+      [
+        trusted,
+        'media',
+        {
+          mediaTypes: ['audio', 'video'],
+          requestingUrl: entry,
+          isMainFrame: true,
+        },
+      ],
+      [
+        trusted,
+        'media',
+        { mediaTypes: [], requestingUrl: entry, isMainFrame: false },
+      ],
       [
         trusted,
         'media',
@@ -234,6 +274,11 @@ describe('desktop window security', () => {
         { getURL: () => 'https://attacker.invalid/' },
         'media',
         { mediaTypes: ['audio'], requestingUrl: entry, isMainFrame: true },
+      ],
+      [
+        { getURL: () => 'https://attacker.invalid/' },
+        'media',
+        { mediaTypes: [], requestingUrl: entry, isMainFrame: true },
       ],
       [
         trusted,
@@ -262,6 +307,26 @@ describe('desktop window security', () => {
         isMainFrame: true,
       }),
     ).toBe(true);
+    expect(
+      checkHandler?.(trusted, 'display-capture', new URL(entry).origin, {
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(true);
+    expect(
+      checkHandler?.(trusted, 'display-capture', new URL(entry).origin, {
+        requestingUrl: entry,
+        isMainFrame: false,
+      }),
+    ).toBe(false);
+    expect(
+      checkHandler?.(
+        { getURL: () => 'https://attacker.invalid/' },
+        'display-capture',
+        'https://attacker.invalid',
+        { requestingUrl: entry, isMainFrame: true },
+      ),
+    ).toBe(false);
     expect(
       checkHandler?.(trusted, 'media', new URL(entry).origin, {
         mediaType: 'video',

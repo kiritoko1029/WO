@@ -1003,6 +1003,11 @@ const validRoomSessionCommon = {
   connectionEpoch: 2,
   rtcConfiguration: validRtcConfiguration,
   iceCredentialsExpiresAt: '2026-07-16T13:10:00.000Z',
+  screen: {
+    owner: null,
+    leaseId: null,
+    leaseExpiresAt: null,
+  },
 };
 
 const validCreatorWaitingSession = {
@@ -1349,12 +1354,18 @@ describe('two-person room lifecycle contracts', () => {
         }),
       ).success,
     ).toBe(true);
-    for (const type of ['room.join', 'room.resume']) {
-      expect(
-        p2pAckEnvelopeSchema.safeParse(p2pAck(type, validRoomSession)).success,
-        type,
-      ).toBe(true);
-    }
+    expect(
+      p2pAckEnvelopeSchema.safeParse(p2pAck('room.join', validRoomSession))
+        .success,
+    ).toBe(true);
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.resume', {
+          ...validRoomSession,
+          resume: { status: 'none' },
+        }),
+      ).success,
+    ).toBe(true);
 
     expect(
       p2pAckEnvelopeSchema.safeParse(
@@ -1427,7 +1438,12 @@ describe('two-person room lifecycle contracts', () => {
       validRoomSession,
     ]) {
       expect(
-        p2pAckEnvelopeSchema.safeParse(p2pAck('room.resume', snapshot)).success,
+        p2pAckEnvelopeSchema.safeParse(
+          p2pAck('room.resume', {
+            ...snapshot,
+            resume: { status: 'none' },
+          }),
+        ).success,
         `${snapshot.role}:${snapshot.state}`,
       ).toBe(true);
     }
@@ -1460,6 +1476,77 @@ describe('two-person room lifecycle contracts', () => {
         `resume:${snapshot.role}:${snapshot.state}:${String(snapshot.peer)}`,
       ).toBe(false);
     }
+  });
+
+  test('requires an authoritative all-or-none screen owner snapshot in room sessions', () => {
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.join', {
+          ...validRoomSession,
+          screen: {
+            owner: validPeer,
+            leaseId: 'lease-current',
+            leaseExpiresAt: '2026-07-16T13:01:00.000Z',
+          },
+        }),
+      ).success,
+    ).toBe(true);
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.join', {
+          ...validRoomSession,
+          screen: {
+            owner: validPeer,
+            leaseId: null,
+            leaseExpiresAt: '2026-07-16T13:01:00.000Z',
+          },
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  test.each([
+    { status: 'none' },
+    {
+      status: 'completed',
+      negotiationId: 'negotiation-completed',
+      negotiationGeneration: 7,
+    },
+    {
+      status: 'reset_required',
+      negotiationId: 'negotiation-reset',
+      resetGeneration: 3,
+      reason: 'peer_resumed',
+    },
+  ] as const)('accepts authoritative room resume disposition %#', (resume) => {
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.resume', { ...validRoomSession, resume }),
+      ).success,
+    ).toBe(true);
+  });
+
+  test.each([
+    undefined,
+    { status: 'completed', negotiationId: 'negotiation-completed' },
+    {
+      status: 'reset_required',
+      negotiationId: 'negotiation-reset',
+      generation: 3,
+      reason: 'peer_resumed',
+    },
+    {
+      status: 'reset_required',
+      negotiationId: 'negotiation-reset',
+      resetGeneration: 0,
+      reason: 'peer_resumed',
+    },
+  ])('rejects incomplete or stale room resume disposition %#', (resume) => {
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.resume', { ...validRoomSession, resume }),
+      ).success,
+    ).toBe(false);
   });
 });
 
@@ -1500,6 +1587,7 @@ describe('browser-native WebRTC relay contracts', () => {
       }),
       request('webrtc.restartRequested', validSignalBase),
       request('webrtc.iceServers.refresh', validSignalBase),
+      request('webrtc.recoveryReset', validSignalBase),
     ];
 
     for (const value of requests) {
@@ -1582,7 +1670,16 @@ describe('public STUN and TURN server contracts', () => {
     ['path', { urls: ['stun:relay.example.com/private'] }],
     ['fragment', { urls: ['stun:relay.example.com#fragment'] }],
     ['control character', { urls: ['stun:relay.example.com\u0000'] }],
+    ['TLS STUN scheme', { urls: ['stuns:relay.example.com:5349'] }],
     ['STUN query', { urls: ['stun:relay.example.com?transport=udp'] }],
+    [
+      'TURN TLS over unsupported UDP transport',
+      {
+        urls: ['turns:relay.example.com:5349?transport=udp'],
+        username: 'user',
+        credential: 'credential',
+      },
+    ],
     [
       'unsupported TURN query',
       {
@@ -1625,12 +1722,16 @@ describe('public STUN and TURN server contracts', () => {
     'turn:relay.example.com:3478?transport=udp',
     'turn:203.0.113.10:3478?transport=tcp',
     'turn:[2001:db8::10]:3478?transport=udp',
+    'turns:relay.example.com',
+    'turns:relay.example.com:5349?transport=tcp',
+    'turns:[2001:db8::10]:5349?transport=tcp',
   ])('accepts valid ICE server URI %s', (url) => {
     expect(iceServerUrlSchema.safeParse(url).success).toBe(true);
 
-    const value = url.startsWith('turn:')
-      ? { urls: [url], username: 'user', credential: 'credential' }
-      : { urls: [url] };
+    const value =
+      url.startsWith('turn:') || url.startsWith('turns:')
+        ? { urls: [url], username: 'user', credential: 'credential' }
+        : { urls: [url] };
     expect(publicIceServerSchema.safeParse(value).success).toBe(true);
   });
 
@@ -1659,6 +1760,11 @@ describe('public STUN and TURN server contracts', () => {
   });
 
   test('requires separate credentials only when an entry contains TURN', () => {
+    expect(
+      publicIceServerSchema.safeParse({
+        urls: ['turns:relay.example.com:5349?transport=tcp'],
+      }).success,
+    ).toBe(false);
     expect(
       publicIceServerSchema.safeParse({
         urls: ['turn:relay.example.com'],
@@ -1752,7 +1858,10 @@ describe('active P2P envelope unions', () => {
         state: 'waiting',
       }),
       p2pAck('room.join', validRoomSession),
-      p2pAck('room.resume', validRoomSession),
+      p2pAck('room.resume', {
+        ...validRoomSession,
+        resume: { status: 'none' },
+      }),
       p2pAck('room.leave', {}),
       p2pAck('room.end', {}),
       p2pAck('peer.ready', {}),
@@ -1765,6 +1874,11 @@ describe('active P2P envelope unions', () => {
       p2pAck('webrtc.iceServers.refresh', {
         rtcConfiguration: validRtcConfiguration,
         iceCredentialsExpiresAt: '2026-07-16T13:10:00.000Z',
+      }),
+      p2pAck('webrtc.recoveryReset', {
+        negotiationId: 'negotiation-reset',
+        resetGeneration: 2,
+        reason: 'signaling_reset',
       }),
       p2pAck('screen.acquire', { lease }),
       p2pAck('screen.renew', { lease }),
@@ -1940,6 +2054,7 @@ describe('active P2P envelope unions', () => {
       p2pBroadcast('webrtc.negotiationReset', {
         roomId: 'room-1',
         negotiationId: 'negotiation-2',
+        resetGeneration: 1,
         reason: 'peer_resumed',
       }),
       p2pBroadcast('screen.ownerChanged', {

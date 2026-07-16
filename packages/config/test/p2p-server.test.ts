@@ -24,7 +24,7 @@ const validP2pEnv = (): Record<string, string> => ({
   TURN_REALM: 'rtc.example.test',
   TURN_HOST: 'turn.example.test',
   TURN_URLS:
-    'stun:turn.example.test:3478,turn:turn.example.test:3478?transport=udp,turn:turn.example.test:3478?transport=tcp',
+    'stun:turn.example.test:3478,turn:turn.example.test:3478?transport=udp,turn:turn.example.test:3478?transport=tcp,turns:turn.example.test:5349?transport=tcp',
   TURN_CREDENTIAL_TTL_SECONDS: '600',
   ROOM_CODE_TTL_SECONDS: '600',
   ROOM_DISCONNECT_GRACE_SECONDS: '120',
@@ -42,7 +42,7 @@ const productionP2pEnv = (): Record<string, string> => ({
   TURN_REALM: 'rtc.example.com',
   TURN_HOST: 'turn.example.com',
   TURN_URLS:
-    'stun:turn.example.com:3478,turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp',
+    'stun:turn.example.com:3478,turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp,turns:turn.example.com:5349?transport=tcp',
 });
 
 const captureError = (env: Record<string, string | undefined>) => {
@@ -78,6 +78,7 @@ describe('parseP2pServerConfig', () => {
           'stun:turn.example.test:3478',
           'turn:turn.example.test:3478?transport=udp',
           'turn:turn.example.test:3478?transport=tcp',
+          'turns:turn.example.test:5349?transport=tcp',
         ],
         credentialTtlSeconds: 600,
       },
@@ -400,7 +401,10 @@ describe('parseP2pServerConfig', () => {
   test.each([
     ['non-ICE scheme', 'https://turn.example.test'],
     ['TLS STUN scheme', 'stuns:turn.example.test:5349'],
-    ['TLS TURN scheme', 'turns:turn.example.test:5349'],
+    [
+      'TURN TLS over unsupported UDP transport',
+      'turns:turn.example.test:5349?transport=udp',
+    ],
     ['uppercase STUN scheme', 'STUN:turn.example.test:3478'],
     ['STUN query', 'stun:turn.example.test:3478?transport=udp'],
     ['unsupported TURN query', 'turn:turn.example.test:3478?region=cn'],
@@ -501,6 +505,10 @@ describe('parseP2pServerConfig', () => {
       'TURN default transport with explicit UDP',
       'turn:turn.example.test:3478,turn:turn.example.test:3478?transport=udp',
     ],
+    [
+      'TURN TLS default port and transport',
+      'turns:turn.example.test,turns:turn.example.test:5349?transport=tcp',
+    ],
   ])('rejects duplicate endpoint expressed as %s', (_kind, urls) => {
     const env = validP2pEnv();
     env.TURN_URLS = urls;
@@ -518,6 +526,20 @@ describe('parseP2pServerConfig', () => {
     expect(parseP2pServerConfig(env).turn.urls).toEqual(
       env.TURN_URLS.split(','),
     );
+  });
+
+  test.each([
+    'turns:turn.example.test',
+    'turns:turn.example.test:5349?transport=tcp',
+    'turns:[2001:db8::1]:5349?transport=tcp',
+  ])('accepts a canonical TURN TLS URL %s', (turnUrl) => {
+    const env = validP2pEnv();
+    env.TURN_HOST = turnUrl.includes('[2001:db8::1]')
+      ? '2001:db8::1'
+      : 'turn.example.test';
+    env.TURN_URLS = turnUrl;
+
+    expect(parseP2pServerConfig(env).turn.urls).toEqual([turnUrl]);
   });
 
   test.each(['development', 'test', 'production'] as const)(

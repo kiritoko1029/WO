@@ -9,7 +9,12 @@ import {
   parseDesktopIpcEnvelope,
   type DesktopIpcEnvelope,
 } from './ipc-envelope.js';
-import type { DesktopBridge, PublicAuthSession } from './types.js';
+import type {
+  CaptureSourceSummary,
+  DesktopBridge,
+  PublicAuthSession,
+  ScreenPermissionSnapshot,
+} from './types.js';
 import type { RealtimeConnectionGrant } from './types.js';
 
 export type Invoke = (
@@ -49,6 +54,89 @@ function parsePublicAuthSession(input: unknown): PublicAuthSession {
 function parseNull(input: unknown): null {
   if (input !== null) throw new TypeError('Expected null');
   return null;
+}
+
+const CAPTURE_TOKEN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const MAX_CAPTURE_SOURCES = 100;
+const MAX_THUMBNAIL_BYTES = 512 * 1_024;
+const MAX_TOTAL_THUMBNAIL_BYTES = 8 * 1_024 * 1_024;
+
+function parseCaptureSourceSummaries(
+  input: unknown,
+): readonly CaptureSourceSummary[] {
+  if (!Array.isArray(input) || input.length > MAX_CAPTURE_SOURCES) {
+    throw new TypeError('Invalid capture sources');
+  }
+  let totalThumbnailBytes = 0;
+  const sources = input.map((value) => {
+    if (!isRecord(value)) throw new TypeError('Invalid capture source');
+    const keys = Object.keys(value);
+    if (
+      keys.length !== 4 ||
+      !keys.includes('token') ||
+      !keys.includes('name') ||
+      !keys.includes('kind') ||
+      !keys.includes('thumbnailDataUrl') ||
+      typeof value.token !== 'string' ||
+      !CAPTURE_TOKEN.test(value.token) ||
+      typeof value.name !== 'string' ||
+      value.name.length === 0 ||
+      [...value.name].length > 256 ||
+      value.name.trim() !== value.name ||
+      (value.kind !== 'screen' && value.kind !== 'window') ||
+      typeof value.thumbnailDataUrl !== 'string' ||
+      !value.thumbnailDataUrl.startsWith('data:image/png;base64,')
+    ) {
+      throw new TypeError('Invalid capture source');
+    }
+    const thumbnailBytes = new TextEncoder().encode(
+      value.thumbnailDataUrl,
+    ).byteLength;
+    if (thumbnailBytes > MAX_THUMBNAIL_BYTES) {
+      throw new TypeError('Invalid capture source thumbnail');
+    }
+    totalThumbnailBytes += thumbnailBytes;
+    if (totalThumbnailBytes > MAX_TOTAL_THUMBNAIL_BYTES) {
+      throw new TypeError('Invalid capture source thumbnails');
+    }
+    return Object.freeze({
+      token: value.token,
+      name: value.name,
+      kind: value.kind,
+      thumbnailDataUrl: value.thumbnailDataUrl,
+    });
+  });
+  return Object.freeze(sources);
+}
+
+function parseScreenPermission(input: unknown): ScreenPermissionSnapshot {
+  if (!isRecord(input)) throw new TypeError('Invalid screen permission');
+  const keys = Object.keys(input);
+  const statuses = new Set([
+    'not-determined',
+    'granted',
+    'denied',
+    'restricted',
+    'unknown',
+  ]);
+  if (
+    keys.length !== 2 ||
+    !keys.includes('status') ||
+    !keys.includes('canOpenSettings') ||
+    typeof input.status !== 'string' ||
+    !statuses.has(input.status) ||
+    typeof input.canOpenSettings !== 'boolean' ||
+    (input.canOpenSettings &&
+      input.status !== 'denied' &&
+      input.status !== 'restricted')
+  ) {
+    throw new TypeError('Invalid screen permission');
+  }
+  return Object.freeze({
+    status: input.status as ScreenPermissionSnapshot['status'],
+    canOpenSettings: input.canOpenSettings,
+  });
 }
 
 function parseRealtimeConnectionGrant(input: unknown): RealtimeConnectionGrant {
@@ -126,5 +214,25 @@ export function createDesktopApi(invoke: Invoke): Readonly<DesktopBridge> {
         parseRealtimeConnectionGrant,
       ),
   });
-  return Object.freeze({ auth, realtime });
+  const capture = Object.freeze({
+    list: () =>
+      invokeDesktop(
+        invoke,
+        'desktop:capture:list',
+        [],
+        parseCaptureSourceSummaries,
+      ),
+    select: (token: string) =>
+      invokeDesktop(invoke, 'desktop:capture:select', [token], parseNull),
+    permission: () =>
+      invokeDesktop(
+        invoke,
+        'desktop:capture:permission',
+        [],
+        parseScreenPermission,
+      ),
+    openSettings: () =>
+      invokeDesktop(invoke, 'desktop:capture:open-settings', [], parseNull),
+  });
+  return Object.freeze({ auth, realtime, capture });
 }

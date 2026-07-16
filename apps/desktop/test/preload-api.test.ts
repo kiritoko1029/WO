@@ -19,11 +19,20 @@ function cloneBridge(bridge: DesktopBridge): DesktopBridge {
       issueTicket: async (accessToken) =>
         structuredClone(await bridge.realtime.issueTicket(accessToken)),
     },
+    capture: {
+      list: async () => structuredClone(await bridge.capture.list()),
+      select: async (token) =>
+        structuredClone(await bridge.capture.select(token)),
+      permission: async () =>
+        structuredClone(await bridge.capture.permission()),
+      openSettings: async () =>
+        structuredClone(await bridge.capture.openSettings()),
+    },
   };
 }
 
 describe('desktop preload API', () => {
-  it('exposes exactly five immutable auth and realtime commands', async () => {
+  it('exposes only immutable auth, realtime, and capture commands', async () => {
     const authSession = {
       user: {
         userId: 'user-1',
@@ -33,18 +42,31 @@ describe('desktop preload API', () => {
       accessToken: 'access-token',
       accessTokenExpiresAt: 1_000,
     };
-    const invoke = vi.fn(async (channel: string) => ({
-      ok: true,
-      value:
-        channel === 'desktop:auth:logout'
+    const invoke = vi.fn(async (channel: string) => {
+      const value =
+        channel === 'desktop:auth:logout' ||
+        channel === 'desktop:capture:select' ||
+        channel === 'desktop:capture:open-settings'
           ? null
           : channel === 'desktop:realtime:issue-ticket'
             ? { ticket: 'A'.repeat(43), expiresInSeconds: 30 }
-            : authSession,
-    }));
+            : channel === 'desktop:capture:list'
+              ? [
+                  {
+                    token: '00000000-0000-4000-8000-000000000001',
+                    name: 'Editor',
+                    kind: 'window',
+                    thumbnailDataUrl: 'data:image/png;base64,AAAA',
+                  },
+                ]
+              : channel === 'desktop:capture:permission'
+                ? { status: 'granted', canOpenSettings: false }
+                : authSession;
+      return { ok: true, value };
+    });
     const bridge = createDesktopApi(invoke);
 
-    expect(Object.keys(bridge)).toEqual(['auth', 'realtime']);
+    expect(Object.keys(bridge)).toEqual(['auth', 'realtime', 'capture']);
     expect(Object.keys(bridge.auth)).toEqual([
       'register',
       'login',
@@ -52,9 +74,16 @@ describe('desktop preload API', () => {
       'logout',
     ]);
     expect(Object.keys(bridge.realtime)).toEqual(['issueTicket']);
+    expect(Object.keys(bridge.capture)).toEqual([
+      'list',
+      'select',
+      'permission',
+      'openSettings',
+    ]);
     expect(Object.isFrozen(bridge)).toBe(true);
     expect(Object.isFrozen(bridge.auth)).toBe(true);
     expect(Object.isFrozen(bridge.realtime)).toBe(true);
+    expect(Object.isFrozen(bridge.capture)).toBe(true);
     expect(JSON.stringify(bridge)).not.toContain('getRefreshToken');
 
     await bridge.auth.register({
@@ -69,6 +98,23 @@ describe('desktop preload API', () => {
     await bridge.auth.refresh();
     await bridge.auth.logout();
     await bridge.realtime.issueTicket('access-token');
+    await expect(bridge.capture.list()).resolves.toEqual({
+      ok: true,
+      value: [
+        {
+          token: '00000000-0000-4000-8000-000000000001',
+          name: 'Editor',
+          kind: 'window',
+          thumbnailDataUrl: 'data:image/png;base64,AAAA',
+        },
+      ],
+    });
+    await bridge.capture.select('00000000-0000-4000-8000-000000000001');
+    await expect(bridge.capture.permission()).resolves.toEqual({
+      ok: true,
+      value: { status: 'granted', canOpenSettings: false },
+    });
+    await bridge.capture.openSettings();
 
     expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
       'desktop:auth:register',
@@ -76,7 +122,55 @@ describe('desktop preload API', () => {
       'desktop:auth:refresh',
       'desktop:auth:logout',
       'desktop:realtime:issue-ticket',
+      'desktop:capture:list',
+      'desktop:capture:select',
+      'desktop:capture:permission',
+      'desktop:capture:open-settings',
     ]);
+  });
+
+  it('rejects capture summaries that expose unexpected platform fields', async () => {
+    const bridge = createDesktopApi(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        value: [
+          {
+            token: '00000000-0000-4000-8000-000000000001',
+            name: 'Editor',
+            kind: 'window',
+            thumbnailDataUrl: 'data:image/png;base64,AAAA',
+            id: 'window:101:0',
+          },
+        ],
+      }),
+    );
+
+    await expect(bridge.capture.list()).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_IPC_RESPONSE' },
+    });
+  });
+
+  it('accepts the same 256-code-point title bound used by main', async () => {
+    const name = '😀'.repeat(256);
+    const bridge = createDesktopApi(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        value: [
+          {
+            token: '00000000-0000-4000-8000-000000000001',
+            name,
+            kind: 'window',
+            thumbnailDataUrl: 'data:image/png;base64,AAAA',
+          },
+        ],
+      }),
+    );
+
+    await expect(bridge.capture.list()).resolves.toEqual({
+      ok: true,
+      value: [expect.objectContaining({ name })],
+    });
   });
 
   it('rebuilds safe coded errors and validates strict envelopes', async () => {

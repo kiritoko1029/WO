@@ -105,6 +105,7 @@ function createPc(log: string[]) {
       log.push(`addIceCandidate:${candidate?.candidate ?? 'end'}`);
     }),
     setConfiguration: vi.fn(() => log.push('setConfiguration')),
+    restartIce: vi.fn(() => log.push('restartIce')),
     close: vi.fn(),
   };
   return { pc, audio, video, listeners };
@@ -428,6 +429,95 @@ describe('creator-only fixed-plan negotiation', () => {
     await subject.negotiation.startCreatorOffer();
 
     expect(subject.pc.createOffer).toHaveBeenCalledOnce();
+  });
+
+  it('uses the server reset negotiation ID for the replacement creator offer', async () => {
+    const subject = setup('creator');
+
+    await subject.negotiation.startCreatorOffer('server-reset-id');
+
+    expect(subject.peer.currentNegotiationId).toBe('server-reset-id');
+    expect(subject.signaling.request).toHaveBeenCalledWith(
+      'webrtc.offer',
+      expect.objectContaining({ negotiationId: 'server-reset-id' }),
+      expect.anything(),
+      expect.objectContaining({ retryTimeouts: 1 }),
+    );
+  });
+
+  it('forces fresh ICE credentials before a creator restart offer', async () => {
+    const signaling = createSignaling((type) =>
+      type === 'webrtc.iceServers.refresh' ? ack(type, freshIce) : ack(type),
+    );
+    const subject = setup('creator', { signaling });
+    subject.peer.beginNegotiation('completed-negotiation');
+
+    await subject.negotiation.refreshIceServers();
+    await subject.negotiation.restartCreatorIce('restart-negotiation');
+
+    expect(subject.pc.setConfiguration).toHaveBeenCalledWith(
+      freshIce.rtcConfiguration,
+    );
+    expect(subject.pc.restartIce).toHaveBeenCalledOnce();
+    expect(subject.signaling.request).toHaveBeenCalledWith(
+      'webrtc.iceRestart',
+      expect.objectContaining({ negotiationId: 'restart-negotiation' }),
+      expect.anything(),
+      expect.objectContaining({ retryTimeouts: 1 }),
+    );
+    expect(subject.log.indexOf('setConfiguration')).toBeLessThan(
+      subject.log.indexOf('restartIce'),
+    );
+  });
+
+  it('sends one idempotent restart request from a joiner context', async () => {
+    const subject = setup('joiner');
+    subject.peer.beginNegotiation('completed-negotiation');
+
+    await subject.negotiation.requestCreatorRestart('restart-request-id');
+
+    expect(subject.signaling.request).toHaveBeenCalledWith(
+      'webrtc.restartRequested',
+      {
+        roomId: 'room-1',
+        negotiationId: 'completed-negotiation',
+        connectionEpoch: 20,
+      },
+      expect.anything(),
+      { requestId: 'restart-request-id', retryTimeouts: 1 },
+    );
+  });
+
+  it('requests one authoritative transport reset for the current negotiation', async () => {
+    const signaling = createSignaling((type) =>
+      type === 'webrtc.recoveryReset'
+        ? ack(type, {
+            negotiationId: 'server-recovery-reset',
+            resetGeneration: 3,
+            reason: 'signaling_reset',
+          })
+        : ack(type),
+    );
+    const subject = setup('joiner', { signaling });
+    subject.peer.beginNegotiation('failed-negotiation');
+
+    await expect(
+      subject.negotiation.requestRecoveryReset('recovery-request-id'),
+    ).resolves.toEqual({
+      negotiationId: 'server-recovery-reset',
+      resetGeneration: 3,
+      reason: 'signaling_reset',
+    });
+    expect(subject.signaling.request).toHaveBeenCalledWith(
+      'webrtc.recoveryReset',
+      {
+        roomId: 'room-1',
+        negotiationId: 'failed-negotiation',
+        connectionEpoch: 20,
+      },
+      expect.anything(),
+      { requestId: 'recovery-request-id', retryTimeouts: 1 },
+    );
   });
 
   it('allows an explicitly rejected readiness offer to be retried safely', async () => {

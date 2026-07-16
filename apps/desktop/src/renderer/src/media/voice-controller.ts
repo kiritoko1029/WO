@@ -86,8 +86,15 @@ export function createVoiceController(
   let muted = false;
   let outputMuted = false;
   let operationSequence = 0;
+  let senderBindingSequence = 0;
   let cleaned = false;
   let senderMutationChain = Promise.resolve();
+  const uncommittedStreams = new Set<MediaStream>();
+
+  const stopUncommittedStreams = (): void => {
+    for (const stream of uncommittedStreams) stopTracks(stream);
+    uncommittedStreams.clear();
+  };
 
   const mutateSender = <Value>(
     operation: () => Promise<Value>,
@@ -140,6 +147,7 @@ export function createVoiceController(
       localStream = null;
       microphoneTrack = null;
       if (stream !== null) stopTracks(stream);
+      stopUncommittedStreams();
     },
     () => options.audioOutput.cleanup(),
   ]);
@@ -147,6 +155,7 @@ export function createVoiceController(
     if (!cleaned) {
       cleaned = true;
       operationSequence += 1;
+      senderBindingSequence += 1;
     }
     return runCleanup();
   };
@@ -200,23 +209,20 @@ export function createVoiceController(
       audioSender = sender ?? null;
       return captured.track;
     },
-    bindSender: async (sender, trackAlreadyAttached = false) => {
+    bindSender: async (sender) => {
       if (cleaned) throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-      const operation = ++operationSequence;
-      const track = microphoneTrack;
-      if (track === null) throw new Error('Microphone has not been acquired');
-      if (!trackAlreadyAttached) {
-        await mutateSender(async () => {
-          if (!isCurrentOperation(operation)) {
-            throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-          }
-          await sender.replaceTrack(track);
-        });
-      }
-      if (!isCurrentOperation(operation)) {
+      const binding = ++senderBindingSequence;
+      audioSender = sender;
+      await mutateSender(async () => {
+        if (cleaned || binding !== senderBindingSequence) return;
+        const track = microphoneTrack;
+        if (track === null) throw new Error('Microphone has not been acquired');
+        await sender.replaceTrack(track);
+        stopUncommittedStreams();
+      });
+      if (cleaned) {
         throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
       }
-      audioSender = sender;
     },
     setMuted: (nextMuted) => {
       muted = nextMuted;
@@ -231,28 +237,40 @@ export function createVoiceController(
         throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
       }
       captured.track.enabled = !muted;
+      let senderMayReferenceCapturedTrack = false;
+      let previousStream: MediaStream | null = null;
       try {
-        const sender = audioSender;
-        if (sender !== null) {
-          await mutateSender(async () => {
-            if (!isCurrentOperation(operation)) {
-              throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-            }
+        await mutateSender(async () => {
+          if (!isCurrentOperation(operation)) {
+            throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
+          }
+          const sender = audioSender;
+          const previousTrack = microphoneTrack;
+          if (sender !== null) {
             await sender.replaceTrack(captured.track);
-          });
-        }
+            senderMayReferenceCapturedTrack = true;
+            stopUncommittedStreams();
+          }
+          if (!isCurrentOperation(operation)) {
+            if (sender !== null) {
+              await sender.replaceTrack(previousTrack);
+              senderMayReferenceCapturedTrack = false;
+            }
+            throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
+          }
+          previousStream = localStream;
+          localStream = captured.stream;
+          microphoneTrack = captured.track;
+        });
       } catch (error) {
-        stopTracks(captured.stream);
+        if (senderMayReferenceCapturedTrack) {
+          uncommittedStreams.add(captured.stream);
+        } else {
+          stopTracks(captured.stream);
+        }
         throw error;
       }
-      if (!isCurrentOperation(operation)) {
-        stopTracks(captured.stream);
-        throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-      }
-      const previous = localStream;
-      localStream = captured.stream;
-      microphoneTrack = captured.track;
-      if (previous !== null) stopTracks(previous);
+      if (previousStream !== null) stopTracks(previousStream);
       return captured.track;
     },
     attachRemoteTrack: (track) => options.audioOutput.attach(track),

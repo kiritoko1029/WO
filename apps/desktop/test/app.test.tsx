@@ -39,6 +39,23 @@ const waitingRoom: RoomSnapshot = {
   ],
 };
 
+const idleScreenSnapshot = {
+  screenState: 'idle' as const,
+  screenSources: [],
+  screenSelectedToken: null,
+  screenCaptureSettings: null,
+  screenError: null,
+  screenOwner: null,
+  screenOwnerLeaseId: null,
+  remoteScreenTrack: null,
+  screenBitrateTarget: { mode: 'auto' as const },
+  screenBitratePending: null,
+  screenBitrateError: null,
+  remoteScreenBitrateBps: null,
+  screenPermission: null,
+  quality: null,
+};
+
 function createDesktop(
   restored: PublicAuthSession | null = null,
 ): DesktopApi & {
@@ -64,6 +81,15 @@ function createDesktop(
       logout: vi.fn().mockResolvedValue(undefined),
     },
     realtime: { issueTicket: vi.fn() },
+    capture: {
+      list: vi.fn().mockResolvedValue([]),
+      select: vi.fn().mockResolvedValue(undefined),
+      permission: vi.fn().mockResolvedValue({
+        status: 'granted',
+        canOpenSettings: false,
+      }),
+      openSettings: vi.fn().mockResolvedValue(undefined),
+    },
   };
 }
 
@@ -200,6 +226,7 @@ describe('desktop account and room workflow', () => {
     expect(screen.getAllByTestId('participant-slot')).toHaveLength(2);
     expect(screen.getByText('陈晨（我）')).toBeTruthy();
     expect(screen.getByText('等待加入')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '打开系统设置' })).toBeNull();
     expect(gateway.createRoom).toHaveBeenCalledWith('access-token');
   });
 
@@ -249,7 +276,7 @@ describe('desktop account and room workflow', () => {
     await user.click(screen.getByRole('button', { name: '创建房间' }));
     await screen.findByText('等待对方加入');
 
-    gateway.emit({ type: 'closed', roomId: 'room-1' });
+    gateway.emit({ type: 'closed', roomId: 'room-1', reason: 'ended' });
 
     await waitForHome();
     expect(screen.getByText('房间已关闭')).toBeTruthy();
@@ -299,6 +326,12 @@ describe('desktop account and room workflow', () => {
       selectedOutputId: 'speaker-1',
       supportsOutputSelection: true,
       microphoneRetryAvailable: false,
+      ...idleScreenSnapshot,
+      screenError: '需要在系统设置中允许屏幕录制',
+      screenPermission: {
+        status: 'denied' as const,
+        canOpenSettings: true,
+      },
     };
     const call = {
       getSnapshot: () => callSnapshot,
@@ -308,6 +341,14 @@ describe('desktop account and room workflow', () => {
       switchMicrophone: vi.fn().mockResolvedValue(undefined),
       setOutputMuted: vi.fn(),
       selectOutput: vi.fn().mockResolvedValue(undefined),
+      prepareScreenShare: vi.fn().mockResolvedValue(undefined),
+      selectScreenSource: vi.fn().mockResolvedValue(undefined),
+      startScreenShare: vi.fn().mockResolvedValue(undefined),
+      stopScreenShare: vi.fn().mockResolvedValue(undefined),
+      setScreenBitrate: vi.fn().mockResolvedValue(undefined),
+      openScreenSettings: vi.fn().mockResolvedValue(undefined),
+      attachPresentationVideo: vi.fn(),
+      exportDiagnostics: vi.fn(() => ({ version: 1 as const, samples: [] })),
       cleanup: vi.fn(() => {
         if (cleanupPromise !== null) return cleanupPromise;
         order.push('call-cleanup');
@@ -331,6 +372,7 @@ describe('desktop account and room workflow', () => {
     await screen.findByText('语音已连接');
 
     await user.click(screen.getByRole('button', { name: '静音' }));
+    await user.click(screen.getByRole('button', { name: '打开系统设置' }));
     await user.click(screen.getByRole('button', { name: '设置' }));
     await user.selectOptions(screen.getByLabelText('麦克风'), 'mic-2');
     await user.selectOptions(screen.getByLabelText('扬声器'), 'speaker-1');
@@ -342,6 +384,7 @@ describe('desktop account and room workflow', () => {
     expect(call.switchMicrophone).toHaveBeenCalledWith('mic-2');
     expect(call.selectOutput).toHaveBeenCalledWith('speaker-1');
     expect(call.setOutputMuted).toHaveBeenCalledWith(true);
+    expect(call.openScreenSettings).toHaveBeenCalledOnce();
     expect(order).toEqual(['call-cleanup', 'room-end']);
   });
 
@@ -352,11 +395,15 @@ describe('desktop account and room workflow', () => {
     const gateway = {
       kind: 'realtime' as const,
       signaling: {} as RealtimeRoomGateway['signaling'],
+      desktop: createDesktop(session),
+      user: session.user,
       createRoom: vi.fn().mockResolvedValue(waitingRoom),
       joinRoom: vi.fn(),
       leaveRoom: vi.fn(),
       endRoom: vi.fn(),
       markReady: vi.fn(),
+      resumeRoom: vi.fn(),
+      closeLocalRoom: vi.fn(),
       getCallSession: vi.fn(() => null),
       subscribe(listener: (event: RoomGatewayEvent) => void) {
         listeners.add(listener);
@@ -378,6 +425,7 @@ describe('desktop account and room workflow', () => {
       selectedOutputId: '',
       supportsOutputSelection: false,
       microphoneRetryAvailable: false,
+      ...idleScreenSnapshot,
     };
     const call = {
       getSnapshot: () => callSnapshot,
@@ -387,6 +435,14 @@ describe('desktop account and room workflow', () => {
       switchMicrophone: vi.fn(),
       setOutputMuted: vi.fn(),
       selectOutput: vi.fn(),
+      prepareScreenShare: vi.fn(),
+      selectScreenSource: vi.fn(),
+      startScreenShare: vi.fn(),
+      stopScreenShare: vi.fn(),
+      setScreenBitrate: vi.fn(),
+      openScreenSettings: vi.fn(),
+      attachPresentationVideo: vi.fn(),
+      exportDiagnostics: vi.fn(() => ({ version: 1 as const, samples: [] })),
       cleanup: vi.fn().mockResolvedValue(undefined),
     } satisfies CallController;
     const rendered = render(

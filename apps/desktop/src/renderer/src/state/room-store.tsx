@@ -26,7 +26,17 @@ export interface RoomSnapshot {
 
 export type RoomGatewayEvent =
   | { readonly type: 'snapshot'; readonly room: RoomSnapshot }
-  | { readonly type: 'closed'; readonly roomId: string };
+  | {
+      readonly type: 'closed';
+      readonly roomId: string;
+      readonly reason:
+        | 'ended'
+        | 'creator_left'
+        | 'expired'
+        | 'signaling_error'
+        | 'server_restart'
+        | 'session_replaced';
+    };
 
 export interface RoomGateway {
   createRoom(accessToken: string): Promise<RoomSnapshot>;
@@ -102,7 +112,13 @@ export function RoomProvider({
         }
         setRoom((current) => {
           if (current?.roomId !== event.roomId) return current;
-          setError('房间已关闭');
+          setError(
+            event.reason === 'server_restart'
+              ? '服务已重启，原房间已关闭'
+              : event.reason === 'session_replaced'
+                ? '账号已在另一台设备接管，当前通话已结束'
+                : '房间已关闭',
+          );
           return null;
         });
       }),
