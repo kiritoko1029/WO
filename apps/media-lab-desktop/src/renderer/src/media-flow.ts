@@ -1,4 +1,5 @@
 import { buildScreenEncodings } from '@wo/media-policy';
+import type { types as MediasoupTypes } from 'mediasoup-client';
 
 import { selectVideoCodec, type LabCodec } from './codec.js';
 
@@ -131,12 +132,24 @@ export async function produceScreen(
     },
     codec,
   );
-  return transport.produce({
+  const options = {
     track,
     codec: selectedCodec,
     encodings: buildScreenEncodings(bitrateBps),
+    codecOptions: {
+      videoGoogleStartBitrate: 8_000,
+      videoGoogleMaxBitrate: 10_000,
+    },
     stopTracks: false,
-  });
+  } satisfies Omit<
+    MediasoupTypes.ProducerOptions,
+    'track' | 'codec' | 'encodings'
+  > & {
+    track: unknown;
+    codec: typeof selectedCodec;
+    encodings: ReturnType<typeof buildScreenEncodings>;
+  };
+  return transport.produce(options);
 }
 
 export async function consumeFirstProducer(

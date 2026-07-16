@@ -199,6 +199,73 @@ describe('RTC stats sampling', () => {
     });
   });
 
+  test('selects the highest-resolution outbound stream after RID normalization', async () => {
+    const { calculateRtcStats } = await import('../src/stats.js');
+    const previous = {
+      timestampMs: 1_000,
+      capture,
+      reports: [
+        {
+          id: 'out-r0',
+          type: 'outbound-rtp',
+          kind: 'video',
+          rid: 'r0',
+          bytesSent: 1_000,
+          framesEncoded: 30,
+          frameWidth: 1280,
+          frameHeight: 720,
+        },
+        {
+          id: 'out-r1',
+          type: 'outbound-rtp',
+          kind: 'video',
+          rid: 'r1',
+          bytesSent: 10_000,
+          framesEncoded: 60,
+          frameWidth: 1920,
+          frameHeight: 1080,
+        },
+      ],
+    } as const;
+    const current = {
+      timestampMs: 2_000,
+      capture,
+      reports: [
+        {
+          id: 'out-r0',
+          type: 'outbound-rtp',
+          kind: 'video',
+          rid: 'r0',
+          bytesSent: 126_000,
+          framesEncoded: 60,
+          frameWidth: 1280,
+          frameHeight: 720,
+        },
+        {
+          id: 'out-r1',
+          type: 'outbound-rtp',
+          kind: 'video',
+          rid: 'r1',
+          bytesSent: 510_000,
+          framesEncoded: 119,
+          frameWidth: 1920,
+          frameHeight: 1080,
+          encoderImplementation: 'HardwareEncoder',
+        },
+      ],
+    } as const;
+
+    expect(calculateRtcStats(previous, current)).toMatchObject({
+      direction: 'outbound',
+      rid: 'r1',
+      bitrateBps: 4_000_000,
+      fps: 59,
+      width: 1920,
+      height: 1080,
+      codecImplementation: 'HardwareEncoder',
+    });
+  });
+
   test('computes inbound bitrate, decoded fps and freeze counters', async () => {
     const { calculateRtcStats } = await import('../src/stats.js');
     const previous = {
@@ -356,6 +423,37 @@ describe('RTC stats sampling', () => {
       fps: null,
       lossPercent: null,
     });
+  });
+
+  test('prefers the native fps gauge over a jittery sample interval', async () => {
+    const { calculateRtcStats } = await import('../src/stats.js');
+    const previous = {
+      timestampMs: 1_000,
+      capture,
+      reports: [
+        {
+          id: 'out',
+          type: 'outbound-rtp',
+          kind: 'video',
+          framesEncoded: 100,
+        },
+      ],
+    } as const;
+    const current = {
+      timestampMs: 2_001,
+      capture,
+      reports: [
+        {
+          id: 'out',
+          type: 'outbound-rtp',
+          kind: 'video',
+          framesEncoded: 155,
+          framesPerSecond: 55,
+        },
+      ],
+    } as const;
+
+    expect(calculateRtcStats(previous, current).fps).toBe(55);
   });
 
   test.each([

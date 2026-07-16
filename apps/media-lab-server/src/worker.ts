@@ -19,6 +19,16 @@ export const LAB_MEDIA_CODECS: readonly RouterRtpCodecCapability[] = [
     clockRate: 90_000,
     parameters: {
       'packetization-mode': 1,
+      'profile-level-id': '42002a',
+      'level-asymmetry-allowed': 1,
+    },
+  },
+  {
+    kind: 'video',
+    mimeType: 'video/H264',
+    clockRate: 90_000,
+    parameters: {
+      'packetization-mode': 1,
       'profile-level-id': '42e01f',
       'level-asymmetry-allowed': 1,
     },

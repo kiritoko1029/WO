@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'vitest';
 
 describe('codec capability selection', () => {
+  test('defaults the Windows PoC candidate to H264', async () => {
+    const { DEFAULT_LAB_CODEC } = await import('../src/renderer/src/codec.js');
+
+    expect(DEFAULT_LAB_CODEC).toBe('H264');
+  });
+
   test('returns the selected video codec capability', async () => {
     const { selectVideoCodec } = await import('../src/renderer/src/codec.js');
     const h264 = {

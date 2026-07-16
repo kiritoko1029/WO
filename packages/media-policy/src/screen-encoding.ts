@@ -2,7 +2,7 @@ export const MIN_SCREEN_BITRATE_BPS = 1_000_000;
 export const MAX_SCREEN_BITRATE_BPS = 10_000_000;
 
 export interface ScreenEncoding {
-  readonly rid: string;
+  readonly rid?: string;
   readonly maxBitrate?: number;
   readonly maxFramerate?: number;
   readonly scaleResolutionDownBy?: number;
@@ -31,17 +31,10 @@ export function buildScreenEncodings(
 
   return [
     {
-      rid: 'q',
-      active: true,
-      maxBitrate: 2_000_000,
-      maxFramerate: 30,
-      scaleResolutionDownBy: 1.5,
-    },
-    {
       rid: 'f',
       active: true,
       maxBitrate: fullBitrate,
-      maxFramerate: 60,
+      scalabilityMode: 'L1T1',
       scaleResolutionDownBy: 1,
     },
   ];
@@ -53,14 +46,25 @@ export function updateEncodingBitrate<T extends ScreenEncoding>(
 ): readonly T[] {
   const clampedBitrateBps = clampScreenBitrate(targetBitrateBps);
 
-  const fullLayerIndexes = encodings.flatMap((encoding, index) =>
+  const namedFullLayerIndexes = encodings.flatMap((encoding, index) =>
     encoding.rid === 'f' ? [index] : [],
   );
+  const scaledFullLayerIndexes = encodings.flatMap((encoding, index) =>
+    encoding.scaleResolutionDownBy === 1 ? [index] : [],
+  );
+  const fullLayerIndexes =
+    namedFullLayerIndexes.length > 0
+      ? namedFullLayerIndexes
+      : scaledFullLayerIndexes.length > 0
+        ? scaledFullLayerIndexes
+        : encodings.length === 1
+          ? [0]
+          : [];
   if (fullLayerIndexes.length === 0) {
-    throw new Error('Missing f encoding layer');
+    throw new Error('Missing full-resolution encoding layer');
   }
   if (fullLayerIndexes.length > 1) {
-    throw new Error('Duplicate f encoding layer');
+    throw new Error('Duplicate full-resolution encoding layer');
   }
 
   const fullLayerIndex = fullLayerIndexes[0]!;

@@ -19,7 +19,7 @@ import {
   applyProducerBitrateWithEvent,
   type BitrateChangeEvent,
 } from './bitrate-controller.js';
-import type { LabCodec } from './codec.js';
+import { DEFAULT_LAB_CODEC, type LabCodec } from './codec.js';
 import { LabConnectionManager } from './connection.js';
 import {
   consumeFirstProducer,
@@ -57,6 +57,8 @@ const startButton = element<HTMLButtonElement>('startButton');
 const stopButton = element<HTMLButtonElement>('stopButton');
 const statusText = element<HTMLSpanElement>('statusText');
 const statusDot = element<HTMLSpanElement>('statusDot');
+
+codecSelect.value = DEFAULT_LAB_CODEC;
 
 let transport: MediasoupTypes.Transport | null = null;
 let producer: MediasoupTypes.Producer | null = null;

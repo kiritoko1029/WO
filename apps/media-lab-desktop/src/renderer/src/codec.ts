@@ -1,5 +1,7 @@
 export type LabCodec = 'VP8' | 'H264' | 'VP9';
 
+export const DEFAULT_LAB_CODEC: LabCodec = 'H264';
+
 export interface CodecCapability {
   readonly kind?: string;
   readonly mimeType: string;

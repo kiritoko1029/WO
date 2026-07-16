@@ -68,6 +68,7 @@ function createLabWindow(role: LabRole): BrowserWindow {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       partition: `media-lab-${role}`,
     },
   });

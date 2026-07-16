@@ -1,22 +1,15 @@
 import { describe, expect, test } from 'vitest';
 
 describe('screen encoding policy', () => {
-  test('builds ordered 720p30 and 1080p60 layers', async () => {
+  test('builds one full-resolution 1080p60 L1T1 layer', async () => {
     const policy = await import('../src/screen-encoding.js');
 
     expect(policy.buildScreenEncodings(6_000_000)).toEqual([
       {
-        rid: 'q',
-        active: true,
-        maxBitrate: 2_000_000,
-        maxFramerate: 30,
-        scaleResolutionDownBy: 1.5,
-      },
-      {
         rid: 'f',
         active: true,
         maxBitrate: 6_000_000,
-        maxFramerate: 60,
+        scalabilityMode: 'L1T1',
         scaleResolutionDownBy: 1,
       },
     ]);
@@ -28,7 +21,7 @@ describe('screen encoding policy', () => {
   ])('clamps %i bps to %i bps', async (target, expected) => {
     const { buildScreenEncodings } = await import('../src/screen-encoding.js');
 
-    expect(buildScreenEncodings(target)[1]?.maxBitrate).toBe(expected);
+    expect(buildScreenEncodings(target)[0]?.maxBitrate).toBe(expected);
   });
 
   test.each([Number.NaN, Number.POSITIVE_INFINITY])(
@@ -69,8 +62,59 @@ describe('screen encoding policy', () => {
     expect(updated.map(({ rid }) => rid)).toEqual(['q', 'f']);
   });
 
+  test('updates the full-resolution layer after mediasoup normalizes RIDs', async () => {
+    const { updateEncodingBitrate } = await import('../src/screen-encoding.js');
+    const input = [
+      {
+        rid: 'r0',
+        maxBitrate: 2_000_000,
+        maxFramerate: 30,
+        scaleResolutionDownBy: 1.5,
+      },
+      {
+        rid: 'r1',
+        maxBitrate: 4_000_000,
+        maxFramerate: 60,
+        scaleResolutionDownBy: 1,
+      },
+    ] as const;
+
+    const updated = updateEncodingBitrate(input, 8_000_000);
+
+    expect(updated).toEqual([input[0], { ...input[1], maxBitrate: 8_000_000 }]);
+    expect(updated.map(({ rid }) => rid)).toEqual(['r0', 'r1']);
+    expect(input[1].maxBitrate).toBe(4_000_000);
+  });
+
+  test('updates the only encoding when the browser omits RID and scale', async () => {
+    const { updateEncodingBitrate } = await import('../src/screen-encoding.js');
+    const input = [{ maxBitrate: 4_000_000, maxFramerate: 60 }] as const;
+
+    const updated = updateEncodingBitrate(input, 8_000_000);
+
+    expect(updated).toEqual([{ ...input[0], maxBitrate: 8_000_000 }]);
+    expect(input[0].maxBitrate).toBe(4_000_000);
+  });
+
+  test('updates the only encoding when the runtime keeps a normalized RID', async () => {
+    const { updateEncodingBitrate } = await import('../src/screen-encoding.js');
+    const input = [
+      { rid: 'r0', maxBitrate: 4_000_000, maxFramerate: 60 },
+    ] as const;
+
+    expect(updateEncodingBitrate(input, 8_000_000)).toEqual([
+      { ...input[0], maxBitrate: 8_000_000 },
+    ]);
+  });
+
   test.each([
-    [[{ rid: 'q', maxBitrate: 2_000_000 }], /missing.*f/i],
+    [
+      [
+        { rid: 'q', maxBitrate: 2_000_000 },
+        { rid: 'x', maxBitrate: 4_000_000 },
+      ],
+      /missing.*full-resolution/i,
+    ],
     [
       [
         { rid: 'f', maxBitrate: 2_000_000 },

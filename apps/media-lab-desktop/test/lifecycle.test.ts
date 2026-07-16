@@ -51,4 +51,13 @@ describe('Electron main lifecycle', () => {
     expect(source).toContain('registerAppReady(app');
     expect(source).toContain('windowOwner.add(createLabWindow(role))');
   });
+
+  test('keeps media renderers active while their windows are occluded', async () => {
+    const source = await readFile(
+      new URL('../src/main/index.ts', import.meta.url),
+      'utf8',
+    );
+
+    expect(source).toContain('backgroundThrottling: false');
+  });
 });

@@ -35,6 +35,88 @@ describe('producer bitrate controller', () => {
     expect(encodings[1]?.maxBitrate).toBe(4_000_000);
   });
 
+  test('updates a mediasoup-normalized sender without changing its transaction', async () => {
+    const { applyProducerBitrate } =
+      await import('../src/renderer/src/bitrate-controller.js');
+    const runtimeEncodings = [
+      {
+        rid: 'r0',
+        maxBitrate: 2_000_000,
+        maxFramerate: 30,
+        scaleResolutionDownBy: 1.5,
+      },
+      {
+        rid: 'r1',
+        maxBitrate: 4_000_000,
+        maxFramerate: 60,
+        scaleResolutionDownBy: 1,
+      },
+    ];
+    const sender = {
+      getParameters: vi.fn(() => ({
+        transactionId: 'runtime-transaction',
+        encodings: runtimeEncodings,
+      })),
+      setParameters: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      applyProducerBitrate({ id: 'producer-1', rtpSender: sender }, 8_000_000),
+    ).resolves.toEqual({ producerId: 'producer-1', bitrateBps: 8_000_000 });
+    expect(sender.setParameters).toHaveBeenCalledOnce();
+    expect(sender.setParameters).toHaveBeenCalledWith({
+      transactionId: 'runtime-transaction',
+      encodings: [
+        runtimeEncodings[0],
+        { ...runtimeEncodings[1], maxBitrate: 8_000_000 },
+      ],
+    });
+  });
+
+  test('updates a single full-resolution sender without a RID', async () => {
+    const { applyProducerBitrate } =
+      await import('../src/renderer/src/bitrate-controller.js');
+    const runtimeEncoding = {
+      maxBitrate: 4_000_000,
+      maxFramerate: 60,
+      scaleResolutionDownBy: 1,
+    };
+    const sender = {
+      getParameters: vi.fn(() => ({
+        transactionId: 'single-layer-transaction',
+        encodings: [runtimeEncoding],
+      })),
+      setParameters: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      applyProducerBitrate({ id: 'producer-1', rtpSender: sender }, 8_000_000),
+    ).resolves.toEqual({ producerId: 'producer-1', bitrateBps: 8_000_000 });
+    expect(sender.setParameters).toHaveBeenCalledWith({
+      transactionId: 'single-layer-transaction',
+      encodings: [{ ...runtimeEncoding, maxBitrate: 8_000_000 }],
+    });
+  });
+
+  test('updates a single sender when Chromium omits RID and scale', async () => {
+    const { applyProducerBitrate } =
+      await import('../src/renderer/src/bitrate-controller.js');
+    const runtimeEncoding = { maxBitrate: 4_000_000, maxFramerate: 60 };
+    const sender = {
+      getParameters: vi.fn(() => ({ encodings: [runtimeEncoding] })),
+      setParameters: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await applyProducerBitrate(
+      { id: 'producer-1', rtpSender: sender },
+      8_000_000,
+    );
+
+    expect(sender.setParameters).toHaveBeenCalledWith({
+      encodings: [{ ...runtimeEncoding, maxBitrate: 8_000_000 }],
+    });
+  });
+
   test('rolls back sender parameters when the hot update fails', async () => {
     const { applyProducerBitrate } =
       await import('../src/renderer/src/bitrate-controller.js');

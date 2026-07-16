@@ -94,8 +94,7 @@ function selectVideoRtp(
   );
   if (outbound.length > 0) {
     const fullLayer = outbound.filter((report) => report.rid === 'f');
-    if (fullLayer.length > 0) return chooseHighestResolution(fullLayer);
-    return outbound.length === 1 ? outbound[0] : undefined;
+    return chooseHighestResolution(fullLayer.length > 0 ? fullLayer : outbound);
   }
 
   const inbound = reports.filter(
@@ -243,11 +242,12 @@ export function calculateRtcStats(
     width: numberValue(rtp, 'frameWidth'),
     height: numberValue(rtp, 'frameHeight'),
     fps: rtp
-      ? calculateRate(
+      ? (numberValue(rtp, 'framesPerSecond') ??
+        calculateRate(
           numberValue(previousRtp, frameKey),
           numberValue(rtp, frameKey),
           elapsedMs,
-        )
+        ))
       : null,
     rttMs: rttSeconds === null ? null : round(rttSeconds * 1_000),
     lossPercent: calculateLoss(previousLossReport, lossReport),

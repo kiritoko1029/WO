@@ -188,11 +188,16 @@ git commit -m "feat: define rtc protocol and configuration"
 - Create: `apps/media-lab-server/src/index.ts`
 - Create: `apps/media-lab-server/src/worker.ts`
 - Create: `apps/media-lab-desktop/package.json`
-- Create: `apps/media-lab-desktop/src/main.ts`
-- Create: `apps/media-lab-desktop/src/preload.ts`
-- Create: `apps/media-lab-desktop/src/renderer.ts`
-- Create: `apps/media-lab-desktop/src/stats-recorder.ts`
+- Create: `apps/media-lab-desktop/src/main/index.ts`
+- Create: `apps/media-lab-desktop/src/preload/index.ts`
+- Create: `apps/media-lab-desktop/src/renderer/src/codec.ts`
+- Create: `apps/media-lab-desktop/src/renderer/src/media-flow.ts`
+- Create: `apps/media-lab-desktop/src/renderer/src/bitrate-controller.ts`
 - Create: `docs/poc/1080p60-matrix.md`
+- Create: `docs/poc/hardware-gate-harness.mjs`
+- Create: `docs/poc/hardware-gate-policy.mjs`
+- Create: `docs/poc/hardware-gate-motion-source/*`
+- Create: `tests/hardware-gate-policy.test.mjs`
 - Create: `docs/poc/results/.gitkeep`
 
 **Step 1: Write the failing media-policy tests**
@@ -202,28 +207,21 @@ import { describe, expect, it } from 'vitest';
 import { buildScreenEncodings, updateEncodingBitrate } from '../src/screen-encoding';
 
 describe('screen encoding policy', () => {
-  it('creates the two fixed RIDs at publish time', () => {
+  it('creates one full-resolution RID at publish time', () => {
     expect(buildScreenEncodings(8_000_000)).toEqual([
-      {
-        rid: 'q',
-        active: true,
-        maxBitrate: 2_000_000,
-        maxFramerate: 30,
-        scaleResolutionDownBy: 1.5
-      },
       {
         rid: 'f',
         active: true,
         maxBitrate: 8_000_000,
-        maxFramerate: 60,
+        scalabilityMode: 'L1T1',
         scaleResolutionDownBy: 1
       }
     ]);
   });
 
-  it('changes only the existing full layer', () => {
+  it('changes the existing full layer', () => {
     const encodings = buildScreenEncodings(8_000_000);
-    expect(updateEncodingBitrate(encodings, 4_000_000)[1]?.maxBitrate).toBe(4_000_000);
+    expect(updateEncodingBitrate(encodings, 4_000_000)[0]?.maxBitrate).toBe(4_000_000);
   });
 });
 ```
@@ -236,7 +234,7 @@ Expected: FAIL because the policy functions do not exist.
 
 **Step 3: Implement the pure encoding policy**
 
-Clamp target bitrate to `1_000_000..10_000_000`, never add or reorder an RID after publish, and return new objects rather than mutating sender parameters.
+Clamp target bitrate to `1_000_000..10_000_000`, never add or reorder an RID after publish, and return new objects rather than mutating sender parameters. The Windows candidate uses one full-resolution `f` layer; the updater must also handle a sole encoding when Chromium omits or normalizes its RID.
 
 **Step 4: Build the smallest real mediasoup lab**
 
@@ -244,14 +242,14 @@ Implement one Router, one publisher, one receiver, WebRTC transports, and no pro
 
 - enumerate screen/window sources through the main process;
 - request 1920x1080 at 60 fps;
-- publish the two encodings;
-- expose codec choice VP8/H.264/VP9;
+- publish one full-resolution encoding;
+- default to H.264 while exposing VP8/H.264/VP9 for diagnostics, and record the actual negotiated profile instead of inferring it from Router order;
 - apply 2/4/6/8 Mbps changes through `producer.rtpSender.setParameters()`;
 - record sender and receiver stats every second.
 
 **Step 5: Add stats report validation**
 
-The report must contain capture settings, codec implementation, `framesEncoded`, `framesDecoded`, width, height, fps, actual bitrate, RTT, loss, NACK, PLI, freeze count, and `qualityLimitationReason`. Unit-test calculation from two `RTCStatsReport` samples.
+The report must contain capture settings, negotiated codec/fmtp, codec implementation, power-efficient encoder flag, `framesEncoded`, `framesDecoded`, playback total/dropped frames, width, height, fps, actual bitrate, RTT, loss, NACK, PLI, freeze count, and `qualityLimitationReason`. Unit-test calculation from two `RTCStatsReport` samples. The hardware gate calculates its primary FPS results from cumulative encode/decode/presented frame counters over two-second rolling windows; retain the native `framesPerSecond` gauge only as diagnostic evidence.
 
 **Step 6: Run the hardware matrix**
 
@@ -262,7 +260,7 @@ Run a dynamic desktop test for at least ten minutes per available matrix entry:
 - macOS Apple Silicon
 - Intel Mac when available
 
-Test VP8, H.264 and VP9 where the platform advertises support. Save machine-readable results under `docs/poc/results/` and summarize them in `1080p60-matrix.md`.
+Test VP8, H.264 and VP9 where the platform advertises support. Save machine-readable results under `docs/poc/results/` and summarize them in `1080p60-matrix.md`. Use `node docs/poc/hardware-gate-harness.mjs --preflight` for the short Windows gate and `--duration=600` only after the short gate passes.
 
 **Step 7: Apply the blocking gate**
 
@@ -270,18 +268,21 @@ PASS only when at least one common codec path satisfies all of:
 
 - publisher capture and encode are 1920x1080;
 - receiver decode is 1920x1080;
-- at least 95% of valid samples are 55 fps or higher during dynamic motion;
+- at least 95% of valid encode, decode, and receiver-presentation rolling windows are 55 fps or higher during dynamic motion;
+- frame-counter sample and valid-window coverage are at least 95%, counters never reset, no rolling window has a non-positive interval or bridges a gap longer than 2.5 seconds, and the negotiated codec/profile and hardware encoder evidence match the frozen platform path at startup, throughout quality sampling, and after the quality phase;
 - 2/4/6/8 Mbps changes settle within five seconds;
-- Producer ID remains unchanged;
+- all bitrate events reference one unchanged Producer ID;
 - no sustained black frame, freeze, or CPU/bandwidth quality limitation on certified hardware.
 
 If no common codec passes, stop. Do not start Task 4 or weaken the requirement.
+
+**Current gate result (2026-07-15):** The single-layer H.264 Windows candidate passes codec/hardware-encoder continuity, publishing, resolution, bitrate switching, counter sample/window coverage and reset/gap checks, black-frame, freeze, and quality-limitation checks. Sender encode reaches 55 fps in 43/43 rolling windows and receiver decode in 42/43, but receiver presentation reaches it in only 26/43 (60.47%), so the strict preflight is `GATE_FAILED`. The negotiated sender fmtp is `42001f`, not the Router's `42002a` offer, and this does not certify a Level 4.2 bitstream or mobile compatibility. The result also does not prove co-location is the presentation failure's cause. Task 4 remains blocked until a separate-device preflight and then the 600-second formal gate pass. The current harness validates a window source; monitor-source and macOS runners remain required.
 
 **Step 8: Commit the reproducible lab and report**
 
 ```bash
 git add apps/media-lab-* packages/media-policy docs/poc
-git commit -m "test: validate cross-platform 1080p60 sharing"
+git commit -m "test: add reproducible 1080p60 hardware gate"
 ```
 
 ### Task 4: Blocking PoC 2 - One Publisher and Nineteen Receivers

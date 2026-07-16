@@ -1,10 +1,10 @@
 import { describe, expect, test, vi } from 'vitest';
 
 describe('mediasoup-client flow', () => {
-  test('produces a screen track with the selected codec and fixed two layers', async () => {
+  test('produces a screen track with the selected codec and one full layer', async () => {
     const { produceScreen } = await import('../src/renderer/src/media-flow.js');
     const vp9 = { kind: 'video', mimeType: 'video/VP9' };
-    const track = { kind: 'video' };
+    const track = { kind: 'video', contentHint: '' };
     const producer = { id: 'producer-1' };
     const transport = { produce: vi.fn().mockResolvedValue(producer) };
 
@@ -17,25 +17,23 @@ describe('mediasoup-client flow', () => {
         6_000_000,
       ),
     ).toBe(producer);
+    expect(track.contentHint).toBe('');
     expect(transport.produce).toHaveBeenCalledWith({
       track,
       codec: vp9,
       encodings: [
         {
-          rid: 'q',
-          active: true,
-          maxBitrate: 2_000_000,
-          maxFramerate: 30,
-          scaleResolutionDownBy: 1.5,
-        },
-        {
           rid: 'f',
           active: true,
           maxBitrate: 6_000_000,
-          maxFramerate: 60,
+          scalabilityMode: 'L1T1',
           scaleResolutionDownBy: 1,
         },
       ],
+      codecOptions: {
+        videoGoogleMaxBitrate: 10_000,
+        videoGoogleStartBitrate: 8_000,
+      },
       stopTracks: false,
     });
   });

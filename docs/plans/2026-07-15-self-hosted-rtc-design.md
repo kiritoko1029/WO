@@ -151,9 +151,9 @@ deploy/
 1. 用户请求共享，客户端先调用 `screen.acquire`，不先启动发布。
 2. Server 原子获取 Redis 租约并广播 `screen.ownerChanged`。
 3. Electron 展示系统或应用内来源选择器，取得屏幕 MediaStreamTrack。
-4. 客户端以 `source=screen` 创建两层编码的 Producer。
+4. 客户端以 `source=screen` 创建单层 1080p60 编码的 Producer。
 5. Server 二次校验租约、来源类型和房间内现有 Producer；校验失败立即关闭新 Producer。
-6. 其他客户端订阅适合其带宽和视口的层。
+6. 其他客户端订阅该屏幕 Producer；带宽不足时由 WebRTC 拥塞控制降低实际码率或帧率，不由 SFU 转码。
 7. 用户停止、轨道结束、连接断开或租约过期时，Server 关闭 Producer、释放租约并广播空闲状态。
 
 ### 7.3 断线恢复
@@ -184,22 +184,23 @@ deploy/
 
 ### 9.2 编码层
 
-首版发布时创建固定的两层编码，运行中不增加或重排 RID：
+Windows PoC 当前候选发布单层编码，运行中不增加或重排 RID：
 
-| RID | 目标 | 初始最大码率 |
-|---|---|---:|
-| `q` | 1280x720、最高 30 fps | 2.0 Mbps |
-| `f` | 1920x1080、最高 60 fps | 8.0 Mbps |
+| RID | 目标 | Scalability mode | 初始最大码率 | Codec |
+|---|---|---|---:|---|
+| `f` | 1920x1080、最高 60 fps | `L1T1` | 8.0 Mbps | H.264 Baseline（Router 首选 offer `42002a`；Windows 实测协商 `42001f`） |
 
-编码优先级通过 Windows/macOS 硬件矩阵 PoC 后锁定。首选 VP8 simulcast 以获得稳定的分层控制；若认证设备上的 H.264 硬件编码在 1080p60 和多层发布上表现更好，则将 H.264 作为首选并保留 VP8 回退。SFU 不转码，因此所有接收端必须支持最终选择的 codec。
+固定 `q/f` 双层方案在阻断性 Windows PoC 中无法同时维持全分辨率与 60 fps，因此从首版候选配置中取消。Windows 11、NVIDIA RTX 4080 的实机预检触发了 `MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)`；包括质量阶段结束复查在内的 21/21 个原始 codec 样本均报告 `powerEfficientEncoder=true`，45/45 个质量阶段产品样本也保持同一实现。Router 虽优先 offer `42002a`，实际 sender fmtp 协商为 `42001f`，不能把 offer 写成实际协商结果。最新严格短测的 45.002 秒质量阶段里，发送端编码 43/43 个滚动窗口达到 55 fps，接收端解码为 42/43（97.67%），但扣除丢帧后的实际呈现只有 26/43（60.47%），因此状态为失败。该结果只确定 Windows NVIDIA 的候选硬件编码路径，不等于第 15.2 节要求的认证通过，也不证明 Level 4.2 bitstream 或移动端兼容性。
+
+mediasoup Router 依次发布 H.264 `42002a` 和 `42e01f` 两个能力；Electron/Chromium 与第一个 Baseline 能力协商出的 sender fmtp 为 `42001f`。该协商结果和实际 1080p60 性能必须同时进入门禁，不能只依据 Router 配置推断。SFU 只转发已编码媒体，不进行 codec、分辨率或帧率转码。VP8 和 VP9 也只保留为手动实验选项，不属于当前 Windows 1080p60 认证路径。macOS 默认 codec、硬件编码器和参数必须在 Apple Silicon 实机上完成同等门禁后再锁定；在此之前不得宣称 macOS 已认证。
 
 ### 9.3 码率调节
 
 - UI 提供自动、2、4、6、8 Mbps 预设和 1-10 Mbps 高级滑块。
-- 调节作用于高清层 `RTCRtpSender.getParameters()` 中现有 encoding 的 `maxBitrate`，再调用 `setParameters()`；不重新协商，不停止共享。
+- 调节作用于唯一屏幕 encoding 的 `RTCRtpSender.getParameters()` 中的 `maxBitrate`，再调用 `setParameters()`；不重新协商，不停止共享。
 - Server 对发送 Transport 设置允许的最高接收码率，防止客户端绕过产品上限。
 - 所有 UI 文案都标为“目标码率”。拥塞控制、丢包和编码器能力可以使实际码率低于目标。
-- 接收端依据可用带宽、窗口可见性和渲染尺寸选择 720p 或 1080p 层；隐藏或最小化时暂停视频 Consumer，音频不受影响。
+- 单层方案不提供 720p 备用层；接收端隐藏或最小化时暂停视频 Consumer，音频不受影响。移动端的自适应策略需在后续平台 PoC 中另行确定，不能假设 SFU 会转码。
 
 ## 10. 网络与容量
 
@@ -208,7 +209,7 @@ deploy/
 8 Mbps 高清层向另外 19 人转发时，仅屏幕视频出口约为 `152 Mbps`。再加：
 
 - 20 人语音全订阅约 380 个音频 Consumer。
-- 720p 备用编码上传和可能的低层订阅。
+- 单层屏幕编码上传，以及接收端带宽变化引发的重传流量。
 - RTP/RTCP、DTLS、SRTP、NACK/RTX 和重传开销。
 - TURN 中继造成的额外入站与出站流量。
 
@@ -296,17 +297,20 @@ RustFS 使用私有 bucket、独立访问密钥和 path-style S3 客户端配置
 在发布端上行至少 20 Mbps、接收端下行至少 12 Mbps、RTT 不高于 80 ms、丢包不高于 0.5% 的受控网络中：
 
 - 认证 Windows 与 macOS 设备的捕获、发送编码和接收解码分辨率均为 1920x1080。
-- 使用持续动态桌面素材测试；连续 10 分钟内，发送端和接收端至少 95% 的有效采样不低于 55 fps，且不发生持续黑屏、冻结或媒体断开。
-- 8 Mbps 预设稳定后，实际发送码率在无拥塞时落入目标的合理容差范围；质量限制原因不是 CPU 或 bandwidth。
-- 2/4/6/8 Mbps 切换在 5 秒内稳定，不重新创建 Producer。
+- 使用持续动态桌面素材测试；连续 10 分钟内，累计 `framesEncoded`、`framesDecoded` 和接收端 `totalVideoFrames - droppedVideoFrames` 计算出的两秒滚动窗口中，三者分别至少 95% 不低于 55 fps，且不发生持续黑屏、冻结或媒体断开；各计数器的样本和有效窗口覆盖率均至少 95%，不允许计数器重置、非正时间间隔或跨越超过 2.5 秒的缺口，原生 `framesPerSecond` 只作为辅助证据。
+- 2/4/6/8 Mbps 的 sender `maxBitrate` 均在 5 秒内连续三个样本稳定，四次事件引用同一个未重建的 Producer；8 Mbps 还要求无拥塞时至少连续三个实际发送码率样本进入目标值的 ±20% 区间。
+- 码率阶段和质量阶段结束复查的每个原始 codec 证据样本都必须符合该平台冻结的 MIME/profile，报告非空 encoder implementation，并且 `powerEfficientEncoder=true`；质量阶段每秒的产品样本必须持续报告相同 MIME 和 encoder implementation。Windows 当前冻结的协商 fmtp 是实测 `42001f`，它不替代 Level 4.2 bitstream/SPS 或移动端兼容性验证。
+- `qualityLimitationReason` 不得连续超过 5 秒为 `cpu` 或 `bandwidth`。
 
 认证设备矩阵至少包括 Windows 上的 Intel 核显、AMD 或 NVIDIA 独显，以及 macOS 的 Apple Silicon；Intel Mac 是否列入保证范围由 PoC 结果决定。
+
+当前 Windows 11、NVIDIA RTX 4080 的 45.002 秒严格预检结果为失败：sender 实际协商 H.264 `42001f`，21/21 个原始证据样本均使用 NVIDIA Media Foundation 硬件编码并报告 `powerEfficientEncoder=true`，45/45 个质量阶段产品样本保持同一 MIME 和实现。发送端编码 43/43 个两秒滚动窗口不低于 55 fps，接收端解码 42/43（97.67%）通过，但实际呈现只有 26/43（60.47%），未达到 95% 门槛。发送与接收均保持 1920x1080，所有 stats、画面分析、计数器样本及有效窗口覆盖完整，没有计数器重置或非法窗口，也无持续黑屏、冻结或 CPU/bandwidth 质量限制；2/4/6/8 Mbps 参数热更新均引用同一个 Producer，8 Mbps 实际发送码率连续四个样本进入容差范围。该测试为同机双端的窗口源测试，不能证明呈现端未达标由同机负载导致，也不能认证整块显示器共享。下一步必须先用两台物理设备完成相同短测，再执行正式 10 分钟门禁和整屏来源测试；Intel/AMD Windows 矩阵与 macOS 实机认证也均未完成。
 
 ### 15.3 稳定性与故障
 
 - 20 客户端、全语音、单路 1080p60 共享持续 2 小时，不出现进程崩溃或无法恢复的媒体中断。
 - 完成直连 UDP、WebRTC TCP 和强制 TURN 三种路径测试。
-- 覆盖 3% 丢包、100-200 ms RTT、带宽突降和恢复，验证降层、码率恢复和音频连续性。
+- 覆盖 3% 丢包、100-200 ms RTT、带宽突降和恢复，验证拥塞控制降低实际视频码率或帧率后的恢复过程及音频连续性。
 - 重启 Server、断开 Redis、阻断 UDP 和切换网络时，客户端给出可理解状态并按设计恢复。
 - 记录满房间 CPU、内存、入站/出站带宽和 TURN 占比，形成单节点容量基线。
 
