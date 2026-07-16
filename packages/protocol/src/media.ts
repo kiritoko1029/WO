@@ -3,6 +3,8 @@ import { z } from 'zod';
 import {
   consumerIdSchema,
   createAckEnvelopeSchema,
+  createBroadcastEnvelopeSchema,
+  createP2pAckEnvelopeSchema,
   createRequestEnvelopeSchema,
   isoDateTimeSchema,
   leaseIdSchema,
@@ -10,7 +12,9 @@ import {
   producerIdSchema,
   roomIdSchema,
   transportIdSchema,
+  userIdSchema,
 } from './envelope.js';
+import { peerSummarySchema } from './room.js';
 
 export const mediaSourceSchema = z.enum(['microphone', 'screen']);
 export const mediaKindSchema = z.enum(['audio', 'video']);
@@ -499,6 +503,78 @@ export const screenSetTargetBitrateAckSchema = createAckEnvelopeSchema(
   z.object({ bitrate: screenTargetBitrateSchema }).strict(),
 );
 
+export const p2pScreenLeaseSchema = z
+  .object({
+    roomId: roomIdSchema,
+    leaseId: leaseIdSchema,
+    holderId: userIdSchema,
+    expiresAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const p2pScreenAcquireAckSchema = createP2pAckEnvelopeSchema(
+  'screen.acquire',
+  z.object({ lease: p2pScreenLeaseSchema }).strict(),
+);
+export const p2pScreenRenewAckSchema = createP2pAckEnvelopeSchema(
+  'screen.renew',
+  z.object({ lease: p2pScreenLeaseSchema }).strict(),
+);
+export const p2pScreenReleaseAckSchema = createP2pAckEnvelopeSchema(
+  'screen.release',
+  z.object({}).strict(),
+);
+
+export const screenBitratePayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    leaseId: leaseIdSchema,
+    bitrate: screenTargetBitrateSchema,
+  })
+  .strict();
+export const screenBitrateRequestSchema = createRequestEnvelopeSchema(
+  'screen.bitrate',
+  screenBitratePayloadSchema,
+);
+export const screenBitrateAckSchema = createP2pAckEnvelopeSchema(
+  'screen.bitrate',
+  z.object({ bitrate: screenTargetBitrateSchema }).strict(),
+);
+export const screenBitrateBroadcastSchema = createBroadcastEnvelopeSchema(
+  'screen.bitrate',
+  screenBitratePayloadSchema,
+);
+
+export const screenOwnerChangedPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    owner: peerSummarySchema.nullable(),
+    leaseId: leaseIdSchema.nullable(),
+    leaseExpiresAt: isoDateTimeSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const valuesAreAllNull =
+      value.owner === null &&
+      value.leaseId === null &&
+      value.leaseExpiresAt === null;
+    const valuesAreAllPresent =
+      value.owner !== null &&
+      value.leaseId !== null &&
+      value.leaseExpiresAt !== null;
+
+    if (!valuesAreAllNull && !valuesAreAllPresent) {
+      context.addIssue({
+        code: 'custom',
+        message: 'screen owner and lease fields must change together',
+      });
+    }
+  });
+export const screenOwnerChangedBroadcastSchema = createBroadcastEnvelopeSchema(
+  'screen.ownerChanged',
+  screenOwnerChangedPayloadSchema,
+);
+
 export type MediaSource = z.infer<typeof mediaSourceSchema>;
 export type TransportDirection = z.infer<typeof transportDirectionSchema>;
 export type TransportCreateRequest = z.infer<
@@ -529,4 +605,20 @@ export type ScreenRenewAck = z.infer<typeof screenRenewAckSchema>;
 export type ScreenReleaseAck = z.infer<typeof screenReleaseAckSchema>;
 export type ScreenSetTargetBitrateAck = z.infer<
   typeof screenSetTargetBitrateAckSchema
+>;
+export type P2pScreenLease = z.infer<typeof p2pScreenLeaseSchema>;
+export type P2pScreenAcquireAck = z.infer<typeof p2pScreenAcquireAckSchema>;
+export type P2pScreenRenewAck = z.infer<typeof p2pScreenRenewAckSchema>;
+export type P2pScreenReleaseAck = z.infer<typeof p2pScreenReleaseAckSchema>;
+export type ScreenBitratePayload = z.infer<typeof screenBitratePayloadSchema>;
+export type ScreenBitrateRequest = z.infer<typeof screenBitrateRequestSchema>;
+export type ScreenBitrateAck = z.infer<typeof screenBitrateAckSchema>;
+export type ScreenBitrateBroadcast = z.infer<
+  typeof screenBitrateBroadcastSchema
+>;
+export type ScreenOwnerChangedPayload = z.infer<
+  typeof screenOwnerChangedPayloadSchema
+>;
+export type ScreenOwnerChangedBroadcast = z.infer<
+  typeof screenOwnerChangedBroadcastSchema
 >;

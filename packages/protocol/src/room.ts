@@ -1,12 +1,16 @@
 import { z } from 'zod';
 
 import {
+  connectionEpochSchema,
   createAckEnvelopeSchema,
   createBroadcastEnvelopeSchema,
+  createP2pAckEnvelopeSchema,
   createRequestEnvelopeSchema,
   memberIdSchema,
   roomIdSchema,
+  userIdSchema,
 } from './envelope.js';
+import { iceConfigurationDataSchema } from './webrtc.js';
 
 export const memberSchema = z
   .object({
@@ -78,3 +82,250 @@ export type RoomMemberJoinedBroadcast = z.infer<
 export type RoomMemberLeftBroadcast = z.infer<
   typeof roomMemberLeftBroadcastSchema
 >;
+
+export const roomCodeSchema = z.string().regex(/^\d{6}$/);
+export const roomRoleSchema = z.enum(['creator', 'joiner']);
+export const roomStateSchema = z.enum([
+  'waiting',
+  'negotiating',
+  'connected',
+  'reconnecting',
+  'closed',
+]);
+
+export const peerSummarySchema = z
+  .object({
+    userId: userIdSchema,
+    displayName: z.string().trim().min(1).max(100),
+    ready: z.boolean(),
+  })
+  .strict();
+
+export const roomActiveStateSchema = z.enum([
+  'negotiating',
+  'connected',
+  'reconnecting',
+]);
+
+const roomSessionCommonShape = {
+  roomId: roomIdSchema,
+  connectionEpoch: connectionEpochSchema,
+  rtcConfiguration: iceConfigurationDataSchema.shape.rtcConfiguration,
+  iceCredentialsExpiresAt:
+    iceConfigurationDataSchema.shape.iceCredentialsExpiresAt,
+} as const;
+
+export const creatorWaitingRoomSessionSchema = z
+  .object({
+    ...roomSessionCommonShape,
+    role: z.literal('creator'),
+    state: z.literal('waiting'),
+    peer: z.null(),
+  })
+  .strict();
+
+export const creatorActiveRoomSessionSchema = z
+  .object({
+    ...roomSessionCommonShape,
+    role: z.literal('creator'),
+    state: roomActiveStateSchema,
+    peer: peerSummarySchema,
+  })
+  .strict();
+
+export const joinerActiveRoomSessionSchema = z
+  .object({
+    ...roomSessionCommonShape,
+    role: z.literal('joiner'),
+    state: roomActiveStateSchema,
+    peer: peerSummarySchema,
+  })
+  .strict();
+
+export const roomSessionAckDataSchema = z.union([
+  creatorWaitingRoomSessionSchema,
+  creatorActiveRoomSessionSchema,
+  joinerActiveRoomSessionSchema,
+]);
+
+export const roomCreatePayloadSchema = z.object({}).strict();
+export const roomCreateRequestSchema = createRequestEnvelopeSchema(
+  'room.create',
+  roomCreatePayloadSchema,
+);
+export const roomCreateAckDataSchema = creatorWaitingRoomSessionSchema.extend({
+  roomCode: roomCodeSchema,
+});
+export const roomCreateAckSchema = createP2pAckEnvelopeSchema(
+  'room.create',
+  roomCreateAckDataSchema,
+);
+
+export const p2pRoomJoinPayloadSchema = z
+  .object({
+    roomCode: roomCodeSchema,
+  })
+  .strict();
+export const p2pRoomJoinRequestSchema = createRequestEnvelopeSchema(
+  'room.join',
+  p2pRoomJoinPayloadSchema,
+);
+export const p2pRoomJoinAckDataSchema = joinerActiveRoomSessionSchema;
+export const p2pRoomJoinAckSchema = createP2pAckEnvelopeSchema(
+  'room.join',
+  p2pRoomJoinAckDataSchema,
+);
+
+export const roomResumePayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+  })
+  .strict();
+export const roomResumeRequestSchema = createRequestEnvelopeSchema(
+  'room.resume',
+  roomResumePayloadSchema,
+);
+export const roomResumeAckSchema = createP2pAckEnvelopeSchema(
+  'room.resume',
+  roomSessionAckDataSchema,
+);
+
+export const p2pRoomLeaveRequestSchema = createRequestEnvelopeSchema(
+  'room.leave',
+  roomLeavePayloadSchema,
+);
+export const p2pRoomLeaveAckSchema = createP2pAckEnvelopeSchema(
+  'room.leave',
+  z.object({}).strict(),
+);
+
+export const roomEndPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+  })
+  .strict();
+export const roomEndRequestSchema = createRequestEnvelopeSchema(
+  'room.end',
+  roomEndPayloadSchema,
+);
+export const roomEndAckSchema = createP2pAckEnvelopeSchema(
+  'room.end',
+  z.object({}).strict(),
+);
+
+export const peerReadyPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    connectionEpoch: connectionEpochSchema,
+  })
+  .strict();
+export const peerReadyRequestSchema = createRequestEnvelopeSchema(
+  'peer.ready',
+  peerReadyPayloadSchema,
+);
+export const peerReadyAckSchema = createP2pAckEnvelopeSchema(
+  'peer.ready',
+  z.object({}).strict(),
+);
+
+export const peerJoinedPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    peer: peerSummarySchema,
+  })
+  .strict();
+export const peerJoinedBroadcastSchema = createBroadcastEnvelopeSchema(
+  'peer.joined',
+  peerJoinedPayloadSchema,
+);
+
+export const peerLeftReasonSchema = z.enum([
+  'left',
+  'disconnected',
+  'replaced',
+]);
+export const peerLeftPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    userId: userIdSchema,
+    reason: peerLeftReasonSchema,
+  })
+  .strict();
+export const peerLeftBroadcastSchema = createBroadcastEnvelopeSchema(
+  'peer.left',
+  peerLeftPayloadSchema,
+);
+
+export const peerReadyBroadcastPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    peer: peerSummarySchema,
+  })
+  .strict();
+export const peerReadyBroadcastSchema = createBroadcastEnvelopeSchema(
+  'peer.ready',
+  peerReadyBroadcastPayloadSchema,
+);
+
+export const roomClosedReasonSchema = z.enum([
+  'ended',
+  'creator_left',
+  'expired',
+]);
+export const roomClosedPayloadSchema = z
+  .object({
+    roomId: roomIdSchema,
+    reason: roomClosedReasonSchema,
+  })
+  .strict();
+export const roomClosedBroadcastSchema = createBroadcastEnvelopeSchema(
+  'room.closed',
+  roomClosedPayloadSchema,
+);
+
+export type RoomCode = z.infer<typeof roomCodeSchema>;
+export type RoomRole = z.infer<typeof roomRoleSchema>;
+export type RoomState = z.infer<typeof roomStateSchema>;
+export type PeerSummary = z.infer<typeof peerSummarySchema>;
+export type RoomActiveState = z.infer<typeof roomActiveStateSchema>;
+export type CreatorWaitingRoomSession = z.infer<
+  typeof creatorWaitingRoomSessionSchema
+>;
+export type CreatorActiveRoomSession = z.infer<
+  typeof creatorActiveRoomSessionSchema
+>;
+export type JoinerActiveRoomSession = z.infer<
+  typeof joinerActiveRoomSessionSchema
+>;
+export type RoomSessionAckData = z.infer<typeof roomSessionAckDataSchema>;
+export type RoomCreatePayload = z.infer<typeof roomCreatePayloadSchema>;
+export type RoomCreateAckData = z.infer<typeof roomCreateAckDataSchema>;
+export type RoomCreateRequest = z.infer<typeof roomCreateRequestSchema>;
+export type RoomCreateAck = z.infer<typeof roomCreateAckSchema>;
+export type P2pRoomJoinPayload = z.infer<typeof p2pRoomJoinPayloadSchema>;
+export type P2pRoomJoinRequest = z.infer<typeof p2pRoomJoinRequestSchema>;
+export type P2pRoomJoinAckData = z.infer<typeof p2pRoomJoinAckDataSchema>;
+export type P2pRoomJoinAck = z.infer<typeof p2pRoomJoinAckSchema>;
+export type RoomResumePayload = z.infer<typeof roomResumePayloadSchema>;
+export type RoomResumeRequest = z.infer<typeof roomResumeRequestSchema>;
+export type RoomResumeAck = z.infer<typeof roomResumeAckSchema>;
+export type P2pRoomLeaveRequest = z.infer<typeof p2pRoomLeaveRequestSchema>;
+export type P2pRoomLeaveAck = z.infer<typeof p2pRoomLeaveAckSchema>;
+export type RoomEndPayload = z.infer<typeof roomEndPayloadSchema>;
+export type RoomEndRequest = z.infer<typeof roomEndRequestSchema>;
+export type RoomEndAck = z.infer<typeof roomEndAckSchema>;
+export type PeerReadyPayload = z.infer<typeof peerReadyPayloadSchema>;
+export type PeerReadyRequest = z.infer<typeof peerReadyRequestSchema>;
+export type PeerReadyAck = z.infer<typeof peerReadyAckSchema>;
+export type PeerJoinedPayload = z.infer<typeof peerJoinedPayloadSchema>;
+export type PeerJoinedBroadcast = z.infer<typeof peerJoinedBroadcastSchema>;
+export type PeerLeftReason = z.infer<typeof peerLeftReasonSchema>;
+export type PeerLeftPayload = z.infer<typeof peerLeftPayloadSchema>;
+export type PeerLeftBroadcast = z.infer<typeof peerLeftBroadcastSchema>;
+export type PeerReadyBroadcastPayload = z.infer<
+  typeof peerReadyBroadcastPayloadSchema
+>;
+export type PeerReadyBroadcast = z.infer<typeof peerReadyBroadcastSchema>;
+export type RoomClosedReason = z.infer<typeof roomClosedReasonSchema>;
+export type RoomClosedPayload = z.infer<typeof roomClosedPayloadSchema>;
+export type RoomClosedBroadcast = z.infer<typeof roomClosedBroadcastSchema>;

@@ -3,26 +3,103 @@ import { describe, expect, test } from 'vitest';
 import {
   PROTOCOL_VERSION,
   ackEnvelopeSchema,
+  authLoginBodySchema,
+  authLoginResponseSchema,
+  authLogoutBodySchema,
+  authLogoutResponseSchema,
+  authRefreshBodySchema,
+  authRefreshResponseSchema,
   authRefreshRequestSchema,
+  authRegisterBodySchema,
+  authRegisterResponseSchema,
   broadcastEnvelopeSchema,
+  connectionEpochSchema,
+  connectionIdSchema,
   consumerIdSchema,
   consumerCreateAckDataSchema,
   dtlsFingerprintSchema,
   dtlsParametersSchema,
   eventIdSchema,
   iceCandidateSchema,
+  iceServerUrlSchema,
   inboundEnvelopeSchema,
   leaseIdSchema,
   memberIdSchema,
+  negotiationIdSchema,
+  p2pAckEnvelopeSchema,
+  p2pBroadcastEnvelopeSchema,
+  p2pRequestEnvelopeSchema,
+  peerReadyBroadcastSchema,
   producerCreatePayloadSchema,
   producerIdSchema,
+  publicIceServerSchema,
   requestIdSchema,
+  roomCodeSchema,
   roomIdSchema,
+  roomRoleSchema,
+  roomStateSchema,
   rtpCapabilitiesSchema,
   rtpParametersSchema,
+  screenBitrateRequestSchema,
   screenLeaseSchema,
+  screenOwnerChangedBroadcastSchema,
   screenSetTargetBitrateRequestSchema,
+  transportCreateRequestSchema,
   transportIdSchema,
+  userIdSchema,
+  iceCandidateInitSchema,
+  type AuthLoginResponse,
+  type AuthRefreshResponse,
+  type AuthRegisterResponse,
+  type CreatorActiveRoomSession,
+  type CreatorWaitingRoomSession,
+  type DisplayName,
+  type Email,
+  type IceServerUrl,
+  type JoinerActiveRoomSession,
+  type NegotiationResetReason,
+  type P2pRequestEnvelope,
+  type P2pRoomJoinPayload,
+  type PeerJoinedBroadcast,
+  type PeerJoinedPayload,
+  type PeerLeftBroadcast,
+  type PeerLeftPayload,
+  type PeerLeftReason,
+  type PeerReadyBroadcast,
+  type PeerReadyBroadcastPayload,
+  type PeerReadyPayload,
+  type Password,
+  type RoomActiveState,
+  type RoomClosedBroadcast,
+  type RoomClosedPayload,
+  type RoomClosedReason,
+  type RoomCreateAckData,
+  type RoomCreatePayload,
+  type RoomEndPayload,
+  type RoomResumePayload,
+  type ScreenBitrateBroadcast,
+  type ScreenBitratePayload,
+  type ScreenOwnerChangedPayload,
+  type WebrtcAnswerAck,
+  type WebrtcAnswerBroadcast,
+  type WebrtcAnswerPayload,
+  type WebrtcIceCandidateAck,
+  type WebrtcIceCandidateBroadcast,
+  type WebrtcIceCandidatePayload,
+  type WebrtcIceRestartAck,
+  type WebrtcIceRestartBroadcast,
+  type WebrtcIceRestartPayload,
+  type WebrtcIceServersRefreshAck,
+  type WebrtcIceServersRefreshPayload,
+  type WebrtcNegotiationResetBroadcast,
+  type WebrtcNegotiationResetPayload,
+  type WebrtcOfferAck,
+  type WebrtcOfferBroadcast,
+  type WebrtcOfferPayload,
+  type WebrtcRestartRequestedAck,
+  type WebrtcRestartRequestedBroadcast,
+  type WebrtcRestartRequestedPayload,
+  type WebrtcSignalContext,
   type AckEnvelope,
   type ConsumerId,
   type ErrorCode,
@@ -33,7 +110,66 @@ import {
   type RequestId,
   type RoomId,
   type TransportId,
+  type UserId,
 } from '../src/index.js';
+
+type PublicP2pSchemaTypeExports = readonly [
+  Email,
+  Password,
+  DisplayName,
+  AuthRegisterResponse,
+  AuthLoginResponse,
+  AuthRefreshResponse,
+  RoomActiveState,
+  CreatorWaitingRoomSession,
+  CreatorActiveRoomSession,
+  JoinerActiveRoomSession,
+  RoomCreatePayload,
+  RoomCreateAckData,
+  P2pRoomJoinPayload,
+  RoomResumePayload,
+  RoomEndPayload,
+  PeerReadyPayload,
+  PeerJoinedPayload,
+  PeerJoinedBroadcast,
+  PeerLeftReason,
+  PeerLeftPayload,
+  PeerLeftBroadcast,
+  PeerReadyBroadcastPayload,
+  PeerReadyBroadcast,
+  RoomClosedReason,
+  RoomClosedPayload,
+  RoomClosedBroadcast,
+  IceServerUrl,
+  WebrtcSignalContext,
+  WebrtcOfferPayload,
+  WebrtcOfferAck,
+  WebrtcOfferBroadcast,
+  WebrtcAnswerPayload,
+  WebrtcAnswerAck,
+  WebrtcAnswerBroadcast,
+  WebrtcIceCandidatePayload,
+  WebrtcIceCandidateAck,
+  WebrtcIceCandidateBroadcast,
+  WebrtcIceRestartPayload,
+  WebrtcIceRestartAck,
+  WebrtcIceRestartBroadcast,
+  WebrtcRestartRequestedPayload,
+  WebrtcRestartRequestedAck,
+  WebrtcRestartRequestedBroadcast,
+  WebrtcIceServersRefreshPayload,
+  WebrtcIceServersRefreshAck,
+  NegotiationResetReason,
+  WebrtcNegotiationResetPayload,
+  WebrtcNegotiationResetBroadcast,
+  ScreenBitratePayload,
+  ScreenBitrateBroadcast,
+  ScreenOwnerChangedPayload,
+];
+
+const preservePublicP2pSchemaTypes = (
+  value: PublicP2pSchemaTypeExports | undefined,
+) => value;
 
 const fingerprint = (byteLength: number, byte = 'AA') =>
   Array.from({ length: byteLength }, () => byte).join(':');
@@ -805,5 +941,867 @@ describe('broadcast and acknowledgement envelopes', () => {
     };
 
     expect(ackEnvelopeSchema.safeParse(failure).success).toBe(false);
+  });
+});
+
+const p2pAck = (requestType: string, data: unknown) => ({
+  version: 1,
+  requestId: 'request-1',
+  type: `${requestType}.ack`,
+  payload: { ok: true, data },
+});
+
+const p2pBroadcast = (type: string, payload: unknown) => ({
+  version: 1,
+  eventId: 'event-1',
+  type,
+  payload,
+});
+
+const validRtcConfiguration = {
+  iceServers: [
+    { urls: ['stun:rtc.example.com:3478'] },
+    {
+      urls: ['turn:rtc.example.com:3478?transport=udp'],
+      username: '1750000000:opaque-user',
+      credential: 'short-lived-credential',
+    },
+  ],
+  iceTransportPolicy: 'all',
+};
+
+const validPeer = {
+  userId: 'user-2',
+  displayName: 'Grace',
+  ready: true,
+};
+
+const validRoomSessionCommon = {
+  roomId: 'room-1',
+  connectionEpoch: 2,
+  rtcConfiguration: validRtcConfiguration,
+  iceCredentialsExpiresAt: '2026-07-16T13:10:00.000Z',
+};
+
+const validCreatorWaitingSession = {
+  ...validRoomSessionCommon,
+  role: 'creator',
+  peer: null,
+  state: 'waiting',
+};
+
+const validCreatorActiveSession = {
+  ...validRoomSessionCommon,
+  role: 'creator',
+  peer: validPeer,
+  state: 'connected',
+};
+
+const validRoomSession = {
+  ...validRoomSessionCommon,
+  role: 'joiner',
+  peer: validPeer,
+  state: 'negotiating',
+};
+
+const validSignalBase = {
+  roomId: 'room-1',
+  negotiationId: 'negotiation-1',
+  connectionEpoch: 2,
+};
+
+const validOffer = {
+  type: 'offer',
+  sdp: 'v=0\r\n',
+};
+
+const validAnswer = {
+  type: 'answer',
+  sdp: 'v=0\r\n',
+};
+
+const validBrowserCandidate = {
+  candidate: 'candidate:1 1 udp 2122260223 host.local 55000 typ host',
+  sdpMid: '1',
+  sdpMLineIndex: 1,
+  usernameFragment: 'abc',
+};
+
+describe('HTTP email and password authentication contracts', () => {
+  test('normalizes a strict register body without normalizing the password', () => {
+    expect(
+      authRegisterBodySchema.parse({
+        email: '  PERSON@Example.COM ',
+        password: '  password with spaces  ',
+        displayName: '  Person  ',
+      }),
+    ).toEqual({
+      email: 'person@example.com',
+      password: '  password with spaces  ',
+      displayName: 'Person',
+    });
+
+    expect(
+      authRegisterBodySchema.safeParse({
+        email: 'person@example.com',
+        password: 'short',
+        displayName: 'Person',
+      }).success,
+    ).toBe(false);
+    expect(
+      authRegisterBodySchema.safeParse({
+        email: 'person@example.com',
+        password: 'long-enough-password',
+        displayName: 'Person',
+        admin: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('defines strict login, refresh, and logout request bodies', () => {
+    expect(
+      authLoginBodySchema.parse({
+        email: ' Person@Example.com ',
+        password: 'long-enough-password',
+      }),
+    ).toEqual({
+      email: 'person@example.com',
+      password: 'long-enough-password',
+    });
+
+    for (const schema of [authRefreshBodySchema, authLogoutBodySchema]) {
+      expect(schema.safeParse({ refreshToken: 'refresh-token' }).success).toBe(
+        true,
+      );
+      expect(
+        schema.safeParse({
+          refreshToken: 'refresh-token',
+          accessToken: 'must-not-be-accepted',
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test('returns only public user and token fields from auth responses', () => {
+    const response = {
+      user: {
+        userId: 'user-1',
+        email: 'person@example.com',
+        displayName: 'Person',
+      },
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      accessTokenExpiresInSeconds: 900,
+    };
+
+    for (const schema of [
+      authRegisterResponseSchema,
+      authLoginResponseSchema,
+      authRefreshResponseSchema,
+    ]) {
+      expect(schema.safeParse(response).success).toBe(true);
+      expect(
+        schema.safeParse({
+          ...response,
+          passwordHash: '$argon2id$secret',
+        }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          ...response,
+          credentialId: 'credential-row-1',
+        }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          ...response,
+          user: {
+            ...response.user,
+            passwordHash: '$argon2id$secret',
+            credentialId: 'credential-row-1',
+          },
+        }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          user: response.user,
+          accessToken: response.accessToken,
+          refreshToken: response.refreshToken,
+          expiresInSeconds: 900,
+        }).success,
+      ).toBe(false);
+    }
+
+    expect(
+      authLogoutResponseSchema.safeParse({ loggedOut: true }).success,
+    ).toBe(true);
+    expect(
+      authLogoutResponseSchema.safeParse({
+        loggedOut: true,
+        refreshToken: 'leaked-token',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('preserves the historical expiry field in legacy refresh acknowledgements', () => {
+    const acknowledgement = {
+      version: 1,
+      requestId: 'request-1',
+      type: 'auth.refresh.ack',
+      payload: {
+        ok: true,
+        data: {
+          accessToken: 'access-token',
+          refreshToken: 'refresh-token',
+          expiresInSeconds: 900,
+        },
+      },
+    };
+
+    expect(ackEnvelopeSchema.safeParse(acknowledgement).success).toBe(true);
+    expect(
+      ackEnvelopeSchema.safeParse({
+        ...acknowledgement,
+        payload: {
+          ok: true,
+          data: {
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresInSeconds: 900,
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('two-person room lifecycle contracts', () => {
+  test('accepts only six ASCII digits as a public room code', () => {
+    expect(roomCodeSchema.safeParse('012345').success).toBe(true);
+    expect(roomCodeSchema.safeParse('12345').success).toBe(false);
+    expect(roomCodeSchema.safeParse('1234567').success).toBe(false);
+    expect(roomCodeSchema.safeParse('１２３４５６').success).toBe(false);
+  });
+
+  test('separates branded public users, connections, and negotiations', () => {
+    const userId = userIdSchema.parse('user-1');
+    const connectionId = connectionIdSchema.parse('connection-1');
+    const negotiationId = negotiationIdSchema.parse('negotiation-1');
+    const acceptsUserId = (value: UserId) => value;
+
+    expect(acceptsUserId(userId)).toBe('user-1');
+    expect(connectionId).toBe('connection-1');
+    expect(negotiationId).toBe('negotiation-1');
+    // @ts-expect-error Connection IDs cannot be used as user IDs.
+    acceptsUserId(connectionId);
+    // @ts-expect-error Negotiation IDs cannot be used as user IDs.
+    acceptsUserId(negotiationId);
+  });
+
+  test('bounds a per-user connection epoch to safe non-negative integers', () => {
+    expect(connectionEpochSchema.safeParse(0).success).toBe(true);
+    expect(
+      connectionEpochSchema.safeParse(Number.MAX_SAFE_INTEGER).success,
+    ).toBe(true);
+    expect(connectionEpochSchema.safeParse(-1).success).toBe(false);
+    expect(connectionEpochSchema.safeParse(1.5).success).toBe(false);
+    expect(
+      connectionEpochSchema.safeParse(Number.MAX_SAFE_INTEGER + 1).success,
+    ).toBe(false);
+  });
+
+  test('uses bounded room roles and lifecycle states', () => {
+    for (const role of ['creator', 'joiner']) {
+      expect(roomRoleSchema.safeParse(role).success).toBe(true);
+    }
+    for (const state of [
+      'waiting',
+      'negotiating',
+      'connected',
+      'reconnecting',
+      'closed',
+    ]) {
+      expect(roomStateSchema.safeParse(state).success).toBe(true);
+    }
+    expect(roomRoleSchema.safeParse('moderator').success).toBe(false);
+    expect(roomStateSchema.safeParse('full').success).toBe(false);
+  });
+
+  test('accepts every active room request and rejects unknown fields', () => {
+    const requests = [
+      request('room.create', {}),
+      request('room.join', { roomCode: '012345' }),
+      request('room.resume', { roomId: 'room-1' }),
+      request('room.leave', { roomId: 'room-1' }),
+      request('room.end', { roomId: 'room-1' }),
+      request('peer.ready', { roomId: 'room-1', connectionEpoch: 2 }),
+    ];
+
+    for (const value of requests) {
+      expect(
+        p2pRequestEnvelopeSchema.safeParse(value),
+        value.type,
+      ).toMatchObject({ success: true });
+    }
+
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('room.join', { roomId: 'room-1' }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('room.join', { roomCode: '012345', userId: 'spoofed-user' }),
+      ).success,
+    ).toBe(false);
+  });
+
+  test('returns sanitized room sessions for create, join, and resume', () => {
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.create', {
+          ...validCreatorWaitingSession,
+          roomCode: '012345',
+        }),
+      ).success,
+    ).toBe(true);
+    for (const type of ['room.join', 'room.resume']) {
+      expect(
+        p2pAckEnvelopeSchema.safeParse(p2pAck(type, validRoomSession)).success,
+        type,
+      ).toBe(true);
+    }
+
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.join', {
+          ...validRoomSession,
+          rtcConfiguration: {
+            ...validRtcConfiguration,
+            turnSharedSecret: 'must-never-leak',
+          },
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  test('binds create and join acknowledgements to their room roles', () => {
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.create', {
+          ...validRoomSession,
+          roomCode: '012345',
+          role: 'joiner',
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.create', {
+          ...validRoomSession,
+          roomCode: '012345',
+          role: 'creator',
+          peer: validPeer,
+          state: 'connected',
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.join', {
+          ...validRoomSession,
+          role: 'creator',
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.join', {
+          ...validRoomSession,
+          peer: null,
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  test('accepts only possible successful room session snapshots', () => {
+    expect(
+      p2pAckEnvelopeSchema.safeParse(
+        p2pAck('room.create', {
+          ...validCreatorWaitingSession,
+          roomCode: '012345',
+        }),
+      ).success,
+    ).toBe(true);
+    expect(
+      p2pAckEnvelopeSchema.safeParse(p2pAck('room.join', validRoomSession))
+        .success,
+    ).toBe(true);
+    for (const snapshot of [
+      validCreatorWaitingSession,
+      validCreatorActiveSession,
+      validRoomSession,
+    ]) {
+      expect(
+        p2pAckEnvelopeSchema.safeParse(p2pAck('room.resume', snapshot)).success,
+        `${snapshot.role}:${snapshot.state}`,
+      ).toBe(true);
+    }
+
+    const impossibleJoinSnapshots = [
+      { ...validRoomSession, state: 'waiting' },
+      { ...validRoomSession, state: 'closed' },
+      { ...validRoomSession, peer: null },
+      { ...validRoomSession, role: 'creator' },
+    ];
+    const impossibleResumeSnapshots = [
+      { ...validCreatorWaitingSession, state: 'closed' },
+      { ...validCreatorWaitingSession, peer: validPeer },
+      { ...validCreatorWaitingSession, state: 'connected' },
+      { ...validCreatorActiveSession, peer: null },
+      { ...validRoomSession, state: 'waiting' },
+      { ...validRoomSession, state: 'closed' },
+      { ...validRoomSession, peer: null },
+    ];
+
+    for (const snapshot of impossibleJoinSnapshots) {
+      expect(
+        p2pAckEnvelopeSchema.safeParse(p2pAck('room.join', snapshot)).success,
+        `join:${snapshot.role}:${snapshot.state}:${String(snapshot.peer)}`,
+      ).toBe(false);
+    }
+    for (const snapshot of impossibleResumeSnapshots) {
+      expect(
+        p2pAckEnvelopeSchema.safeParse(p2pAck('room.resume', snapshot)).success,
+        `resume:${snapshot.role}:${snapshot.state}:${String(snapshot.peer)}`,
+      ).toBe(false);
+    }
+  });
+});
+
+describe('browser-native WebRTC relay contracts', () => {
+  test('accepts a bounded browser ICE candidate and end-of-candidates', () => {
+    expect(iceCandidateInitSchema.parse(validBrowserCandidate)).toBeDefined();
+    expect(iceCandidateInitSchema.parse(null)).toBeNull();
+    expect(
+      iceCandidateInitSchema.safeParse({
+        ...validBrowserCandidate,
+        unexpected: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('accepts offer, answer, candidate, restart, and refresh requests', () => {
+    const requests = [
+      request('webrtc.offer', {
+        ...validSignalBase,
+        description: validOffer,
+      }),
+      request('webrtc.answer', {
+        ...validSignalBase,
+        description: validAnswer,
+      }),
+      request('webrtc.iceCandidate', {
+        ...validSignalBase,
+        candidate: validBrowserCandidate,
+      }),
+      request('webrtc.iceCandidate', {
+        ...validSignalBase,
+        candidate: null,
+      }),
+      request('webrtc.iceRestart', {
+        ...validSignalBase,
+        description: validOffer,
+      }),
+      request('webrtc.restartRequested', validSignalBase),
+      request('webrtc.iceServers.refresh', validSignalBase),
+    ];
+
+    for (const value of requests) {
+      expect(
+        p2pRequestEnvelopeSchema.safeParse(value),
+        value.type,
+      ).toMatchObject({ success: true });
+    }
+  });
+
+  test('requires current negotiation and connection identifiers', () => {
+    for (const field of ['negotiationId', 'connectionEpoch']) {
+      const payload = {
+        ...validSignalBase,
+        description: validOffer,
+      };
+      delete payload[field as keyof typeof payload];
+      expect(
+        p2pRequestEnvelopeSchema.safeParse(request('webrtc.offer', payload))
+          .success,
+        field,
+      ).toBe(false);
+    }
+
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('webrtc.offer', {
+          ...validSignalBase,
+          connectionEpoch: -1,
+          description: validOffer,
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  test('rejects oversized or structurally invalid SDP and candidates', () => {
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('webrtc.offer', {
+          ...validSignalBase,
+          description: { type: 'offer', sdp: 'x'.repeat(262_145) },
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('webrtc.offer', {
+          ...validSignalBase,
+          description: { ...validOffer, internal: true },
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('webrtc.iceCandidate', {
+          ...validSignalBase,
+          candidate: { candidate: 'x'.repeat(8_193) },
+        }),
+      ).success,
+    ).toBe(false);
+  });
+});
+
+describe('public STUN and TURN server contracts', () => {
+  test.each([
+    ['empty STUN authority', { urls: ['stun:'] }],
+    [
+      'empty TURN authority and blank credentials',
+      { urls: ['turn:'], username: ' ', credential: ' ' },
+    ],
+    ['nested scheme', { urls: ['stun:http://169.254.169.254'] }],
+    [
+      'embedded userinfo',
+      {
+        urls: ['turn:user:password@relay.example.com'],
+        username: 'user',
+        credential: 'credential',
+      },
+    ],
+    ['path', { urls: ['stun:relay.example.com/private'] }],
+    ['fragment', { urls: ['stun:relay.example.com#fragment'] }],
+    ['control character', { urls: ['stun:relay.example.com\u0000'] }],
+    ['STUN query', { urls: ['stun:relay.example.com?transport=udp'] }],
+    [
+      'unsupported TURN query',
+      {
+        urls: ['turn:relay.example.com?region=cn'],
+        username: 'user',
+        credential: 'credential',
+      },
+    ],
+    [
+      'duplicate TURN query',
+      {
+        urls: ['turn:relay.example.com?transport=udp&transport=tcp'],
+        username: 'user',
+        credential: 'credential',
+      },
+    ],
+    [
+      'extra TURN query',
+      {
+        urls: ['turn:relay.example.com?transport=udp&region=cn'],
+        username: 'user',
+        credential: 'credential',
+      },
+    ],
+    ['zero port', { urls: ['stun:relay.example.com:0'] }],
+    ['out-of-range port', { urls: ['stun:relay.example.com:65536'] }],
+    ['invalid hostname', { urls: ['stun:-relay.example.com'] }],
+  ])('rejects %s', (_caseName, value) => {
+    expect(publicIceServerSchema.safeParse(value).success).toBe(false);
+  });
+
+  test.each([
+    'stun:relay.example.com',
+    'stun:relay.example.com:3478',
+    'stun:203.0.113.10',
+    'stun:203.0.113.10:3478',
+    'stun:[2001:db8::10]',
+    'stun:[2001:db8::10]:3478',
+    'turn:relay.example.com',
+    'turn:relay.example.com:3478?transport=udp',
+    'turn:203.0.113.10:3478?transport=tcp',
+    'turn:[2001:db8::10]:3478?transport=udp',
+  ])('accepts valid ICE server URI %s', (url) => {
+    expect(iceServerUrlSchema.safeParse(url).success).toBe(true);
+
+    const value = url.startsWith('turn:')
+      ? { urls: [url], username: 'user', credential: 'credential' }
+      : { urls: [url] };
+    expect(publicIceServerSchema.safeParse(value).success).toBe(true);
+  });
+
+  test.each([
+    { username: '   ', credential: 'credential' },
+    { username: 'user', credential: '\t\r\n' },
+    { username: 'user\u0000', credential: 'credential' },
+    { username: 'user', credential: 'credential\u007f' },
+  ])('rejects unsafe separate TURN credentials %#', (credentials) => {
+    expect(
+      publicIceServerSchema.safeParse({
+        urls: ['turn:relay.example.com'],
+        ...credentials,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('preserves bounded TURN credential bytes without trimming', () => {
+    const value = {
+      urls: ['turn:relay.example.com?transport=tcp'],
+      username: '  expiring-user  ',
+      credential: '  generated-credential  ',
+    };
+
+    expect(publicIceServerSchema.parse(value)).toEqual(value);
+  });
+
+  test('requires separate credentials only when an entry contains TURN', () => {
+    expect(
+      publicIceServerSchema.safeParse({
+        urls: ['turn:relay.example.com'],
+      }).success,
+    ).toBe(false);
+    expect(
+      publicIceServerSchema.safeParse({
+        urls: ['stun:relay.example.com'],
+        username: 'user',
+        credential: 'credential',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('active P2P envelope unions', () => {
+  test('exports inferred types for active public schemas', () => {
+    expect(preservePublicP2pSchemaTypes(undefined)).toBeUndefined();
+  });
+
+  test('rejects SFU and legacy bitrate messages from the P2P request union', () => {
+    const legacyTransport = transportCreateRequestSchema.parse(
+      request('transport.create', {
+        roomId: 'room-1',
+        direction: 'send',
+      }),
+    );
+
+    expect(p2pRequestEnvelopeSchema.safeParse(legacyTransport).success).toBe(
+      false,
+    );
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('producer.close', {
+          roomId: 'room-1',
+          producerId: 'producer-1',
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('screen.setTargetBitrate', {
+          roomId: 'room-1',
+          leaseId: 'lease-1',
+          bitrate: 6_000_000,
+        }),
+      ).success,
+    ).toBe(false);
+
+    const acceptsP2pRequest = (value: P2pRequestEnvelope) => value;
+    // @ts-expect-error SFU transport requests are not active P2P requests.
+    acceptsP2pRequest(legacyTransport);
+  });
+
+  test('accepts all active screen requests including screen.bitrate', () => {
+    const requests = [
+      request('screen.acquire', { roomId: 'room-1' }),
+      request('screen.renew', { roomId: 'room-1', leaseId: 'lease-1' }),
+      request('screen.release', { roomId: 'room-1', leaseId: 'lease-1' }),
+      request('screen.bitrate', {
+        roomId: 'room-1',
+        leaseId: 'lease-1',
+        bitrate: 6_000_000,
+      }),
+    ];
+
+    for (const value of requests) {
+      expect(
+        p2pRequestEnvelopeSchema.safeParse(value).success,
+        value.type,
+      ).toBe(true);
+    }
+    expect(screenBitrateRequestSchema.safeParse(requests.at(-1)).success).toBe(
+      true,
+    );
+  });
+
+  test('accepts every active acknowledgement and active stale error', () => {
+    const lease = {
+      roomId: 'room-1',
+      leaseId: 'lease-1',
+      holderId: 'user-1',
+      expiresAt: '2026-07-16T13:00:00.000Z',
+    };
+    const acknowledgements = [
+      p2pAck('room.create', {
+        ...validRoomSession,
+        roomCode: '012345',
+        role: 'creator',
+        peer: null,
+        state: 'waiting',
+      }),
+      p2pAck('room.join', validRoomSession),
+      p2pAck('room.resume', validRoomSession),
+      p2pAck('room.leave', {}),
+      p2pAck('room.end', {}),
+      p2pAck('peer.ready', {}),
+      p2pAck('webrtc.offer', {}),
+      p2pAck('webrtc.answer', {}),
+      p2pAck('webrtc.iceCandidate', {}),
+      p2pAck('webrtc.iceRestart', {}),
+      p2pAck('webrtc.restartRequested', {}),
+      p2pAck('webrtc.iceServers.refresh', {
+        rtcConfiguration: validRtcConfiguration,
+        iceCredentialsExpiresAt: '2026-07-16T13:10:00.000Z',
+      }),
+      p2pAck('screen.acquire', { lease }),
+      p2pAck('screen.renew', { lease }),
+      p2pAck('screen.release', {}),
+      p2pAck('screen.bitrate', { bitrate: 6_000_000 }),
+    ];
+
+    for (const value of acknowledgements) {
+      expect(p2pAckEnvelopeSchema.safeParse(value).success, value.type).toBe(
+        true,
+      );
+    }
+
+    for (const code of [
+      'INVALID_CREDENTIALS',
+      'AUTH_REQUIRED',
+      'ROOM_CODE_INVALID',
+      'ROOM_CODE_EXPIRED',
+      'ROOM_CLOSED',
+      'STALE_CONNECTION',
+      'STALE_NEGOTIATION',
+      'RATE_LIMITED',
+      'SIGNALING_UNAVAILABLE',
+    ]) {
+      expect(
+        p2pAckEnvelopeSchema.safeParse({
+          version: 1,
+          requestId: 'request-1',
+          type: 'room.join.ack',
+          payload: {
+            ok: false,
+            error: { code, message: 'Request failed' },
+          },
+        }).success,
+        code,
+      ).toBe(true);
+    }
+
+    expect(
+      p2pAckEnvelopeSchema.safeParse({
+        version: 1,
+        requestId: 'request-1',
+        type: 'room.join.ack',
+        payload: {
+          ok: false,
+          error: {
+            code: 'MEDIA_NODE_UNAVAILABLE',
+            message: 'Legacy SFU failure',
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('accepts all peer, room, WebRTC, and screen broadcasts', () => {
+    const broadcasts = [
+      p2pBroadcast('peer.joined', { roomId: 'room-1', peer: validPeer }),
+      p2pBroadcast('peer.left', {
+        roomId: 'room-1',
+        userId: 'user-2',
+        reason: 'disconnected',
+      }),
+      p2pBroadcast('peer.ready', { roomId: 'room-1', peer: validPeer }),
+      p2pBroadcast('room.closed', { roomId: 'room-1', reason: 'ended' }),
+      p2pBroadcast('webrtc.offer', {
+        ...validSignalBase,
+        description: validOffer,
+      }),
+      p2pBroadcast('webrtc.answer', {
+        ...validSignalBase,
+        description: validAnswer,
+      }),
+      p2pBroadcast('webrtc.iceCandidate', {
+        ...validSignalBase,
+        candidate: validBrowserCandidate,
+      }),
+      p2pBroadcast('webrtc.iceRestart', {
+        ...validSignalBase,
+        description: validOffer,
+      }),
+      p2pBroadcast('webrtc.restartRequested', validSignalBase),
+      p2pBroadcast('webrtc.negotiationReset', {
+        roomId: 'room-1',
+        negotiationId: 'negotiation-2',
+        reason: 'peer_resumed',
+      }),
+      p2pBroadcast('screen.ownerChanged', {
+        roomId: 'room-1',
+        owner: validPeer,
+        leaseId: 'lease-1',
+        leaseExpiresAt: '2026-07-16T13:00:00.000Z',
+      }),
+      p2pBroadcast('screen.ownerChanged', {
+        roomId: 'room-1',
+        owner: null,
+        leaseId: null,
+        leaseExpiresAt: null,
+      }),
+      p2pBroadcast('screen.bitrate', {
+        roomId: 'room-1',
+        leaseId: 'lease-1',
+        bitrate: 6_000_000,
+      }),
+    ];
+
+    for (const value of broadcasts) {
+      expect(
+        p2pBroadcastEnvelopeSchema.safeParse(value).success,
+        value.type,
+      ).toBe(true);
+    }
+
+    expect(peerReadyBroadcastSchema.safeParse(broadcasts[2]).success).toBe(
+      true,
+    );
+    expect(
+      screenOwnerChangedBroadcastSchema.safeParse(broadcasts[10]).success,
+    ).toBe(true);
+    expect(
+      p2pBroadcastEnvelopeSchema.safeParse({
+        ...broadcasts[4],
+        rawSocket: true,
+      }).success,
+    ).toBe(false);
   });
 });

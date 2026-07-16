@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-import { failureAckPayloadSchema } from './errors.js';
+import {
+  failureAckPayloadSchema,
+  p2pFailureAckPayloadSchema,
+} from './errors.js';
 
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_IDENTIFIER_LENGTH = 128;
@@ -12,12 +15,22 @@ export const requestIdSchema = createBoundedIdentifierSchema<'RequestId'>();
 export const eventIdSchema = createBoundedIdentifierSchema<'EventId'>();
 export const roomIdSchema = createBoundedIdentifierSchema<'RoomId'>();
 export const memberIdSchema = createBoundedIdentifierSchema<'MemberId'>();
+export const userIdSchema = createBoundedIdentifierSchema<'UserId'>();
+export const connectionIdSchema =
+  createBoundedIdentifierSchema<'ConnectionId'>();
+export const negotiationIdSchema =
+  createBoundedIdentifierSchema<'NegotiationId'>();
 export const transportIdSchema = createBoundedIdentifierSchema<'TransportId'>();
 export const producerIdSchema = createBoundedIdentifierSchema<'ProducerId'>();
 export const consumerIdSchema = createBoundedIdentifierSchema<'ConsumerId'>();
 export const leaseIdSchema = createBoundedIdentifierSchema<'LeaseId'>();
 export const opaqueTokenSchema = z.string().trim().min(1).max(4_096);
 export const isoDateTimeSchema = z.string().datetime({ offset: true });
+export const connectionEpochSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER);
 
 export const createRequestEnvelopeSchema = <
   const Type extends string,
@@ -78,10 +91,41 @@ export const createAckEnvelopeSchema = <
     .strict();
 };
 
+export const createP2pAckEnvelopeSchema = <
+  const RequestType extends string,
+  DataSchema extends z.ZodType,
+>(
+  requestType: RequestType,
+  data: DataSchema,
+) => {
+  const successAckPayloadSchema = z
+    .object({
+      ok: z.literal(true),
+      data,
+    })
+    .strict();
+
+  return z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal(`${requestType}.ack`),
+      payload: z.discriminatedUnion('ok', [
+        successAckPayloadSchema,
+        p2pFailureAckPayloadSchema,
+      ]),
+    })
+    .strict();
+};
+
 export type RequestId = z.infer<typeof requestIdSchema>;
 export type EventId = z.infer<typeof eventIdSchema>;
 export type RoomId = z.infer<typeof roomIdSchema>;
 export type MemberId = z.infer<typeof memberIdSchema>;
+export type UserId = z.infer<typeof userIdSchema>;
+export type ConnectionId = z.infer<typeof connectionIdSchema>;
+export type NegotiationId = z.infer<typeof negotiationIdSchema>;
+export type ConnectionEpoch = z.infer<typeof connectionEpochSchema>;
 export type TransportId = z.infer<typeof transportIdSchema>;
 export type ProducerId = z.infer<typeof producerIdSchema>;
 export type ConsumerId = z.infer<typeof consumerIdSchema>;
