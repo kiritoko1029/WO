@@ -360,4 +360,33 @@ describe('parseServerConfig', () => {
     expect(error.message).not.toContain(rejectedSecret);
     expect(JSON.stringify(error.issues)).not.toContain(rejectedSecret);
   });
+
+  test('preserves ordered legacy issue details for multiple failures', () => {
+    const env = productionEnv();
+    env.PUBLIC_URL = 'http://localhost:3000';
+    env.JWT_ACCESS_SECRET = 'change-me';
+    env.SCREEN_BITRATE_MIN = '8000000';
+    env.SCREEN_BITRATE_MAX = '4000000';
+
+    const error = captureError(env);
+    expect(error.issues).toEqual([
+      {
+        field: 'SCREEN_BITRATE_MIN',
+        reason: 'must be less than or equal to SCREEN_BITRATE_MAX',
+      },
+      { field: 'PUBLIC_URL', reason: 'must use HTTPS in production' },
+      {
+        field: 'PUBLIC_URL',
+        reason:
+          'must not use localhost, a loopback IP, or a wildcard IP in production',
+      },
+      {
+        field: 'JWT_ACCESS_SECRET',
+        reason: 'must not use a placeholder value in production',
+      },
+    ]);
+    expect(error.message).toBe(
+      'Invalid server configuration: SCREEN_BITRATE_MIN: must be less than or equal to SCREEN_BITRATE_MAX; PUBLIC_URL: must use HTTPS in production; PUBLIC_URL: must not use localhost, a loopback IP, or a wildcard IP in production; JWT_ACCESS_SECRET: must not use a placeholder value in production',
+    );
+  });
 });
