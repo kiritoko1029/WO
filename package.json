@@ -13,6 +13,7 @@
     "test:contract": "vitest run --config vitest.root.contract.config.ts",
     "test:integration": "vitest run --config vitest.root.integration.config.ts && pnpm -r --if-present test:integration",
     "test:e2e:desktop": "pnpm --filter @wo/desktop test:e2e",
+    "test:e2e:web": "pnpm --filter @wo/web test:e2e",
     "lint": "eslint . --ignore-pattern apps/desktop/out-acceptance --max-warnings=0",
     "typecheck": "pnpm -r --if-present typecheck",
     "format:check": "prettier . --check --ignore-unknown"

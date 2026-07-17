@@ -13,3 +13,13 @@ work/
 **/test-results/
 **/.certs/
 docs/poc/results/
+.agents/
+.claude/
+.codex/
+.cursor/
+.gitnexus/
+.pi/
+.trellis/
+.zcode/
+AGENTS.md
+CLAUDE.md

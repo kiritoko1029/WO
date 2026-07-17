@@ -365,6 +365,29 @@ describe('desktop capture source policy', () => {
     );
     expect(captureSecurityOrigin('file:///opt/wo/index.html')).toBe('file://');
   });
+
+  test('accepts Electron packaged file origins without allowing file paths', () => {
+    const mainFrame = { url: 'file:///opt/wo/index.html' };
+    const request = {
+      frame: mainFrame,
+      securityOrigin: 'file:///',
+      videoRequested: true,
+      audioRequested: false,
+      userGesture: true,
+    };
+    const policy = {
+      mainFrame,
+      rendererEntry: mainFrame.url,
+    };
+
+    expect(isDisplayCaptureRequestAllowed(request, policy)).toBe(true);
+    expect(
+      isDisplayCaptureRequestAllowed(
+        { ...request, securityOrigin: 'file:///tmp' },
+        policy,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('screen permission policy', () => {

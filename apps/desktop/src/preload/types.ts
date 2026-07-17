@@ -1,7 +1,9 @@
 import type {
   AuthLoginBody,
   AuthRegisterBody,
+  JoinIntent,
   PublicAuthUser,
+  ServerJoinIntent,
   SignalTicketResponse,
 } from '@wo/protocol';
 
@@ -69,5 +71,37 @@ export interface DesktopBridge {
     select(token: string): Promise<DesktopIpcEnvelope<null>>;
     permission(): Promise<DesktopIpcEnvelope<ScreenPermissionSnapshot>>;
     openSettings(): Promise<DesktopIpcEnvelope<null>>;
+  };
+}
+
+export type BackendTargetSource = 'environment' | 'stored' | 'default';
+
+export interface BackendTargetSnapshot {
+  readonly origin: string;
+  readonly source: BackendTargetSource;
+  readonly readOnly: boolean;
+}
+
+export interface DesktopShellApi {
+  readonly backendTarget: {
+    get(): Promise<BackendTargetSnapshot>;
+    save(origin: string): Promise<void>;
+  };
+  readonly joinIntent: {
+    consume(): Promise<JoinIntent | null>;
+    switchServer(intent: ServerJoinIntent): Promise<void>;
+    subscribe(listener: () => void): () => void;
+  };
+}
+
+export interface DesktopShellBridge {
+  readonly backendTarget: {
+    get(): Promise<DesktopIpcEnvelope<BackendTargetSnapshot>>;
+    save(origin: string): Promise<DesktopIpcEnvelope<null>>;
+  };
+  readonly joinIntent: {
+    consume(): Promise<DesktopIpcEnvelope<JoinIntent | null>>;
+    switchServer(intent: ServerJoinIntent): Promise<DesktopIpcEnvelope<null>>;
+    subscribe(listener: () => void): () => void;
   };
 }

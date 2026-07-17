@@ -119,6 +119,32 @@ function grant(value: string): RealtimeConnectionGrant {
   };
 }
 
+function roomCreateAck(requestId: string, rtcConfiguration: unknown) {
+  return {
+    version: PROTOCOL_VERSION,
+    requestId,
+    type: 'room.create.ack',
+    payload: {
+      ok: true,
+      data: {
+        roomId: 'room-1',
+        roomCode: '482731',
+        role: 'creator',
+        state: 'waiting',
+        peer: null,
+        connectionEpoch: 1,
+        rtcConfiguration,
+        iceCredentialsExpiresAt: '2026-07-16T15:30:00.000Z',
+        screen: {
+          owner: null,
+          leaseId: null,
+          leaseExpiresAt: null,
+        },
+      },
+    },
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -241,6 +267,70 @@ describe('typed signaling client', () => {
       payload: { ok: true },
     });
   });
+
+  it.each([
+    {
+      name: 'center',
+      lanIntent: null,
+      endpoint: 'wss://rtc.example.cn/v1/realtime',
+      rtcConfiguration: {
+        mode: 'lan',
+        iceServers: [],
+        iceTransportPolicy: 'all',
+      },
+    },
+    {
+      name: 'LAN',
+      lanIntent: {
+        version: 1 as const,
+        mode: 'lan' as const,
+        endpoint: 'ws://192.168.1.24:43120/v1/realtime',
+        roomCode: '482731',
+        inviteKey: 'A'.repeat(43),
+      },
+      endpoint: 'ws://192.168.1.24:43120/v1/realtime',
+      rtcConfiguration: {
+        iceServers: [
+          {
+            urls: ['turn:turn.example.cn:3478?transport=udp'],
+            username: 'user',
+            credential: 'credential',
+          },
+        ],
+        iceTransportPolicy: 'relay',
+      },
+    },
+  ])(
+    'rejects a $name acknowledgement carrying the other mode RTC configuration',
+    async ({ endpoint, lanIntent, rtcConfiguration }) => {
+      const desktop = createDesktop();
+      desktop.realtime.issueTicket.mockResolvedValue({
+        endpoint,
+        ticket: ticket('P'),
+        expiresInSeconds: 30,
+      });
+      const socket = new FakeSocket();
+      const factory = vi.fn(() => socket);
+      const errors: SignalingClientError[] = [];
+      const client = createSignalingClient({
+        desktop,
+        createWebSocket: factory,
+        makeRequestId: () => 'mode-request',
+        ...(lanIntent === null ? {} : { lanIntent }),
+      });
+      client.subscribeErrors((error) => errors.push(error));
+      const connected = client.connect('access-token');
+      await vi.waitFor(() => expect(factory).toHaveBeenCalledOnce());
+      socket.open();
+      await connected;
+
+      const request = client.request('room.create', {}, roomCreateAckSchema);
+      socket.receive(roomCreateAck('mode-request', rtcConfiguration));
+
+      expect(errors.at(-1)?.code).toBe('PROTOCOL_ERROR');
+      await expect(request).rejects.toMatchObject({ code: 'PROTOCOL_ERROR' });
+    },
+  );
 
   it('reports malformed/version-mismatched frames and rejects pending requests on close or timeout', async () => {
     vi.useFakeTimers();

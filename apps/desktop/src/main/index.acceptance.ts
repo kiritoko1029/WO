@@ -12,9 +12,11 @@ import {
   shell,
   systemPreferences,
 } from 'electron';
+import type { JoinIntent } from '@wo/protocol';
 
 import { acceptsPinnedAcceptanceCertificate } from './acceptance-certificate.js';
 import { createAuthSessionBroker } from './auth-session-broker.js';
+import { createBackendTargetStore } from './backend-target.js';
 import { createCaptureSourceBroker } from './capture-policy.js';
 import {
   createCaptureSourceService,
@@ -22,6 +24,10 @@ import {
 } from './capture-sources.js';
 import { createMainHttpClient } from './http-client.js';
 import { registerDesktopIpc } from './ipc.js';
+import {
+  createPendingJoinIntentStore,
+  withoutJoinIntentArguments,
+} from './join-intent.js';
 import { establishDesktopLifecycle } from './lifecycle.js';
 import {
   resolvePackageSmokeRequest,
@@ -32,6 +38,10 @@ import { createScreenPermissionService } from './permissions.js';
 import { createRealtimeTicketBroker } from './realtime-ticket-broker.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 import { createSecureSessionStore } from './secure-session-store.js';
+import {
+  registerShellConfigIpc,
+  SHELL_JOIN_INTENT_NOTIFICATION_CHANNEL,
+} from './shell-config-ipc.js';
 import {
   buildContentSecurityPolicy,
   createWindowOptions,
@@ -166,7 +176,12 @@ const directory = fileURLToPath(new URL('.', import.meta.url));
 const packagedRendererEntry = pathToFileURL(
   join(directory, '../renderer/index.html'),
 ).href;
+const backendTarget = createBackendTargetStore({
+  userDataPath: app.getPath('userData'),
+  environment: process.env,
+});
 const runtime = loadRuntimeConfig({
+  apiOrigin: backendTarget.current().origin,
   isPackaged: app.isPackaged,
   environment: process.env,
   packagedRendererEntry,
@@ -184,10 +199,19 @@ const packageSmokeRequest = resolvePackageSmokeRequest({
 });
 
 let mainWindow: BrowserWindow | null = null;
+const joinIntents = createPendingJoinIntentStore();
+const receiveJoinIntent = (intent: JoinIntent): void => {
+  joinIntents.push(intent);
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(SHELL_JOIN_INTENT_NOTIFICATION_CHANNEL);
+  }
+};
 const ownsSingleInstance = establishDesktopLifecycle({
   app,
   developmentProfile: runtime.developmentProfile,
   getMainWindow: () => mainWindow,
+  argumentsList: process.argv,
+  onJoinIntent: receiveJoinIntent,
 });
 
 app.enableSandbox();
@@ -260,6 +284,13 @@ if (ownsSingleInstance) {
     realtime,
     capture,
     permissions,
+    rendererEntry: runtime.rendererEntry,
+  });
+  registerShellConfigIpc(ipcMain, {
+    app,
+    backendTarget,
+    joinIntents,
+    relaunchArguments: withoutJoinIntentArguments(process.argv.slice(1)),
     rendererEntry: runtime.rendererEntry,
   });
 

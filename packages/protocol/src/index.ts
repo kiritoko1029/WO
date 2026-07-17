@@ -83,6 +83,7 @@ import {
 export * from './auth.js';
 export * from './envelope.js';
 export * from './errors.js';
+export * from './join-intent.js';
 export * from './media.js';
 export * from './room.js';
 export * from './signaling.js';

@@ -172,13 +172,13 @@ export async function runUpgrade() {
   let publicExposureAttempted = false;
 
   try {
-    run('docker', composeArguments(envFile, 'pull', 'caddy', 'postgres'), {
+    run('docker', composeArguments(envFile, 'pull', 'postgres'), {
       label: 'Image pull',
       stdio: 'inherit',
     });
     run(
       'docker',
-      composeArguments(envFile, 'build', '--pull', 'server', 'coturn'),
+      composeArguments(envFile, 'build', '--pull', 'caddy', 'server', 'coturn'),
       {
         label: 'Application image build',
         stdio: 'inherit',

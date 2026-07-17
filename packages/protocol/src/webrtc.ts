@@ -144,19 +144,44 @@ export const publicIceServerSchema = z
     }
   });
 
-export const rtcConfigurationSchema = z
+export const centralRtcConfigurationSchema = z
   .object({
     iceServers: z.array(publicIceServerSchema).min(1).max(8),
     iceTransportPolicy: z.enum(['all', 'relay']),
   })
   .strict();
 
+export const lanRtcConfigurationSchema = z
+  .object({
+    mode: z.literal('lan'),
+    iceServers: z.array(publicIceServerSchema).max(0),
+    iceTransportPolicy: z.literal('all'),
+  })
+  .strict();
+
+export const rtcConfigurationSchema = z.union([
+  centralRtcConfigurationSchema,
+  lanRtcConfigurationSchema,
+]);
+
 export const iceConfigurationDataSchema = z
   .object({
-    rtcConfiguration: rtcConfigurationSchema,
+    rtcConfiguration: centralRtcConfigurationSchema,
     iceCredentialsExpiresAt: isoDateTimeSchema,
   })
   .strict();
+
+export const lanIceConfigurationDataSchema = z
+  .object({
+    rtcConfiguration: lanRtcConfigurationSchema,
+    iceCredentialsExpiresAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const roomIceConfigurationDataSchema = z.union([
+  iceConfigurationDataSchema,
+  lanIceConfigurationDataSchema,
+]);
 
 const signalContextShape = {
   roomId: roomIdSchema,
@@ -274,7 +299,7 @@ export const webrtcIceServersRefreshRequestSchema = createRequestEnvelopeSchema(
 );
 export const webrtcIceServersRefreshAckSchema = createP2pAckEnvelopeSchema(
   'webrtc.iceServers.refresh',
-  iceConfigurationDataSchema,
+  roomIceConfigurationDataSchema,
 );
 
 export const webrtcRecoveryResetPayloadSchema = webrtcSignalContextSchema;
@@ -318,6 +343,12 @@ export type IceServerUrl = z.infer<typeof iceServerUrlSchema>;
 export type PublicIceServer = z.infer<typeof publicIceServerSchema>;
 export type RtcConfiguration = z.infer<typeof rtcConfigurationSchema>;
 export type IceConfigurationData = z.infer<typeof iceConfigurationDataSchema>;
+export type LanIceConfigurationData = z.infer<
+  typeof lanIceConfigurationDataSchema
+>;
+export type RoomIceConfigurationData = z.infer<
+  typeof roomIceConfigurationDataSchema
+>;
 export type WebrtcSignalContext = z.infer<typeof webrtcSignalContextSchema>;
 export type WebrtcOfferPayload = z.infer<typeof webrtcOfferPayloadSchema>;
 export type WebrtcOfferRequest = z.infer<typeof webrtcOfferRequestSchema>;

@@ -13,7 +13,7 @@ import {
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { RawData, WebSocket } from 'ws';
 
-import { HttpError } from '../../http/errors.ts';
+import { HttpError } from '../../http/http-error.ts';
 import {
   RoomDomainError,
   type RoomIntent,
@@ -25,6 +25,7 @@ import {
   type ConnectionRegistry,
   type ConnectionRegistryOptions,
   type SignalingConnection,
+  type SignalingSocket,
 } from './connection-registry.ts';
 import type {
   SignalingDispatcher,
@@ -50,6 +51,15 @@ export interface SignalingGatewayOptions extends Omit<
 > {
   readonly randomConnectionId?: () => string;
   readonly randomEventId?: () => string;
+  readonly frameCodec?: SignalingFrameCodec;
+}
+
+export interface SignalingFrameCodec {
+  bind(connectionId: string, binding: string): void;
+  encode(connectionId: string, payload: string): string;
+  decode(connectionId: string, frame: string): string;
+  release(connectionId: string): void;
+  clear(): void;
 }
 
 export interface SignalingGatewayDependencies {
@@ -192,6 +202,38 @@ function peerSummary(room: RoomSnapshot, userId: string) {
   };
 }
 
+function authenticatedSocket(
+  socket: WebSocket,
+  codec: SignalingFrameCodec,
+  connectionId: string,
+): SignalingSocket {
+  const release = (): void => codec.release(connectionId);
+  socket.once('close', release);
+  socket.once('error', release);
+  return {
+    get readyState() {
+      return socket.readyState;
+    },
+    get bufferedAmount() {
+      return socket.bufferedAmount;
+    },
+    send(data, callback) {
+      socket.send(codec.encode(connectionId, data), callback);
+    },
+    close(code, reason) {
+      release();
+      socket.close(code, reason);
+    },
+    ping() {
+      socket.ping();
+    },
+    terminate() {
+      release();
+      socket.terminate();
+    },
+  };
+}
+
 export function registerSignalingGateway(
   app: FastifyInstance,
   dependencies: SignalingGatewayDependencies,
@@ -199,8 +241,13 @@ export function registerSignalingGateway(
   const options = dependencies.options ?? {};
   const randomConnectionId = options.randomConnectionId ?? randomId;
   const randomEventId = options.randomEventId ?? randomId;
+  const frameCodec = options.frameCodec;
   const now = options.now ?? Date.now;
   const upgradeClaims = new WeakMap<FastifyRequest, SignalTicketClaims>();
+  const upgradeFrameBindings =
+    frameCodec === undefined
+      ? undefined
+      : new WeakMap<FastifyRequest, string>();
   let shuttingDown = false;
 
   const reportInternal = (error: unknown, operation: string): void => {
@@ -652,13 +699,13 @@ export function registerSignalingGateway(
     ) {
       throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
     }
-    const claims = dependencies.ticketStore.consume(
-      ticketProtocols[0]!.slice('ticket.'.length),
-    );
+    const ticket = ticketProtocols[0]!.slice('ticket.'.length);
+    const claims = dependencies.ticketStore.consume(ticket);
     if (claims === null) {
       throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
     }
     upgradeClaims.set(request, claims);
+    upgradeFrameBindings?.set(request, ticket);
   };
 
   app.route({
@@ -724,13 +771,39 @@ export function registerSignalingGateway(
         }
       };
 
-      socket.on('message', onMessage);
+      socket.on(
+        'message',
+        frameCodec === undefined
+          ? onMessage
+          : (data, isBinary) => {
+              if (isBinary) {
+                onMessage(data, true);
+                return;
+              }
+              try {
+                onMessage(
+                  Buffer.from(
+                    frameCodec.decode(
+                      connectionId,
+                      rawDataBuffer(data).toString('utf8'),
+                    ),
+                    'utf8',
+                  ),
+                  false,
+                );
+              } catch {
+                closeAndCleanup(connectionId, 1008, 'AUTH_REQUIRED');
+              }
+            },
+      );
       socket.on('error', onError);
       socket.on('close', onClose);
       socket.on('pong', onPong);
 
       const claims = upgradeClaims.get(request);
       upgradeClaims.delete(request);
+      const frameBinding = upgradeFrameBindings?.get(request);
+      upgradeFrameBindings?.delete(request);
       if (claims === undefined) {
         socket.close(1008, 'AUTH_REQUIRED');
         return;
@@ -740,10 +813,20 @@ export function registerSignalingGateway(
         return;
       }
       try {
+        if (frameCodec !== undefined) {
+          if (frameBinding === undefined) {
+            socket.close(1008, 'AUTH_REQUIRED');
+            return;
+          }
+          frameCodec.bind(connectionId, frameBinding);
+        }
         connectionRegistry.register({
           connectionId,
           identity: claims,
-          socket,
+          socket:
+            frameCodec === undefined
+              ? socket
+              : authenticatedSocket(socket, frameCodec, connectionId),
         });
       } catch (error) {
         reportInternal(error, 'connection.register');
@@ -760,6 +843,7 @@ export function registerSignalingGateway(
       }
       shuttingDown = true;
       connectionRegistry.shutdown();
+      frameCodec?.clear();
     },
   });
 }

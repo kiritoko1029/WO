@@ -7,10 +7,21 @@
 	encode zstd gzip
 
 	header {
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' wss://{$APP_DOMAIN}; media-src 'self' blob:"
+		Permissions-Policy "camera=(), microphone=(self), display-capture=(self)"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		-Server
 	}
 
-	reverse_proxy server:3000
+	@api path /v1 /v1/*
+	handle @api {
+		reverse_proxy server:3000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
 }

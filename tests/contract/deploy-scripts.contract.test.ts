@@ -353,13 +353,10 @@ describe('operational script contract', () => {
     expect(upgrade).toContain('--wait');
     expect(upgrade).toContain('assertPostgresMajorUnchanged');
     expect(upgrade).toContain('rollback');
-    expect(upgrade).toContain(
-      "composeArguments(envFile, 'pull', 'caddy', 'postgres')",
+    expect(upgrade).toContain("composeArguments(envFile, 'pull', 'postgres')");
+    expect(upgrade).toMatch(
+      /composeArguments\(\s*envFile,\s*'build',\s*'--pull',\s*'caddy',\s*'server',\s*'coturn',?\s*\)/u,
     );
-    expect(upgrade).toContain(
-      "composeArguments(envFile, 'build', '--pull', 'server', 'coturn')",
-    );
-    expect(upgrade).not.toContain("'pull', 'caddy', 'postgres', 'coturn'");
     const pullIndex = upgrade.indexOf("'pull'");
     const quiesceIndex = upgrade.indexOf("'stop', 'caddy', 'server'");
     const backupIndex = upgrade.lastIndexOf('runBackup()');

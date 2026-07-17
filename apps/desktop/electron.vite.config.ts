@@ -9,13 +9,29 @@ const protocolSource = fileURLToPath(
 const mediaPolicySource = fileURLToPath(
   new URL('../../packages/media-policy/src/index.ts', import.meta.url),
 );
+const serverLiteSource = fileURLToPath(
+  new URL('../server/src/lite/index.ts', import.meta.url),
+);
+const bundledMainDependencies = [
+  '@fastify/websocket',
+  '@wo/protocol',
+  '@wo/server',
+  '@wo/server/lite',
+  'fastify',
+  'ws',
+  'zod',
+];
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@wo/protocol', 'zod'] })],
+    define: {
+      'process.env.WS_NO_BUFFER_UTIL': JSON.stringify('1'),
+    },
+    plugins: [externalizeDepsPlugin({ exclude: bundledMainDependencies })],
     resolve: {
       alias: {
         '@wo/protocol': protocolSource,
+        '@wo/server/lite': serverLiteSource,
       },
     },
   },

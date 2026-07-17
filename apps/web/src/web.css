@@ -1,0 +1,22 @@
+.web-app {
+  min-height: 100%;
+}
+
+.web-capability-notice {
+  position: fixed;
+  z-index: 100;
+  top: 12px;
+  left: 50%;
+  margin: 0;
+  padding: 8px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 6px;
+  background: #1f2937;
+  color: #fef3c7;
+  font-size: 13px;
+}
+
+.web-voice-only .call-toolbar button[aria-label='共享屏幕'] {
+  display: none;
+}

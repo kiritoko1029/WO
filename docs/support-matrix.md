@@ -12,6 +12,31 @@ This document distinguishes implemented capability, automated evidence, native-p
 | Auto / 2 / 4 / 6 / 8 Mbps runtime control | Yes         | Real sender stats prove audio/PC/negotiation continuity            | None              | IMPLEMENTED, NOT CERTIFIED |
 | 1920x1080 at 60 fps target                | Yes         | Same-host dynamic-window E2E reports 1920x1080 and at least 55 fps | None              | TARGET ONLY                |
 | Direct P2P with self-hosted TURN fallback | Yes         | Real selected-pair stats cover direct and acceptance-forced relay  | None              | IMPLEMENTED, NOT CERTIFIED |
+| Canonical HTTPS backend selection         | Yes         | Store, precedence, IPC, renderer, and package-gate tests           | None              | IMPLEMENTED, NOT CERTIFIED |
+| HTTPS and `wo://` room invitations        | Yes         | Parser, lifecycle, one-shot delivery, UI, and package-gate tests   | None              | IMPLEMENTED, NOT CERTIFIED |
+| Same-origin Web client                    | Yes         | Two-session Chromium voice E2E, adapter, build, deploy contracts   | None              | IMPLEMENTED, NOT CERTIFIED |
+| Trusted-LAN lightweight room core         | Yes         | HMAC frame, private-address, two-person, and shutdown integration  | None              | IMPLEMENTED, NOT CERTIFIED |
+
+The LAN row records the room-service and protocol implementation, not a
+physical two-desktop certification. A six-digit room code is display-only and
+cannot discover the host; the full invite also carries a private endpoint and a
+256-bit key. HMAC authenticates signaling frames but does not encrypt the
+`ws://`/`http://` transport, so this mode is restricted to a trusted RFC1918
+LAN.
+
+## Client entry points
+
+| Client / path                  | Backend rule                 | Screen share                         | Evidence                                         | Status                     |
+| ------------------------------ | ---------------------------- | ------------------------------------ | ------------------------------------------------ | -------------------------- |
+| Electron desktop               | Configurable canonical HTTPS | Electron source broker               | Unit, component, build, and package-gate tests   | IMPLEMENTED, NOT CERTIFIED |
+| Desktop Chrome / Edge Web      | Current page origin only     | Native `getDisplayMedia()` selector  | Real Chromium voice E2E, build, deploy contracts | IMPLEMENTED, NOT CERTIFIED |
+| Safari / Firefox desktop Web   | Current page origin only     | Capability-dependent, not guaranteed | No compatibility certification                   | NOT CERTIFIED              |
+| Mobile Web                     | Current page origin only     | Not promised                         | No compatibility certification                   | NOT CERTIFIED              |
+| Trusted-LAN desktop-to-desktop | Private invite endpoint      | Reuses desktop WebRTC path           | Automated service integration only               | IMPLEMENTED, NOT CERTIFIED |
+
+The Web refresh token is stored only in the current origin's `sessionStorage`;
+closing the tab requires login again. Web does not offer arbitrary cross-origin
+backend selection.
 
 ## Desktop packages
 
@@ -45,10 +70,13 @@ No row currently authorizes a production claim of certified 1080p60. Same-host E
 
 ## Server deployment
 
-| Environment                                        | Evidence                                                                                                     | Status                 |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------- |
-| Docker Compose on the local Windows Docker runtime | Four-service integration, auth/signaling smoke, TURN UDP/TLS allocation, backup/restore and upgrade rollback | AUTOMATED PASS         |
-| Linux Docker host                                  | Compose configuration and image contracts only                                                               | NOT YET HOST-CERTIFIED |
-| China mainland public network                      | No production ISP/cross-region measurement                                                                   | NOT TESTED             |
+| Environment                                        | Evidence                                                                                                                                                | Status                 |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| Docker Compose on the local Windows Docker runtime | Four-service integration, Web build/routing configuration contracts, auth/signaling smoke, TURN UDP/TLS allocation, backup/restore and upgrade rollback | AUTOMATED PASS         |
+| Linux Docker host                                  | Compose configuration and image contracts only                                                                                                          | NOT YET HOST-CERTIFIED |
+| China mainland public network                      | No production ISP/cross-region measurement                                                                                                              | NOT TESTED             |
 
-The runtime uses only Caddy, the WO server, PostgreSQL, and coturn. RustFS is reserved for a later object-storage requirement and is intentionally absent from the current voice/screen MVP.
+The runtime uses only Caddy, the WO server, PostgreSQL, and coturn. Caddy serves
+the Web SPA from its image, so Web does not add another long-running service.
+RustFS is reserved for a later object-storage requirement and is intentionally
+absent from the current voice/screen MVP.

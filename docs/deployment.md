@@ -1,8 +1,28 @@
 # Docker 部署
 
-本部署只运行四个长期服务：Caddy、应用 server、PostgreSQL 和 coturn。语音与桌面视频优先走两端 P2P，无法直连时只回落到本机部署的 coturn，不依赖第三方实时音视频、公共 STUN、SFU 或录制服务。
+本部署只运行四个长期服务：Caddy、应用 server、PostgreSQL 和 coturn。Caddy
+镜像在构建阶段同时生成 Web SPA，因此 Web 不增加第五个运行服务。语音与桌面
+视频优先走两端 P2P，无法直连时只回落到本机部署的 coturn，不依赖第三方实时
+音视频、公共 STUN、SFU 或录制服务。
 
 当前业务数据只有账号和会话，不需要对象存储，因此 Compose 不包含 MinIO、RustFS、Redis 或 mediasoup。未来确实出现对象数据时，只接入 RustFS，并先补独立的数据生命周期设计。
+
+## 同源入口
+
+Compose 启动后，一个 `APP_DOMAIN` 同时提供 Web、REST 和实时 WebSocket：
+
+```text
+https://rtc.example.com/            Web 客户端
+https://rtc.example.com/join/123456 Web 房间邀请
+https://rtc.example.com/v1/*        REST / WebSocket
+```
+
+Caddy 对 `/v1` 和 `/v1/*` 反向代理，其余路径先查找静态文件，再回退到
+`/index.html`。Web 客户端只连接当前页面的同源后端，不启用跨域 CORS。refresh
+token 只写入当前标签页的 `sessionStorage`；关闭标签页后需要重新登录。
+
+首版浏览器范围是当前桌面 Chrome 和 Edge。屏幕共享由浏览器原生
+`getDisplayMedia()` 选择器完成；能力缺失时保留语音并隐藏不可用的共享入口。
 
 ## 主机准备
 
@@ -63,6 +83,45 @@ node deploy/scripts/smoke.mjs --env-file=deploy/.env
 
 冒烟流程创建三个随机临时账号，验证两人房间、第三人拒绝、offer/answer/candidate 转发、屏幕租约、房间结束和会话注销。脚本不会输出 token、SDP 或凭据。
 
+部署完成后访问 `https://${APP_DOMAIN}`。房间页可复制
+`https://${APP_DOMAIN}/join/<6位房间码>` 或 `wo://` 客户端邀请；HTTPS 邀请
+既能继续使用 Web，也能通过显式按钮唤起桌面客户端。
+
+## 桌面客户端配置
+
+桌面客户端可在登录页和登录后的首页配置此部署。地址必须是 canonical HTTPS
+origin，例如：
+
+```text
+https://rtc.example.com
+```
+
+不能包含路径、查询、片段或 URL 凭据。保存后客户端重启，REST、WSS、CSP 和
+会话都使用新 origin。优先级为
+`WO_API_ORIGIN > 已保存用户配置 > https://localhost`；存在
+`WO_API_ORIGIN` 时界面显示为运维管理且不可编辑。
+
+refresh token 按 origin 隔离。打开来自其他服务的邀请时，桌面客户端必须先
+显示目标域名并由用户确认，随后重启并在目标服务重新登录；它不会把旧 origin
+的凭据发送给新服务。
+
+本地集成的自签证书只适用于隔离测试。桌面手工联调应安装公开 CA 证书，不能
+关闭 TLS 校验。
+
+## 局域网轻量模式边界
+
+轻量模式不使用本 Compose。创建者的桌面进程只在可用的 RFC1918 私网 IPv4
+地址上启动临时双人服务，不依赖账号、PostgreSQL 或 TURN。完整邀请包含私网
+端点、6 位房间码和 256 位随机密钥；房间码只用于人工核对，不能单独发现房主
+或通过认证。
+
+轻量信令帧由 HMAC-SHA-256 和单调序列号认证，但 `ws://`/`http://` 不提供
+传输加密。因此该模式只适用于可信局域网，不适用于访客 Wi-Fi、公共网络、跨网
+发现或公网 NAT 穿透。房主退出、设备休眠、绑定地址消失、网卡身份变化或关闭房间会终止内嵌服务。
+
+轻量模式代码和自动化集成证据为 `IMPLEMENTED`；尚无两台真实桌面设备的
+认证结果，仍为 `NOT CERTIFIED`。
+
 ## Secret 边界
 
 `postgres_password`、`jwt_access_secret` 和 `turn_shared_secret` 通过 Compose secrets 以文件挂载。server 入口脚本只以 root 读取这些宿主文件，随后清空 capabilities 和附加组，并让 Node 以 `1000:1000` 成为 PID 1；应用当前从该 Node 进程自身的环境读取数据库 URL 和两个应用 secret，但这些值不进入 Compose 环境、`docker inspect` 或进程参数。coturn 入口脚本把 secret、证书和私钥复制到私有 tmpfs，设为 `0600` 后立即清除 shell 变量，再让 turnserver 以 `65534:65533` 成为 PID 1；TURN 共享密钥不进入 turnserver 环境或参数。coturn 健康探针直接从 secret 文件读取共享密钥，在进程内派生 60 秒 REST 凭据并执行认证 allocation，长期共享密钥不会进入命令参数。
@@ -77,9 +136,13 @@ node deploy/scripts/smoke.mjs --env-file=deploy/.env
 cp deploy/.env.integration.example deploy/.env.integration
 node deploy/scripts/init-secrets.mjs --secret-dir=./secrets.integration
 node deploy/scripts/init-integration-cert.mjs
+pnpm test:e2e:web
 ```
 
 证书初始化器只写固定的 `secrets.integration/`，使用排他新建；证书或私钥任一已存在时都会停止。它生成 `turn.localhost` 的 30 天自签证书，仅用于本地集成。生产必须使用受信任 CA 为真实 `TURN_HOST` 签发的完整链。
+
+Web E2E 自动启动并清理 `wo-integration`，使用两个隔离 Chromium 会话创建和
+加入房间，并通过双方持续增长的 WebRTC 音频收发统计验证双向语音。
 
 ```bash
 node deploy/scripts/preflight.mjs --env-file=deploy/.env.integration --integration --allow-non-linux
@@ -107,7 +170,7 @@ Caddy 备份含证书与 ACME 账户材料，必须按 secret 级别加密保存
 node deploy/scripts/restore.mjs --env-file=deploy/.env --backup-dir=/absolute/backup/path --confirm-restore
 ```
 
-升级流程先预检并拒绝 PostgreSQL major 变化，再捕获当前四个镜像。镜像拉取和 server/coturn 构建期间旧栈继续服务；切换前会停止 Caddy/server，取得无写入竞态的备份。Caddy 在新 server 的内部网络 smoke 通过前保持停止，因此验证失败时可以恢复旧镜像和备份而不丢失外部写入。内部验证通过后才启动公开 Caddy；公开入口激活若失败，只回退 Caddy 镜像并保留已验证的新数据库，不再做数据回退。因此备份和内部验证期间会有短暂停机：
+升级流程先预检并拒绝 PostgreSQL major 变化，再捕获当前四个镜像。拉取外部 PostgreSQL 镜像并构建 Caddy/server/coturn 期间旧栈继续服务；切换前会停止 Caddy/server，取得无写入竞态的备份。Caddy 构建会同步更新 Web SPA；它在新 server 的内部网络 smoke 通过前保持停止，因此验证失败时可以恢复旧镜像和备份而不丢失外部写入。内部验证通过后才启动公开 Caddy；公开入口激活若失败，只回退 Caddy 镜像并保留已验证的新数据库，不再做数据回退。因此备份和内部验证期间会有短暂停机：
 
 ```bash
 node deploy/scripts/upgrade.mjs --env-file=deploy/.env

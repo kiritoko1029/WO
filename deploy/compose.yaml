@@ -2,7 +2,10 @@ name: wo
 
 services:
   caddy:
-    image: caddy:2.11.4-alpine
+    image: wo-caddy:2.11.4-web.1
+    build:
+      context: ..
+      dockerfile: deploy/caddy/Dockerfile
     restart: unless-stopped
     depends_on:
       server:

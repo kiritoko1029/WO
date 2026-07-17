@@ -4,9 +4,9 @@ import {
   roomResumeDispositionSchema,
   roomSessionAckDataSchema,
   screenOwnerSnapshotSchema,
-  type IceConfigurationData,
   type P2pRequestEnvelope,
   type PeerSummary,
+  type RoomIceConfigurationData,
   type RoomResumeAckData,
   type RoomResumeDisposition,
   type RoomSessionAckData,
@@ -32,7 +32,9 @@ export interface FreshIceContext {
   readonly connectionEpoch: number;
 }
 
-export type CreateFreshIce = (context: FreshIceContext) => IceConfigurationData;
+export type CreateFreshIce = (
+  context: FreshIceContext,
+) => RoomIceConfigurationData;
 
 export interface RoomRequestHandlerDependencies {
   readonly roomRegistry: RoomRegistry;
@@ -125,7 +127,7 @@ function screenOwnerSnapshot(session: RoomSessionData): ScreenOwnerSnapshot {
 function publicRoomSession(
   session: RoomSessionData,
   userId: string,
-  ice: IceConfigurationData,
+  ice: RoomIceConfigurationData,
 ): RoomSessionAckData {
   return roomSessionAckDataSchema.parse({
     roomId: session.room.id,
@@ -142,7 +144,7 @@ function sessionIce(
   dependencies: RoomRequestHandlerDependencies,
   session: RoomSessionData,
   userId: string,
-): IceConfigurationData {
+): RoomIceConfigurationData {
   return dependencies.createFreshIce({
     roomId: session.room.id,
     userId,

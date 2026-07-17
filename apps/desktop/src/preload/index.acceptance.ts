@@ -1,16 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { createDesktopApi } from './api.js';
+import { createDesktopShellBridge } from './shell-config-api.js';
 
 const iceTransportPolicy =
   process.env.WO_ACCEPTANCE_ICE_POLICY === 'relay' ? 'relay' : 'all';
+const invoke = (channel: string, ...arguments_: readonly unknown[]) =>
+  ipcRenderer.invoke(channel, ...arguments_);
 
-contextBridge.exposeInMainWorld(
-  'desktop',
-  createDesktopApi((channel, ...arguments_) =>
-    ipcRenderer.invoke(channel, ...arguments_),
-  ),
-);
+contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke));
+contextBridge.exposeInMainWorld('woShell', createDesktopShellBridge(invoke));
 contextBridge.exposeInMainWorld(
   'woAcceptance',
   Object.freeze({

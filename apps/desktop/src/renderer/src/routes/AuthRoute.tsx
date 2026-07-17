@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { AudioLines } from 'lucide-react';
 
+import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
 import { useAuth } from '../state/auth-store.js';
 
 type AuthMode = 'login' | 'register';
@@ -9,7 +10,11 @@ function validEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value) && value.length <= 254;
 }
 
-export function AuthRoute() {
+export function AuthRoute({
+  modeSelector,
+}: {
+  readonly modeSelector?: ReactNode;
+}) {
   const auth = useAuth();
   const [mode, setMode] = useState<AuthMode>('login');
   const [email, setEmail] = useState('');
@@ -63,6 +68,7 @@ export function AuthRoute() {
         <h1 id="auth-heading">
           {mode === 'login' ? '登录 WO' : '创建 WO 账号'}
         </h1>
+        {modeSelector}
         <div className="segmented" role="tablist" aria-label="账号操作">
           <button
             type="button"
@@ -130,6 +136,7 @@ export function AuthRoute() {
                 : '创建账号'}
           </button>
         </form>
+        <BackendTargetSettings />
       </section>
     </main>
   );

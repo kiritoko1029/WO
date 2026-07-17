@@ -295,7 +295,7 @@ describe('controller credentials and logging', () => {
     const directory = await temporaryDirectory();
     const caFile = join(directory, 'ca.pem');
     const tokenFile = join(directory, 'token.txt');
-    await writeFile(caFile, 'not a certificate');
+    await writeRestricted(caFile, 'not a certificate');
     await writeRestricted(tokenFile, 'short-lived-secret\n');
 
     await expect(

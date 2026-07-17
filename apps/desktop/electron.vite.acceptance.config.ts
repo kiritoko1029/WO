@@ -11,6 +11,18 @@ const protocolSource = fileURLToPath(
 const mediaPolicySource = fileURLToPath(
   new URL('../../packages/media-policy/src/index.ts', import.meta.url),
 );
+const serverLiteSource = fileURLToPath(
+  new URL('../server/src/lite/index.ts', import.meta.url),
+);
+const bundledMainDependencies = [
+  '@fastify/websocket',
+  '@wo/protocol',
+  '@wo/server',
+  '@wo/server/lite',
+  'fastify',
+  'ws',
+  'zod',
+];
 const mainEntry = fileURLToPath(
   new URL('./src/main/index.acceptance.ts', import.meta.url),
 );
@@ -34,10 +46,11 @@ const caddyAuthoritySpki = createHash('sha256')
 export default defineConfig({
   main: {
     define: {
+      'process.env.WS_NO_BUFFER_UTIL': JSON.stringify('1'),
       __WO_ACCEPTANCE_CA_SPKI__: JSON.stringify(caddyAuthoritySpki),
       __WO_ACCEPTANCE_CA_CERTIFICATE__: JSON.stringify(caddyAuthorityPem),
     },
-    plugins: [externalizeDepsPlugin({ exclude: ['@wo/protocol', 'zod'] })],
+    plugins: [externalizeDepsPlugin({ exclude: bundledMainDependencies })],
     build: {
       outDir: 'out-acceptance/main',
       rollupOptions: {
@@ -46,7 +59,10 @@ export default defineConfig({
       },
     },
     resolve: {
-      alias: { '@wo/protocol': protocolSource },
+      alias: {
+        '@wo/protocol': protocolSource,
+        '@wo/server/lite': serverLiteSource,
+      },
     },
   },
   preload: {

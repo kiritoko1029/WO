@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readFile,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -499,6 +500,17 @@ afterEach(async () => {
 });
 
 describe('desktop platform package command', () => {
+  it('declares the versioned WO room protocol in package metadata', async () => {
+    const config = await readFile(
+      join(desktopDirectory, 'electron-builder.yml'),
+      'utf8',
+    );
+
+    expect(config).toMatch(
+      /^protocols:\n {2}- name: WO room invite\n {4}schemes:\n {6}- wo$/mu,
+    );
+  });
+
   it('rejects unknown arguments', { timeout: 15_000 }, () => {
     const result = runBuildPlatform([
       '--platform=win',
@@ -584,6 +596,34 @@ describe('desktop platform package command', () => {
     expect(plan.outputDirectory).toMatch(/unsigned-development[\\/]win$/u);
     expect(plan.commands.flatMap((command) => command.args)).toContain('--x64');
     expect(result.stdout).not.toMatch(/\brelease\b/iu);
+  });
+
+  it('ad-hoc signs unsigned-development macOS packages after applying fuses', () => {
+    const unsignedResult = runBuildPlatform([
+      '--platform=mac',
+      '--plan',
+      '--dir',
+      '--unsigned-development',
+    ]);
+
+    expect(unsignedResult.status).toBe(0);
+    const unsignedPlan = JSON.parse(unsignedResult.stdout as string) as {
+      commands: Array<{ args: string[] }>;
+    };
+    expect(unsignedPlan.commands.flatMap((command) => command.args)).toContain(
+      '--config.mac.identity=-',
+    );
+
+    const signedResult = runBuildPlatform(
+      ['--platform=mac', '--plan', '--dir'],
+      {
+        CSC_NAME: 'Developer ID Application: WO',
+        APPLE_KEYCHAIN_PROFILE: 'wo-notary',
+        WO_MAC_TEAM_ID: 'TEAMID1234',
+      },
+    );
+    expect(signedResult.status).toBe(0);
+    expect(signedResult.stdout).not.toContain('--config.mac.identity=-');
   });
 
   it('requires a Windows signing identity unless unsigned development is explicit', () => {
@@ -1667,6 +1707,22 @@ describe('desktop production package verifier', () => {
 
     expect(result.status).not.toBe(0);
     expect(commandOutput(result)).toMatch(/private key/iu);
+  });
+
+  it('does not text-scan extensionless native binaries', async () => {
+    const packageDirectory = await makePackage({
+      outsideFiles: {
+        'win-unpacked/runtime-binary':
+          '\u0000rejectUnauthorized = false\u0000native-runtime',
+      },
+    });
+    const result = runVerifier([
+      `--package-dir=${packageDirectory}`,
+      '--platform=win',
+      '--artifact-class=unsigned-development',
+    ]);
+
+    expect(result.status).toBe(0);
   });
 
   it('streams sensitive-content scanning for text files larger than 20 MiB', async () => {

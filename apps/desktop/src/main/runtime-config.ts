@@ -10,10 +10,16 @@ export interface DesktopRuntimeConfig {
 }
 
 export interface RuntimeConfigInput {
+  readonly apiOrigin: string;
   readonly isPackaged: boolean;
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly packagedRendererEntry: string;
 }
+
+export type RuntimeProfileInput = Pick<
+  RuntimeConfigInput,
+  'isPackaged' | 'environment'
+>;
 
 export interface ProfileApp {
   getPath(name: 'appData'): string;
@@ -32,9 +38,10 @@ const nodeProfileFileSystem: ProfileFileSystem = { mkdirSync };
 
 const DEVELOPMENT_PROFILE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/u;
 
-function canonicalHttpsOrigin(value: string): string {
+export function canonicalHttpsOrigin(value: string): string {
   const url = new URL(value);
   if (
+    value.length > 2_048 ||
     url.protocol !== 'https:' ||
     url.origin !== value ||
     url.pathname !== '/' ||
@@ -43,7 +50,7 @@ function canonicalHttpsOrigin(value: string): string {
     url.username !== '' ||
     url.password !== ''
   ) {
-    throw new TypeError('WO_API_ORIGIN must be a canonical HTTPS origin');
+    throw new TypeError('Backend origin must be a canonical HTTPS origin');
   }
   return url.origin;
 }
@@ -92,9 +99,7 @@ function profile(value: string | undefined): string | null {
 export function loadRuntimeConfig(
   input: RuntimeConfigInput,
 ): Readonly<DesktopRuntimeConfig> {
-  const apiOrigin = canonicalHttpsOrigin(
-    input.environment.WO_API_ORIGIN ?? 'https://localhost',
-  );
+  const apiOrigin = canonicalHttpsOrigin(input.apiOrigin);
   const apiUrl = new URL(apiOrigin);
   apiUrl.protocol = 'wss:';
 
@@ -106,11 +111,15 @@ export function loadRuntimeConfig(
       : developmentEntry(
           input.environment.ELECTRON_RENDERER_URL ?? 'http://127.0.0.1:5173',
         ),
-    developmentProfile: input.isPackaged
-      ? null
-      : profile(input.environment.WO_DEV_PROFILE),
+    developmentProfile: resolveDevelopmentProfile(input),
     isPackaged: input.isPackaged,
   });
+}
+
+export function resolveDevelopmentProfile(
+  input: RuntimeProfileInput,
+): string | null {
+  return input.isPackaged ? null : profile(input.environment.WO_DEV_PROFILE);
 }
 
 export function applyDevelopmentProfile(

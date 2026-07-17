@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import {
   establishDesktopLifecycle,
@@ -35,7 +35,9 @@ function createApp(
 
 describe('desktop single-instance lifecycle', () => {
   it('quits immediately and does not register listeners when the lock is denied', () => {
-    const app = createApp(new Set(['C:\\Users\\person\\AppData\\Roaming\\WO']));
+    const app = createApp(
+      new Set([join('C:\\Users\\person\\AppData\\Roaming', 'WO')]),
+    );
 
     const acquired = establishDesktopLifecycle({
       app,
@@ -50,10 +52,15 @@ describe('desktop single-instance lifecycle', () => {
 
   it('restores, shows, and focuses the main window for a second instance', () => {
     const app = createApp(new Set());
-    let secondInstance: (() => void) | undefined;
-    vi.mocked(app.on).mockImplementation((event, listener) => {
-      if (event === 'second-instance') secondInstance = listener;
-    });
+    let secondInstance:
+      ((event: unknown, argumentsList: readonly string[]) => void) | undefined;
+    (app.on as unknown as Mock).mockImplementation(
+      (event: string, listener: unknown) => {
+        if (event === 'second-instance') {
+          secondInstance = listener as typeof secondInstance;
+        }
+      },
+    );
     const window = {
       isDestroyed: vi.fn(() => false),
       isMinimized: vi.fn(() => true),
@@ -69,7 +76,7 @@ describe('desktop single-instance lifecycle', () => {
         getMainWindow: () => window,
       }),
     ).toBe(true);
-    secondInstance?.();
+    secondInstance?.({}, []);
 
     expect(window.restore).toHaveBeenCalledOnce();
     expect(window.show).toHaveBeenCalledOnce();
@@ -77,6 +84,57 @@ describe('desktop single-instance lifecycle', () => {
     expect(window.restore.mock.invocationCallOrder[0]).toBeLessThan(
       window.focus.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('accepts valid join intents from argv, second instance, and macOS open-url', () => {
+    const app = createApp(new Set());
+    const received: string[] = [];
+    let secondInstance:
+      ((event: unknown, argumentsList: readonly string[]) => void) | undefined;
+    let openUrl:
+      ((event: { preventDefault(): void }, url: string) => void) | undefined;
+    (app.on as unknown as Mock).mockImplementation(
+      (event: string, listener: unknown) => {
+        if (event === 'second-instance') {
+          secondInstance = listener as typeof secondInstance;
+        }
+        if (event === 'open-url') openUrl = listener as typeof openUrl;
+      },
+    );
+    const initial =
+      'wo://join?v=1&mode=server&origin=https%3A%2F%2Fone.example&room=111111';
+    const window = {
+      isDestroyed: vi.fn(() => false),
+      isMinimized: vi.fn(() => true),
+      restore: vi.fn(),
+      show: vi.fn(),
+      focus: vi.fn(),
+    };
+
+    expect(
+      establishDesktopLifecycle({
+        app,
+        developmentProfile: null,
+        getMainWindow: () => window,
+        argumentsList: ['WO', initial],
+        onJoinIntent: (intent) => received.push(intent.roomCode),
+      }),
+    ).toBe(true);
+    secondInstance?.({}, [
+      'WO',
+      'wo://join?v=1&mode=server&origin=https%3A%2F%2Ftwo.example&room=222222',
+    ]);
+    const event = { preventDefault: vi.fn() };
+    openUrl?.(
+      event,
+      'wo://join?v=1&mode=server&origin=https%3A%2F%2Fthree.example&room=333333',
+    );
+
+    expect(received).toEqual(['111111', '222222', '333333']);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(window.restore).toHaveBeenCalledTimes(2);
+    expect(window.show).toHaveBeenCalledTimes(2);
+    expect(window.focus).toHaveBeenCalledTimes(2);
   });
 
   it('uses isolated development userData paths as independent lock scopes', () => {

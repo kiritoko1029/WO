@@ -7,29 +7,48 @@ import {
   BrowserWindow,
   desktopCapturer,
   ipcMain,
+  powerMonitor,
   safeStorage,
   shell,
   systemPreferences,
 } from 'electron';
+import type { JoinIntent } from '@wo/protocol';
 
 import { createAuthSessionBroker } from './auth-session-broker.js';
+import { createBackendTargetStore } from './backend-target.js';
 import { createCaptureSourceBroker } from './capture-policy.js';
 import {
   createCaptureSourceService,
   installDisplayMediaHandler,
 } from './capture-sources.js';
+import { installExtraCaFromEnvironment } from './extra-ca.js';
 import { createMainHttpClient } from './http-client.js';
 import { registerDesktopIpc } from './ipc.js';
+import {
+  createPendingJoinIntentStore,
+  withoutJoinIntentArguments,
+} from './join-intent.js';
+import { registerLanIpc } from './lan-ipc.js';
+import { createLanSessionController } from './lan-session.js';
+import { createLanSocketController } from './lan-socket.js';
 import { establishDesktopLifecycle } from './lifecycle.js';
 import {
   resolvePackageSmokeRequest,
   waitForPackageSmokeRendererReady,
   writePackageSmokeReady,
 } from './package-smoke.js';
+import { registerDesktopProtocol } from './protocol-registration.js';
 import { createRealtimeTicketBroker } from './realtime-ticket-broker.js';
-import { loadRuntimeConfig } from './runtime-config.js';
+import {
+  loadRuntimeConfig,
+  resolveDevelopmentProfile,
+} from './runtime-config.js';
 import { createScreenPermissionService } from './permissions.js';
 import { createSecureSessionStore } from './secure-session-store.js';
+import {
+  registerShellConfigIpc,
+  SHELL_JOIN_INTENT_NOTIFICATION_CHANNEL,
+} from './shell-config-ipc.js';
 import {
   buildContentSecurityPolicy,
   createWindowOptions,
@@ -42,22 +61,50 @@ const directory = fileURLToPath(new URL('.', import.meta.url));
 const packagedRendererEntry = pathToFileURL(
   join(directory, '../renderer/index.html'),
 ).href;
-const runtime = loadRuntimeConfig({
+const runtimeInput = {
   isPackaged: app.isPackaged,
   environment: process.env,
   packagedRendererEntry,
-});
+} as const;
 const packageSmokeRequest = resolvePackageSmokeRequest({
   argumentsList: process.argv,
   environment: process.env,
   temporaryRoot: tmpdir(),
 });
+if (
+  !registerDesktopProtocol(app, {
+    defaultApp: process.defaultApp === true,
+    executablePath: process.execPath,
+    argumentsList: process.argv,
+    portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
+  })
+) {
+  process.stderr.write('DESKTOP_PROTOCOL_REGISTRATION_FAILED\n');
+}
 
 let mainWindow: BrowserWindow | null = null;
+let stopLanSession = (): Promise<void> => Promise.resolve();
+const joinIntents = createPendingJoinIntentStore();
+const receiveJoinIntent = (intent: JoinIntent): void => {
+  joinIntents.push(intent);
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(SHELL_JOIN_INTENT_NOTIFICATION_CHANNEL);
+  }
+};
 const ownsSingleInstance = establishDesktopLifecycle({
   app,
-  developmentProfile: runtime.developmentProfile,
+  developmentProfile: resolveDevelopmentProfile(runtimeInput),
   getMainWindow: () => mainWindow,
+  argumentsList: process.argv,
+  onJoinIntent: receiveJoinIntent,
+});
+const backendTarget = createBackendTargetStore({
+  userDataPath: app.getPath('userData'),
+  environment: process.env,
+});
+const runtime = loadRuntimeConfig({
+  ...runtimeInput,
+  apiOrigin: backendTarget.current().origin,
 });
 
 app.enableSandbox();
@@ -109,6 +156,7 @@ function createMainWindow(): BrowserWindow {
   }
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
+    void stopLanSession();
   });
   return window;
 }
@@ -125,6 +173,12 @@ if (ownsSingleInstance) {
     http,
     realtimeOrigin: runtime.realtimeOrigin,
   });
+  const lanSessions = createLanSessionController();
+  const lanSockets = createLanSocketController({ sessions: lanSessions });
+  stopLanSession = async () => {
+    lanSockets.stop();
+    await lanSessions.stop();
+  };
   registerDesktopIpc(ipcMain, {
     auth,
     realtime,
@@ -132,10 +186,28 @@ if (ownsSingleInstance) {
     permissions,
     rendererEntry: runtime.rendererEntry,
   });
+  registerLanIpc(ipcMain, {
+    sessions: lanSessions,
+    sockets: lanSockets,
+    rendererEntry: runtime.rendererEntry,
+  });
+  registerShellConfigIpc(ipcMain, {
+    app,
+    backendTarget,
+    joinIntents,
+    relaunchArguments: withoutJoinIntentArguments(process.argv.slice(1)),
+    rendererEntry: runtime.rendererEntry,
+  });
 
   const appReady = app.whenReady();
   void appReady
     .then(async () => {
+      installExtraCaFromEnvironment(process.env);
+      if (packageSmokeRequest === null) {
+        powerMonitor.on('suspend', () => {
+          void stopLanSession();
+        });
+      }
       mainWindow = createMainWindow();
       await mainWindow.loadURL(runtime.rendererEntry);
       if (packageSmokeRequest !== null) {
@@ -154,6 +226,9 @@ if (ownsSingleInstance) {
     });
 
   if (packageSmokeRequest === null) {
+    app.on('before-quit', () => {
+      void stopLanSession();
+    });
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         mainWindow = createMainWindow();

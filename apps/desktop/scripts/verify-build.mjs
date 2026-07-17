@@ -20,8 +20,12 @@ async function filesBelow(directory) {
 function assertNoWorkspaceRuntimeImport(source, path) {
   const forbidden = [
     /@wo\/protocol/u,
+    /@wo\/server(?:\/lite)?/u,
     /packages[\\/]protocol[\\/]dist/u,
+    /apps[\\/]server[\\/]dist/u,
     /(?:from\s+|import\s*\(|require\s*\()\s*['"]zod(?:\/[^'"]*)?['"]/u,
+    /(?:from\s+|import\s*\(|require\s*\()\s*['"](?:@fastify\/websocket|fastify|ws)(?:\/[^'"]*)?['"]/u,
+    /(?:from\s+|import\s*\(|require\s*\()\s*['"](?:argon2|@wo\/database)(?:\/[^'"]*)?['"]/u,
   ];
   if (forbidden.some((pattern) => pattern.test(source))) {
     throw new Error(`Build contains a non-self-contained import: ${path}`);

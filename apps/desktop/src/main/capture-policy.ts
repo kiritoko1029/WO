@@ -175,7 +175,7 @@ export function captureSecurityOrigin(rendererEntry: string): string {
 }
 
 function canonicalDisplaySecurityOrigin(value: string): string | null {
-  if (value === 'file://') return value;
+  if (value === 'file://' || value === 'file:///') return 'file://';
   try {
     const url = new URL(value);
     if (

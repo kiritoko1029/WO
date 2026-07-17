@@ -26,20 +26,42 @@ describe('desktop clean-build configuration', () => {
         /packages[\\/]protocol[\\/]src[\\/]index\.ts$/u,
       );
     }
+    expect(mainAliases['@wo/server/lite']).toMatch(
+      /apps[\\/]server[\\/]src[\\/]lite[\\/]index\.ts$/u,
+    );
   });
 
-  it('bundles protocol and zod in main and runs a postbuild artifact gate', async () => {
+  it('bundles the LAN runtime and runs a self-containment artifact gate', async () => {
     const configSource = await readFile(
       new URL('../electron.vite.config.ts', import.meta.url),
+      'utf8',
+    );
+    const acceptanceConfigSource = await readFile(
+      new URL('../electron.vite.acceptance.config.ts', import.meta.url),
+      'utf8',
+    );
+    const verifierSource = await readFile(
+      new URL('../scripts/verify-build.mjs', import.meta.url),
       'utf8',
     );
     const packageJson = JSON.parse(
       await readFile(new URL('../package.json', import.meta.url), 'utf8'),
     ) as { scripts?: Record<string, unknown> };
 
-    expect(configSource).toMatch(
-      /externalizeDepsPlugin\(\{\s*exclude:\s*\['@wo\/protocol',\s*'zod'\]/u,
-    );
+    for (const source of [configSource, acceptanceConfigSource]) {
+      expect(source).toContain("'@wo/server/lite'");
+      expect(source).toContain("'@fastify/websocket'");
+      expect(source).toContain("'fastify'");
+      expect(source).toContain("'ws'");
+      expect(source).toContain(
+        "'process.env.WS_NO_BUFFER_UTIL': JSON.stringify('1')",
+      );
+      expect(source).toContain(
+        'externalizeDepsPlugin({ exclude: bundledMainDependencies })',
+      );
+    }
+    expect(verifierSource).toContain('(?:argon2|@wo\\/database)');
+    expect(verifierSource).toContain('(?:@fastify\\/websocket|fastify|ws)');
     expect(packageJson.scripts?.postbuild).toBe(
       'node scripts/verify-build.mjs',
     );

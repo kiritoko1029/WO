@@ -193,7 +193,7 @@ function createPlan(options, releaseIdentity) {
     builderArguments.push('--config.forceCodeSigning=false');
     if (options.platform === 'mac') {
       builderArguments.push(
-        '--config.mac.identity=null',
+        '--config.mac.identity=-',
         '--config.mac.notarize=false',
         '--config.mac.artifactName=WO-${version}-UNSIGNED-DEVELOPMENT-mac-${arch}.${ext}',
       );

@@ -1,10 +1,15 @@
-import { useState, type FormEvent } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { AudioLines, LogOut, Plus, Users } from 'lucide-react';
 
+import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
 import { useAuth } from '../state/auth-store.js';
 import { useRoom } from '../state/room-store.js';
 
-export function HomeRoute() {
+export function HomeRoute({
+  modeSelector,
+}: {
+  readonly modeSelector?: ReactNode;
+}) {
   const auth = useAuth();
   const room = useRoom();
   const [roomCode, setRoomCode] = useState('');
@@ -48,6 +53,8 @@ export function HomeRoute() {
           <p>双人语音房间</p>
           <h1>开始通话</h1>
         </div>
+        {modeSelector}
+        <BackendTargetSettings />
         <div className="room-actions">
           <section className="room-action" aria-labelledby="create-room-title">
             <span className="action-icon" aria-hidden="true">

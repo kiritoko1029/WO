@@ -13,7 +13,7 @@ import {
   roomIdSchema,
   userIdSchema,
 } from './envelope.js';
-import { iceConfigurationDataSchema } from './webrtc.js';
+import { rtcConfigurationSchema } from './webrtc.js';
 
 export const memberSchema = z
   .object({
@@ -137,9 +137,8 @@ export const roomActiveStateSchema = z.enum([
 const roomSessionCommonShape = {
   roomId: roomIdSchema,
   connectionEpoch: connectionEpochSchema,
-  rtcConfiguration: iceConfigurationDataSchema.shape.rtcConfiguration,
-  iceCredentialsExpiresAt:
-    iceConfigurationDataSchema.shape.iceCredentialsExpiresAt,
+  rtcConfiguration: rtcConfigurationSchema,
+  iceCredentialsExpiresAt: isoDateTimeSchema,
   screen: screenOwnerSnapshotSchema,
 } as const;
 

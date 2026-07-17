@@ -1,5 +1,12 @@
 import { gzipSync } from 'node:zlib';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -70,7 +77,9 @@ describe('deployment filesystem safety', () => {
     ]);
   });
   test('accepts a provisioned backup directory without changing its mode', async () => {
-    const root = await mkdtemp(resolve(tmpdir(), 'wo-backup-test-'));
+    const root = await mkdtemp(
+      resolve(await realpath(tmpdir()), 'wo-backup-test-'),
+    );
     temporaryDirectories.push(root);
     const directory = resolve(root, 'backups');
     await mkdir(directory, { mode: 0o755 });
@@ -80,7 +89,9 @@ describe('deployment filesystem safety', () => {
   });
 
   test('rejects dangerous and symbolic-link backup directories', async () => {
-    const root = await mkdtemp(resolve(tmpdir(), 'wo-backup-test-'));
+    const root = await mkdtemp(
+      resolve(await realpath(tmpdir()), 'wo-backup-test-'),
+    );
     temporaryDirectories.push(root);
     const target = resolve(root, 'target');
     const link = resolve(root, 'link');

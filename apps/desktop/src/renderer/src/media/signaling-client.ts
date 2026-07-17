@@ -1,7 +1,11 @@
 import {
   PROTOCOL_VERSION,
+  centralRtcConfigurationSchema,
+  lanJoinIntentSchema,
+  lanRtcConfigurationSchema,
   p2pOutboundResponseSchema,
   p2pRequestEnvelopeSchema,
+  type LanJoinIntent,
   type P2pBroadcastEnvelope,
   type P2pRequestEnvelope,
 } from '@wo/protocol';
@@ -53,6 +57,7 @@ export interface SignalingClientOptions {
   readonly maxConnectAttempts?: number;
   readonly handshakeTimeoutMs?: number;
   readonly maxFrameBytes?: number;
+  readonly lanIntent?: LanJoinIntent;
 }
 
 export interface SignalingRequestOptions {
@@ -122,7 +127,17 @@ function errorCode(error: unknown): string | null {
   return null;
 }
 
-function safeGrantEndpoint(endpoint: string): string {
+function safeGrantEndpoint(
+  endpoint: string,
+  lanIntent?: LanJoinIntent,
+): string {
+  if (lanIntent !== undefined) {
+    const parsedIntent = lanJoinIntentSchema.safeParse(lanIntent);
+    if (!parsedIntent.success || endpoint !== parsedIntent.data.endpoint) {
+      throw new SignalingClientError('PROTOCOL_ERROR');
+    }
+    return parsedIntent.data.endpoint;
+  }
   const url = new URL(endpoint);
   if (
     url.protocol !== 'wss:' ||
@@ -136,6 +151,32 @@ function safeGrantEndpoint(endpoint: string): string {
     throw new SignalingClientError('PROTOCOL_ERROR');
   }
   return url.href;
+}
+
+function assertRtcConfigurationMode(
+  message: unknown,
+  lanIntent?: LanJoinIntent,
+): void {
+  if (
+    typeof message !== 'object' ||
+    message === null ||
+    !('payload' in message) ||
+    typeof message.payload !== 'object' ||
+    message.payload === null ||
+    !('data' in message.payload) ||
+    typeof message.payload.data !== 'object' ||
+    message.payload.data === null ||
+    !Object.hasOwn(message.payload.data, 'rtcConfiguration')
+  ) {
+    return;
+  }
+  const schema =
+    lanIntent === undefined
+      ? centralRtcConfigurationSchema
+      : lanRtcConfigurationSchema;
+  schema.parse(
+    (message.payload.data as Record<string, unknown>)['rtcConfiguration'],
+  );
 }
 
 export function createSignalingClient(
@@ -186,6 +227,22 @@ export function createSignalingClient(
     pending.clear();
   };
 
+  const rejectProtocolRequest = (value: unknown): void => {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('requestId' in value) ||
+      typeof value.requestId !== 'string'
+    ) {
+      return;
+    }
+    const request = pending.get(value.requestId);
+    if (request === undefined) return;
+    if (request.timer !== null) clearTimeout(request.timer);
+    pending.delete(value.requestId);
+    request.reject(new SignalingClientError('PROTOCOL_ERROR'));
+  };
+
   const handleMessage = (event: unknown): void => {
     let message: ReturnType<typeof p2pOutboundResponseSchema.parse>;
     try {
@@ -203,20 +260,14 @@ export function createSignalingClient(
       const raw: unknown = JSON.parse(event.data);
       const parsed = p2pOutboundResponseSchema.safeParse(raw);
       if (!parsed.success) {
-        if (
-          typeof raw === 'object' &&
-          raw !== null &&
-          'requestId' in raw &&
-          typeof raw.requestId === 'string'
-        ) {
-          const request = pending.get(raw.requestId);
-          if (request !== undefined) {
-            if (request.timer !== null) clearTimeout(request.timer);
-            pending.delete(raw.requestId);
-            request.reject(new SignalingClientError('PROTOCOL_ERROR'));
-          }
-        }
+        rejectProtocolRequest(raw);
         throw parsed.error;
+      }
+      try {
+        assertRtcConfigurationMode(parsed.data, options.lanIntent);
+      } catch (error) {
+        rejectProtocolRequest(parsed.data);
+        throw error;
       }
       message = parsed.data;
     } catch (error) {
@@ -311,10 +362,10 @@ export function createSignalingClient(
         let candidate: SignalingWebSocket | null = null;
         try {
           const grant = await acquireGrant();
-          candidate = createWebSocket(safeGrantEndpoint(grant.endpoint), [
-            'wo-v1',
-            `ticket.${grant.ticket}`,
-          ]);
+          candidate = createWebSocket(
+            safeGrantEndpoint(grant.endpoint, options.lanIntent),
+            ['wo-v1', `ticket.${grant.ticket}`],
+          );
           await waitForOpen(candidate);
           if (explicitlyClosed) {
             candidate.close();

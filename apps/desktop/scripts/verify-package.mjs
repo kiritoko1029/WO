@@ -468,6 +468,20 @@ async function scanTextFile(path, displayPath, runtimePath) {
   if (finalSource !== '') scanText(finalSource, displayPath, runtimePath);
 }
 
+async function shouldScanTextFile(path, extension) {
+  if (!textExtensions.has(extension)) return false;
+  if (extension !== '') return true;
+
+  const file = await open(path, 'r');
+  try {
+    const probe = Buffer.alloc(8 * 1024);
+    const { bytesRead } = await file.read(probe, 0, probe.length, 0);
+    return !probe.subarray(0, bytesRead).includes(0);
+  } finally {
+    await file.close();
+  }
+}
+
 async function scanRuntimeDirectory(directory, label) {
   for (const path of await filesBelow(directory)) {
     const runtimePath = relative(directory, path).replaceAll('\\', '/');
@@ -484,7 +498,7 @@ async function scanRuntimeDirectory(directory, label) {
     if (keyExtensions.has(extension)) {
       fail(`Package contains a private key file: ${displayPath}`);
     }
-    if (!textExtensions.has(extension)) continue;
+    if (!(await shouldScanTextFile(path, extension))) continue;
     await scanTextFile(path, displayPath, runtimePath);
   }
 }
@@ -499,7 +513,7 @@ async function scanPackageDirectory(packageDirectory) {
     if (keyExtensions.has(extension)) {
       fail(`Package contains a private key file: package/${runtimePath}`);
     }
-    if (!textExtensions.has(extension)) continue;
+    if (!(await shouldScanTextFile(path, extension))) continue;
     await scanTextFile(path, `package/${runtimePath}`, runtimePath);
   }
 }
@@ -1057,6 +1071,7 @@ async function isMacExecutablePayload(path) {
 }
 
 async function resolveMacFrameworkExecutable(appPath) {
+  const canonicalAppPath = await realpath(appPath);
   const frameworkRoot = join(
     appPath,
     'Contents',
@@ -1077,7 +1092,7 @@ async function resolveMacFrameworkExecutable(appPath) {
   if (canonical === null) {
     fail('macOS application is missing its Electron Framework executable');
   }
-  const relativeTarget = relative(appPath, canonical);
+  const relativeTarget = relative(canonicalAppPath, canonical);
   if (
     relativeTarget === '' ||
     relativeTarget.split(/[\\/]/u)[0] === '..' ||
@@ -1217,13 +1232,13 @@ async function verifyMacApplication(
     }
   }
 
-  if (identity === null) return executablePath;
-
   await runner(
     macNativeTools.codesign,
     ['--verify', '--deep', '--strict', '--verbose=2', app.path],
     environment,
   );
+  if (identity === null) return executablePath;
+
   const details = await runner(
     macNativeTools.codesign,
     ['-dv', '--verbose=4', app.path],
@@ -1292,6 +1307,7 @@ async function verifyMacDmgRoot(directory, label) {
   }
   const allowedMetadata = new Map([
     ['.background', 'directory'],
+    ['.background.tiff', 'file'],
     ['.DS_Store', 'file'],
     ['.VolumeIcon.icns', 'file'],
   ]);

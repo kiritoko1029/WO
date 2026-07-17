@@ -7,10 +7,21 @@
   ],
   "type": "module",
   "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./lite": {
+      "types": "./dist/lite/index.d.ts",
+      "import": "./dist/lite/index.js"
+    }
+  },
   "scripts": {
     "predev": "pnpm --filter @wo/config build && pnpm --filter @wo/database build && pnpm --filter @wo/protocol build",
     "dev": "node --watch --env-file-if-exists=../../deploy/.env.local src/index.ts",
     "build": "tsc -p tsconfig.build.json",
+    "postbuild": "node scripts/verify-exports.mjs",
     "start": "node dist/index.js",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",

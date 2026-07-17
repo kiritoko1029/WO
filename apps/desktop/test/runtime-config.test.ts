@@ -10,9 +10,9 @@ import {
 describe('desktop runtime configuration', () => {
   it('validates immutable API, realtime, and exact development renderer origins', () => {
     const config = loadRuntimeConfig({
+      apiOrigin: 'https://rtc.example.cn:8443',
       isPackaged: false,
       environment: {
-        WO_API_ORIGIN: 'https://rtc.example.cn:8443',
         ELECTRON_RENDERER_URL: 'http://127.0.0.1:5173',
         WO_DEV_PROFILE: 'person-a',
       },
@@ -36,8 +36,9 @@ describe('desktop runtime configuration', () => {
   ])('rejects invalid API origin %s', (apiOrigin) => {
     expect(() =>
       loadRuntimeConfig({
+        apiOrigin,
         isPackaged: false,
-        environment: { WO_API_ORIGIN: apiOrigin },
+        environment: {},
         packagedRendererEntry: 'file:///C:/app/out/renderer/index.html',
       }),
     ).toThrow(TypeError);
@@ -50,6 +51,7 @@ describe('desktop runtime configuration', () => {
   ])('rejects an unsafe development renderer entry %s', (rendererUrl) => {
     expect(() =>
       loadRuntimeConfig({
+        apiOrigin: 'https://localhost',
         isPackaged: false,
         environment: { ELECTRON_RENDERER_URL: rendererUrl },
         packagedRendererEntry: 'file:///C:/app/out/renderer/index.html',
@@ -59,6 +61,7 @@ describe('desktop runtime configuration', () => {
 
   it('ignores development renderer/profile variables in packaged builds', () => {
     const config = loadRuntimeConfig({
+      apiOrigin: 'https://localhost',
       isPackaged: true,
       environment: {
         ELECTRON_RENDERER_URL: 'https://attacker.invalid',

@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
+// @vitest-environment-options {"url":"https://wo.example.cn/"}
 
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { LanJoinIntent } from '@wo/protocol';
 
 import { App } from '../src/renderer/src/App.js';
 import type {
@@ -15,9 +17,22 @@ import type {
   RoomGatewayEvent,
   RoomSnapshot,
 } from '../src/renderer/src/state/room-store.js';
-import type { DesktopApi, PublicAuthSession } from '../src/preload/types.js';
+import type {
+  DesktopApi,
+  DesktopShellBridge,
+  PublicAuthSession,
+} from '../src/preload/types.js';
+import type {
+  DesktopLanApi,
+  LanSessionSnapshot,
+} from '../src/preload/lan-types.js';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  Reflect.deleteProperty(window, 'woShell');
+  Reflect.deleteProperty(navigator, 'clipboard');
+  Reflect.deleteProperty(document, 'execCommand');
+});
 
 const session: PublicAuthSession = {
   user: {
@@ -37,6 +52,14 @@ const waitingRoom: RoomSnapshot = {
   participants: [
     { userId: 'user-1', displayName: '陈晨', isSelf: true, online: true },
   ],
+};
+
+const lanIntent: LanJoinIntent = {
+  version: 1,
+  mode: 'lan',
+  endpoint: 'ws://192.168.1.24:43120/v1/realtime',
+  roomCode: waitingRoom.roomCode,
+  inviteKey: 'A'.repeat(43),
 };
 
 const idleScreenSnapshot = {
@@ -93,6 +116,85 @@ function createDesktop(
   };
 }
 
+function createShellBridge(
+  origin = 'https://wo.example.cn',
+): DesktopShellBridge {
+  return {
+    backendTarget: {
+      get: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { origin, source: 'stored', readOnly: false },
+      }),
+      save: vi.fn().mockResolvedValue({ ok: true, value: null }),
+    },
+    joinIntent: {
+      consume: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      switchServer: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      subscribe: vi.fn(() => () => undefined),
+    },
+  };
+}
+
+function createLanApi() {
+  const snapshot = (
+    role: LanSessionSnapshot['role'],
+    displayName: string,
+    intent: LanJoinIntent,
+  ): LanSessionSnapshot => ({
+    role,
+    user: {
+      userId: (role === 'host'
+        ? '00000000-0000-4000-8000-000000000011'
+        : '00000000-0000-4000-8000-000000000012') as LanSessionSnapshot['user']['userId'],
+      email: `${role}@lan.invalid`,
+      displayName,
+    },
+    accessToken: `lan:${role}`,
+    accessTokenExpiresAt: Date.now() + 900_000,
+    joinIntent: intent,
+  });
+  const api = {
+    host: vi.fn((displayName: string) =>
+      Promise.resolve(snapshot('host', displayName, lanIntent)),
+    ),
+    join: vi.fn((displayName: string, intent: LanJoinIntent) =>
+      Promise.resolve(snapshot('guest', displayName, intent)),
+    ),
+    parseInvite: vi.fn().mockResolvedValue(lanIntent),
+    issueTicket: vi.fn().mockResolvedValue({
+      endpoint: lanIntent.endpoint,
+      ticket: 'B'.repeat(43),
+      expiresInSeconds: 30,
+    }),
+    stop: vi.fn().mockResolvedValue(undefined),
+    socket: {
+      open: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      subscribe: vi.fn(() => () => undefined),
+    },
+  } satisfies DesktopLanApi;
+  return api;
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function notifyingShellBridge() {
+  const bridge = createShellBridge();
+  let notify = (): void => undefined;
+  vi.mocked(bridge.joinIntent.subscribe).mockImplementation((listener) => {
+    notify = listener;
+    return () => undefined;
+  });
+  return { bridge, notify: () => notify() };
+}
+
 function createRoomGateway(): RoomGateway & {
   createRoom: ReturnType<typeof vi.fn>;
   joinRoom: ReturnType<typeof vi.fn>;
@@ -138,6 +240,45 @@ async function waitForHome(): Promise<void> {
 }
 
 describe('desktop account and room workflow', () => {
+  it('shows the active backend target before login and on the home screen', async () => {
+    const bridge = {
+      backendTarget: {
+        get: vi.fn().mockResolvedValue({
+          ok: true,
+          value: {
+            origin: 'https://wo.example.cn',
+            source: 'stored',
+            readOnly: false,
+          },
+        }),
+        save: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      },
+      joinIntent: {
+        consume: vi.fn().mockResolvedValue({ ok: true, value: null }),
+        switchServer: vi.fn().mockResolvedValue({ ok: true, value: null }),
+        subscribe: vi.fn(() => () => undefined),
+      },
+    } satisfies DesktopShellBridge;
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: bridge,
+    });
+
+    render(<App desktop={createDesktop()} roomGateway={createRoomGateway()} />);
+    await waitForAuthScreen();
+    expect(await screen.findByText('https://wo.example.cn')).toBeTruthy();
+
+    cleanup();
+    render(
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={createRoomGateway()}
+      />,
+    );
+    await waitForHome();
+    expect(await screen.findByText('https://wo.example.cn')).toBeTruthy();
+  });
+
   it('validates login, shows loading, and reports a login error', async () => {
     const user = userEvent.setup();
     const desktop = createDesktop();
@@ -248,6 +389,389 @@ describe('desktop account and room workflow', () => {
     expect(screen.getByText('林远')).toBeTruthy();
   });
 
+  it('joins an injected same-server intent once after session restore', async () => {
+    const gateway = createRoomGateway();
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: createShellBridge(),
+    });
+
+    render(
+      <StrictMode>
+        <App
+          desktop={createDesktop(session)}
+          roomGateway={gateway}
+          initialJoinIntent={{
+            version: 1,
+            mode: 'server',
+            serverOrigin: 'https://wo.example.cn',
+            roomCode: '123456',
+          }}
+        />
+      </StrictMode>,
+    );
+
+    await screen.findByText('语音已连接');
+    expect(gateway.joinRoom).toHaveBeenCalledOnce();
+    expect(gateway.joinRoom).toHaveBeenCalledWith('access-token', '123456');
+  });
+
+  it('does not lose a cold-start shell intent under StrictMode', async () => {
+    const intent = {
+      version: 1 as const,
+      mode: 'server' as const,
+      serverOrigin: 'https://wo.example.cn',
+      roomCode: '123456',
+    };
+    const bridge = createShellBridge();
+    vi.mocked(bridge.joinIntent.consume).mockResolvedValue({
+      ok: true,
+      value: intent,
+    });
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: bridge,
+    });
+    const gateway = createRoomGateway();
+
+    render(
+      <StrictMode>
+        <App desktop={createDesktop(session)} roomGateway={gateway} />
+      </StrictMode>,
+    );
+
+    await screen.findByText('语音已连接');
+    expect(bridge.joinIntent.consume).toHaveBeenCalledOnce();
+    expect(gateway.joinRoom).toHaveBeenCalledOnce();
+    expect(gateway.joinRoom).toHaveBeenCalledWith('access-token', '123456');
+  });
+
+  it('waits for an explicit Web choice before joining an injected room', async () => {
+    const user = userEvent.setup();
+    const gateway = createRoomGateway();
+    render(
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={gateway}
+        initialJoinIntent={{
+          version: 1,
+          mode: 'server',
+          serverOrigin: 'https://wo.example.cn',
+          roomCode: '123456',
+        }}
+      />,
+    );
+
+    await waitForHome();
+    expect(gateway.joinRoom).not.toHaveBeenCalled();
+    expect(
+      (
+        screen.getByRole('link', {
+          name: '在 WO 客户端打开',
+        }) as HTMLAnchorElement
+      ).getAttribute('href'),
+    ).toBe(
+      'wo://join?v=1&mode=server&origin=https%3A%2F%2Fwo.example.cn&room=123456',
+    );
+
+    await user.click(screen.getByRole('button', { name: '继续网页版' }));
+
+    await waitFor(() => expect(gateway.joinRoom).toHaveBeenCalledOnce());
+  });
+
+  it('requires confirmation before switching a deep link to another server', async () => {
+    const user = userEvent.setup();
+    const bridge = createShellBridge();
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: bridge,
+    });
+    const rendered = render(
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={createRoomGateway()}
+        initialJoinIntent={{
+          version: 1,
+          mode: 'server',
+          serverOrigin: 'https://other.example.cn',
+          roomCode: '123456',
+        }}
+      />,
+    );
+
+    expect(
+      await screen.findByRole('heading', {
+        name: '切换服务后加入房间？',
+      }),
+    ).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(bridge.joinIntent.switchServer).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    render(
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={createRoomGateway()}
+        initialJoinIntent={{
+          version: 1,
+          mode: 'server',
+          serverOrigin: 'https://other.example.cn',
+          roomCode: '123456',
+        }}
+      />,
+    );
+    await user.click(await screen.findByRole('button', { name: '切换并重启' }));
+
+    expect(bridge.joinIntent.switchServer).toHaveBeenCalledWith({
+      version: 1,
+      mode: 'server',
+      serverOrigin: 'https://other.example.cn',
+      roomCode: '123456',
+    });
+  });
+
+  it('creates a trusted-LAN host room and shares only the keyed client invite', async () => {
+    const user = userEvent.setup();
+    const clipboard = { writeText: vi.fn().mockResolvedValue(undefined) };
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: clipboard,
+    });
+    const lan = createLanApi();
+    const gateway = createRoomGateway();
+    render(
+      <App
+        desktop={createDesktop(session)}
+        lanApi={lan}
+        roomGateway={gateway}
+      />,
+    );
+    await waitForHome();
+
+    await user.click(screen.getByRole('tab', { name: '可信局域网' }));
+    await user.type(screen.getByLabelText('显示名称'), '房主');
+    await user.click(screen.getByRole('button', { name: '创建局域网房间' }));
+
+    expect(await screen.findByText('等待对方加入')).toBeTruthy();
+    expect(screen.getByText('可信局域网')).toBeTruthy();
+    expect(screen.getByText('192.168.1.24:43120')).toBeTruthy();
+    expect(lan.host).toHaveBeenCalledWith('房主');
+    expect(gateway.createRoom).toHaveBeenCalledWith('lan:host');
+    await user.click(screen.getByRole('button', { name: '分享房间' }));
+    expect(screen.queryByRole('button', { name: '复制网页链接' })).toBeNull();
+    expect(
+      screen.getByText('邀请包含访问密钥，仅发送给可信设备。'),
+    ).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '复制客户端链接' }));
+    expect(clipboard.writeText).toHaveBeenCalledWith(
+      `wo://join?v=1&mode=lan&endpoint=${encodeURIComponent(
+        lanIntent.endpoint,
+      )}&room=${lanIntent.roomCode}&key=${lanIntent.inviteKey}`,
+    );
+  });
+
+  it('joins a trusted-LAN room from a keyed deep link', async () => {
+    const user = userEvent.setup();
+    const lan = createLanApi();
+    const gateway = createRoomGateway();
+    render(
+      <App
+        desktop={createDesktop(session)}
+        lanApi={lan}
+        roomGateway={gateway}
+        initialJoinIntent={lanIntent}
+      />,
+    );
+
+    await user.type(screen.getByLabelText('显示名称'), '访客');
+    await user.click(screen.getByRole('button', { name: '加入局域网房间' }));
+
+    expect(await screen.findByText('语音已连接')).toBeTruthy();
+    expect(lan.join).toHaveBeenCalledWith('访客', lanIntent);
+    expect(gateway.joinRoom).toHaveBeenCalledWith(
+      'lan:guest',
+      lanIntent.roomCode,
+    );
+  });
+
+  it('stops the active LAN session before showing a server deep link', async () => {
+    const user = userEvent.setup();
+    const lan = createLanApi();
+    const gateway = createRoomGateway();
+    const { bridge, notify } = notifyingShellBridge();
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: bridge,
+    });
+    render(
+      <App
+        desktop={createDesktop(session)}
+        lanApi={lan}
+        roomGateway={gateway}
+        initialJoinIntent={lanIntent}
+      />,
+    );
+    await user.type(screen.getByLabelText('显示名称'), '访客');
+    await user.click(screen.getByRole('button', { name: '加入局域网房间' }));
+    await screen.findByText('语音已连接');
+    await waitFor(() =>
+      expect(bridge.joinIntent.consume).toHaveBeenCalledOnce(),
+    );
+
+    const stopped = deferred();
+    lan.stop.mockReturnValueOnce(stopped.promise);
+    vi.mocked(bridge.joinIntent.consume).mockResolvedValueOnce({
+      ok: true,
+      value: {
+        version: 1,
+        mode: 'server',
+        serverOrigin: 'https://other.example.cn',
+        roomCode: '123456',
+      },
+    });
+    notify();
+
+    await waitFor(() => expect(lan.stop).toHaveBeenCalledOnce());
+    expect(
+      screen.queryByRole('heading', { name: '切换服务后加入房间？' }),
+    ).toBeNull();
+    stopped.resolve();
+    expect(
+      await screen.findByRole('heading', {
+        name: '切换服务后加入房间？',
+      }),
+    ).toBeTruthy();
+  });
+
+  it('stops the current LAN session before showing a replacement LAN invite', async () => {
+    const user = userEvent.setup();
+    const lan = createLanApi();
+    const gateway = createRoomGateway();
+    const { bridge, notify } = notifyingShellBridge();
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: bridge,
+    });
+    render(
+      <App
+        desktop={createDesktop(session)}
+        lanApi={lan}
+        roomGateway={gateway}
+        initialJoinIntent={lanIntent}
+      />,
+    );
+    await user.type(screen.getByLabelText('显示名称'), '访客');
+    await user.click(screen.getByRole('button', { name: '加入局域网房间' }));
+    await screen.findByText('语音已连接');
+    await waitFor(() =>
+      expect(bridge.joinIntent.consume).toHaveBeenCalledOnce(),
+    );
+
+    const replacement: LanJoinIntent = {
+      ...lanIntent,
+      roomCode: '654321',
+      inviteKey: 'C'.repeat(43),
+    };
+    const stopped = deferred();
+    lan.stop.mockReturnValueOnce(stopped.promise);
+    vi.mocked(bridge.joinIntent.consume).mockResolvedValueOnce({
+      ok: true,
+      value: replacement,
+    });
+    notify();
+
+    await waitFor(() => expect(lan.stop).toHaveBeenCalledOnce());
+    expect(screen.queryByText('房间 654321')).toBeNull();
+    stopped.resolve();
+    expect(await screen.findByText(/房间 654321/u)).toBeTruthy();
+    expect(lan.join).toHaveBeenCalledOnce();
+  });
+
+  it('offers a retry when the shell backend target cannot be read', async () => {
+    const user = userEvent.setup();
+    const bridge = createShellBridge();
+    vi.mocked(bridge.backendTarget.get)
+      .mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: 'IPC_UNAVAILABLE',
+          message: 'Desktop service is unavailable',
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: {
+          origin: 'https://wo.example.cn',
+          source: 'stored',
+          readOnly: false,
+        },
+      });
+    Object.defineProperty(window, 'woShell', {
+      configurable: true,
+      value: bridge,
+    });
+
+    render(
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={createRoomGateway()}
+      />,
+    );
+
+    expect(await screen.findByText('无法读取当前服务地址')).toBeTruthy();
+    const callsBeforeRetry = vi.mocked(bridge.backendTarget.get).mock.calls
+      .length;
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    await waitFor(() =>
+      expect(screen.queryByText('无法读取当前服务地址')).toBeNull(),
+    );
+    expect(
+      vi.mocked(bridge.backendTarget.get).mock.calls.length,
+    ).toBeGreaterThan(callsBeforeRetry);
+  });
+
+  it('copies share links with a local-page fallback and reports failures', async () => {
+    const user = userEvent.setup();
+    const clipboard = { writeText: vi.fn().mockResolvedValue(undefined) };
+    const execCommand = vi.fn().mockReturnValue(false);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: clipboard,
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    const gateway = createRoomGateway();
+    render(<App desktop={createDesktop(session)} roomGateway={gateway} />);
+    await waitForHome();
+    await user.click(screen.getByRole('button', { name: '创建房间' }));
+    await user.click(await screen.findByRole('button', { name: '分享房间' }));
+
+    await user.click(screen.getByRole('button', { name: '复制网页链接' }));
+    await user.click(screen.getByRole('button', { name: '复制客户端链接' }));
+    expect(clipboard.writeText.mock.calls).toEqual([
+      ['https://wo.example.cn/join/482731'],
+      [
+        'wo://join?v=1&mode=server&origin=https%3A%2F%2Fwo.example.cn&room=482731',
+      ],
+    ]);
+
+    clipboard.writeText.mockRejectedValueOnce(new Error('denied'));
+    await user.click(screen.getByRole('button', { name: '复制网页链接' }));
+    expect(
+      await screen.findByText('复制失败，请允许剪贴板权限后重试'),
+    ).toBeTruthy();
+
+    Reflect.deleteProperty(navigator, 'clipboard');
+    execCommand.mockReturnValueOnce(true);
+    await user.click(screen.getByRole('button', { name: '复制客户端链接' }));
+    expect(execCommand).toHaveBeenLastCalledWith('copy');
+    expect(
+      screen.getByRole('button', { name: '已复制客户端链接' }),
+    ).toBeTruthy();
+  });
+
   it.each([
     ['ROOM_FULL', '房间已满'],
     ['ROOM_CODE_EXPIRED', '房间码已过期'],
@@ -294,6 +818,51 @@ describe('desktop account and room workflow', () => {
 
     await waitForHome();
     expect(gateway.endRoom).toHaveBeenCalledWith('room-1');
+  });
+
+  it('leaves LAN locally when the vanished host makes close fail', async () => {
+    const user = userEvent.setup();
+    const lan = createLanApi();
+    const gateway = createRoomGateway();
+    gateway.leaveRoom.mockRejectedValue(
+      Object.assign(new Error('host vanished'), {
+        code: 'SIGNALING_UNAVAILABLE',
+      }),
+    );
+    render(
+      <App
+        desktop={createDesktop(session)}
+        lanApi={lan}
+        roomGateway={gateway}
+        initialJoinIntent={lanIntent}
+      />,
+    );
+    await user.type(screen.getByLabelText('显示名称'), '访客');
+    await user.click(screen.getByRole('button', { name: '加入局域网房间' }));
+    await screen.findByText('语音已连接');
+
+    await user.click(screen.getByRole('button', { name: '挂断' }));
+
+    expect(
+      await screen.findByRole('heading', { name: '局域网轻量房间' }),
+    ).toBeTruthy();
+    expect(lan.stop).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a center room open when the end command fails', async () => {
+    const user = userEvent.setup();
+    const gateway = createRoomGateway();
+    gateway.endRoom.mockRejectedValue(new Error('server unavailable'));
+    render(<App desktop={createDesktop(session)} roomGateway={gateway} />);
+    await waitForHome();
+    await user.click(screen.getByRole('button', { name: '创建房间' }));
+    await screen.findByText('等待对方加入');
+
+    await user.click(screen.getByRole('button', { name: '挂断' }));
+
+    expect(await screen.findByText('房间操作失败，请重试')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '挂断' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '开始通话' })).toBeNull();
   });
 
   it('logs out locally and returns to auth', async () => {

@@ -224,16 +224,21 @@ describe('desktop preload API', () => {
     });
   });
 
-  it('publishes only the frozen desktop API through contextBridge', async () => {
+  it('publishes separate desktop and shell bridges through contextBridge', async () => {
     const source = await readFile(
       new URL('../src/preload/index.ts', import.meta.url),
       'utf8',
     );
 
     expect(source).toMatch(/contextBridge\.exposeInMainWorld\(\s*'desktop'/u);
+    expect(source).toMatch(
+      /contextBridge\.exposeInMainWorld\(\s*'woShell',\s*createDesktopShellBridge\(invoke, subscribe\)/u,
+    );
     expect(source).toContain('createDesktopApi');
+    expect(source).toContain('createDesktopShellBridge');
     expect(source).not.toContain('ipcRenderer.send');
-    expect(source).not.toContain('ipcRenderer.on');
+    expect(source).toContain('ipcRenderer.on(channel, handler)');
+    expect(source).toContain('ipcRenderer.removeListener(channel, handler)');
     expect(source).not.toContain('webFrame');
   });
 });

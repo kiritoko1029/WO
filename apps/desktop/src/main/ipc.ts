@@ -70,7 +70,10 @@ class DesktopIpcBoundaryError extends Error {
   }
 }
 
-function assertTrustedSender(event: unknown, rendererEntry: string): void {
+export function assertTrustedSender(
+  event: unknown,
+  rendererEntry: string,
+): void {
   if (typeof event !== 'object' || event === null) {
     throw new DesktopIpcBoundaryError('IPC_FORBIDDEN');
   }

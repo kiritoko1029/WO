@@ -9,6 +9,16 @@
 apps/*
 !apps/server/
 !apps/server/**
+!apps/web/
+!apps/web/**
+!apps/desktop/
+apps/desktop/*
+!apps/desktop/src/
+apps/desktop/src/*
+!apps/desktop/src/preload/
+!apps/desktop/src/preload/**
+!apps/desktop/src/renderer/
+!apps/desktop/src/renderer/**
 
 !packages/
 packages/*
@@ -16,11 +26,16 @@ packages/*
 !packages/config/**
 !packages/database/
 !packages/database/**
+!packages/media-policy/
+!packages/media-policy/**
 !packages/protocol/
 !packages/protocol/**
 
 !deploy/
 deploy/*
+!deploy/caddy/
+deploy/caddy/*
+!deploy/caddy/Dockerfile
 !deploy/coturn/
 deploy/coturn/*
 !deploy/coturn/health-probe.c
@@ -35,7 +50,6 @@ deploy/coturn/*
 **/.env
 **/.env.*
 .git/
-apps/desktop/
 apps/media-lab-desktop/
 apps/media-lab-server/
 docs/

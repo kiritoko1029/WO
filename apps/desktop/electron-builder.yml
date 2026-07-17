@@ -27,6 +27,11 @@ files:
 extraMetadata:
   main: out/main/index.js
 
+protocols:
+  - name: WO room invite
+    schemes:
+      - wo
+
 win:
   target:
     - nsis
