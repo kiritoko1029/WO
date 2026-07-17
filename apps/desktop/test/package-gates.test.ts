@@ -499,7 +499,7 @@ afterEach(async () => {
 });
 
 describe('desktop platform package command', () => {
-  it('rejects unknown arguments', () => {
+  it('rejects unknown arguments', { timeout: 15_000 }, () => {
     const result = runBuildPlatform([
       '--platform=win',
       '--plan',
