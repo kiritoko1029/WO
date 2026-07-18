@@ -531,6 +531,7 @@ export interface CallSnapshot {
     displayName: string;
   }> | null;
   readonly screenOwnerLeaseId: string | null;
+  readonly localScreenTrack: MediaStreamTrack | null;
   readonly remoteScreenTrack: MediaStreamTrack | null;
   readonly screenBitrateTarget: ScreenBitrateTarget;
   readonly screenBitratePending: ScreenBitrateTarget | null;
@@ -676,6 +677,7 @@ export function createCallController(
     screenError: null,
     screenOwner: initialScreenOwner,
     screenOwnerLeaseId: callSession.screen.leaseId,
+    localScreenTrack: null,
     remoteScreenTrack: null,
     screenBitrateTarget: Object.freeze({ mode: 'auto' }),
     screenBitratePending: null,
@@ -850,6 +852,10 @@ export function createCallController(
       screenSelectedToken: screenSnapshot.selectedToken,
       screenCaptureSettings: screenSnapshot.captureSettings,
       screenError: screenSnapshot.error,
+      localScreenTrack:
+        screenSnapshot.state === 'sharing'
+          ? (peer?.screenSender?.track ?? null)
+          : null,
     });
   };
 
@@ -943,6 +949,7 @@ export function createCallController(
       screenSelectedToken: null,
       screenCaptureSettings: null,
       screenError: null,
+      localScreenTrack: null,
     });
   };
 
@@ -1075,7 +1082,11 @@ export function createCallController(
       oldNegotiation?.dispose();
       await oldPeer?.disposeTransport({ stopOwnedTracks: false });
       assertCurrentLifecycle(lifecycle);
-      update({ remoteScreenTrack: null, remoteScreenBitrateBps: null });
+      update({
+        localScreenTrack: null,
+        remoteScreenTrack: null,
+        remoteScreenBitrateBps: null,
+      });
       negotiationEstablished = false;
       nextPeer = createTransport();
       const sender = nextPeer.audioSender;
@@ -1579,6 +1590,9 @@ export function createCallController(
               localScreenState === 'capturing' ||
               localScreenState === 'sharing';
             const localUserId = options.gateway.user.userId;
+            if (owner !== null && owner.userId !== localUserId) {
+              syncNegotiatedScreenReceiver();
+            }
             const localLeaseId = screenController?.getSnapshot().leaseId;
             if (
               localScreenActive &&
@@ -1971,6 +1985,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     screenError: null,
     screenOwner: null,
     screenOwnerLeaseId: null,
+    localScreenTrack: null,
     remoteScreenTrack: null,
     screenBitrateTarget: Object.freeze({ mode: 'auto' }),
     screenBitratePending: null,

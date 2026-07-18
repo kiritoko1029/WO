@@ -388,7 +388,10 @@ function videoTrack() {
     removeEventListener: vi.fn((_type: string, listener: () => void) => {
       listeners.delete(listener);
     }),
-  } as unknown as MediaStreamTrack;
+    emitEnded() {
+      for (const listener of listeners) listener();
+    },
+  } as unknown as MediaStreamTrack & { emitEnded(): void };
 }
 
 function mediaStream(track: MediaStreamTrack) {
@@ -399,15 +402,20 @@ function mediaStream(track: MediaStreamTrack) {
   } as unknown as MediaStream;
 }
 
-function peerConnectionFactory() {
+function peerConnectionFactory(
+  options: { readonly screenReceiverTrack?: MediaStreamTrack | null } = {},
+) {
   const listeners = new Map<string, Set<(event: unknown) => void>>();
-  const negotiatedScreenTrack = videoTrack();
+  const negotiatedScreenTrack =
+    options.screenReceiverTrack === undefined
+      ? videoTrack()
+      : options.screenReceiverTrack;
   const transceivers = [
     {
       mid: '0',
       direction: 'sendrecv',
       sender: {
-        track: null,
+        track: null as MediaStreamTrack | null,
         replaceTrack: vi.fn().mockResolvedValue(undefined),
         getParameters: vi.fn(() => ({
           transactionId: 'audio-transaction',
@@ -425,7 +433,7 @@ function peerConnectionFactory() {
       mid: '1',
       direction: 'sendrecv',
       sender: {
-        track: null,
+        track: null as MediaStreamTrack | null,
         replaceTrack: vi.fn().mockResolvedValue(undefined),
         getParameters: vi.fn(() => ({
           transactionId: 'screen-transaction',
@@ -440,6 +448,13 @@ function peerConnectionFactory() {
       setCodecPreferences: vi.fn(),
     },
   ];
+  for (const transceiver of transceivers) {
+    transceiver.sender.replaceTrack.mockImplementation(
+      async (track: MediaStreamTrack | null) => {
+        transceiver.sender.track = track;
+      },
+    );
+  }
   const pc = {
     connectionState: 'new' as RTCPeerConnectionState,
     iceConnectionState: 'new' as RTCIceConnectionState,
@@ -1288,6 +1303,72 @@ describe('realtime room gateway', () => {
         peer.transceivers[1]!.receiver.track,
       ),
     );
+  });
+
+  it('resynchronizes the negotiated screen receiver when remote ownership starts', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.joinRoom('access-token', '123456');
+    const initialTrack = videoTrack();
+    const peer = peerConnectionFactory({ screenReceiverTrack: initialTrack });
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    await call.start();
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'offer-before-screen-track' as never,
+      type: 'webrtc.offer',
+      payload: {
+        roomId: 'room-2' as never,
+        negotiationId: 'negotiation-before-screen-track' as never,
+        connectionEpoch: 10,
+        description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      },
+    });
+    await vi.waitFor(() => expect(peer.pc.createAnswer).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(call.getSnapshot().remoteScreenTrack).toBe(initialTrack),
+    );
+    initialTrack.emitEnded();
+    expect(call.getSnapshot().remoteScreenTrack).toBeNull();
+
+    const remoteTrack = videoTrack();
+    peer.transceivers[1]!.receiver.track = remoteTrack;
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'remote-screen-owner-after-negotiation' as never,
+      type: 'screen.ownerChanged',
+      payload: {
+        roomId: 'room-2' as never,
+        owner: {
+          userId: peerUser.userId,
+          displayName: peerUser.displayName,
+          ready: true,
+        },
+        leaseId: 'remote-screen-lease' as never,
+        leaseExpiresAt: new Date(Date.now() + 15_000).toISOString(),
+      },
+    });
+
+    expect(call.getSnapshot()).toMatchObject({
+      screenOwner: {
+        userId: peerUser.userId,
+        displayName: peerUser.displayName,
+      },
+      remoteScreenTrack: remoteTrack,
+    });
   });
 
   it('keeps an established connection connected when peer.ready is repeated', async () => {
@@ -2531,6 +2612,7 @@ describe('realtime room gateway', () => {
     expect(call.getSnapshot()).toMatchObject({
       screenState: 'sharing',
       screenCaptureSettings: { width: 1_920, height: 1_080, frameRate: 60 },
+      localScreenTrack: screenTrack,
     });
     await call.setScreenBitrate({ mode: 'fixed', bitrateBps: 4_000_000 });
     expect(peer.transceivers[1]!.sender.setParameters).toHaveBeenCalledWith(
@@ -2555,6 +2637,10 @@ describe('realtime room gateway', () => {
     expect(peer.transceivers[1]!.sender.replaceTrack.mock.calls.at(-1)).toEqual(
       [null],
     );
+    expect(call.getSnapshot()).toMatchObject({
+      screenState: 'idle',
+      localScreenTrack: null,
+    });
     expect(microphone.stop).not.toHaveBeenCalled();
     expect(peer.pc.close).not.toHaveBeenCalled();
   });
@@ -2746,7 +2832,8 @@ describe('realtime room gateway', () => {
       createPeerConnection: peer.factory,
     });
     await call.start();
-    const remoteTrack = videoTrack();
+    const remoteTrack = peer.transceivers[1]!.receiver
+      .track as MediaStreamTrack;
     peer.pc.emit('track', { track: remoteTrack });
     client.emit({
       version: PROTOCOL_VERSION,

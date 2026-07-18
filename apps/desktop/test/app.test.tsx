@@ -71,6 +71,7 @@ const idleScreenSnapshot = {
   screenError: null,
   screenOwner: null,
   screenOwnerLeaseId: null,
+  localScreenTrack: null,
   remoteScreenTrack: null,
   screenBitrateTarget: { mode: 'auto' as const },
   screenBitratePending: null,

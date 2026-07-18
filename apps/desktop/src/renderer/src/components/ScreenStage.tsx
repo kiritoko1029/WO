@@ -4,12 +4,14 @@ import { Monitor, MonitorUp } from 'lucide-react';
 import type { ScreenShareState } from '../media/screen-controller.js';
 
 export function ScreenStage({
+  localTrack,
   remoteTrack,
   localState,
   remoteOwnerName,
   remoteBitrateBps,
   onPresentationVideo,
 }: {
+  readonly localTrack: MediaStreamTrack | null;
   readonly remoteTrack: MediaStreamTrack | null;
   readonly localState: ScreenShareState;
   readonly remoteOwnerName: string | null;
@@ -17,29 +19,32 @@ export function ScreenStage({
   readonly onPresentationVideo?: (video: HTMLVideoElement | null) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const localSharing = localState === 'sharing';
+  const showRemoteTrack = remoteOwnerName !== null && remoteTrack !== null;
+  const showLocalTrack =
+    !showRemoteTrack && localSharing && localTrack !== null;
+  const presentationTrack = showRemoteTrack
+    ? remoteTrack
+    : showLocalTrack
+      ? localTrack
+      : null;
 
   useEffect(() => {
     const video = videoRef.current;
     if (video === null) return;
-    if (
-      remoteTrack === null ||
-      remoteOwnerName === null ||
-      typeof MediaStream === 'undefined'
-    ) {
+    if (presentationTrack === null || typeof MediaStream === 'undefined') {
       video.srcObject = null;
       return;
     }
-    video.srcObject = new MediaStream([remoteTrack]);
+    video.srcObject = new MediaStream([presentationTrack]);
     void video.play().catch(() => undefined);
     return () => {
       video.srcObject = null;
     };
-  }, [remoteOwnerName, remoteTrack]);
+  }, [presentationTrack]);
 
-  const localSharing = localState === 'sharing';
   const waitingForRemoteTrack =
     remoteOwnerName !== null && remoteTrack === null;
-  const showRemoteTrack = remoteOwnerName !== null && remoteTrack !== null;
 
   useEffect(() => {
     const video = showRemoteTrack ? videoRef.current : null;
@@ -49,16 +54,21 @@ export function ScreenStage({
 
   return (
     <section className="screen-stage" aria-label="共享屏幕">
-      {showRemoteTrack && (
+      {presentationTrack !== null && (
         <video
           ref={videoRef}
           className="remote-screen-video"
-          aria-label={`${remoteOwnerName ?? '对方'}的共享屏幕`}
+          aria-label={
+            showRemoteTrack
+              ? `${remoteOwnerName ?? '对方'}的共享屏幕`
+              : '本地共享预览'
+          }
           autoPlay
+          muted={showLocalTrack}
           playsInline
         />
       )}
-      {!showRemoteTrack && (
+      {presentationTrack === null && (
         <div className={`screen-empty${localSharing ? ' local-sharing' : ''}`}>
           {localSharing ? (
             <MonitorUp size={42} strokeWidth={1.4} />

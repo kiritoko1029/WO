@@ -170,6 +170,7 @@ describe('desktop share controls', () => {
     const track = { kind: 'video' } as MediaStreamTrack;
     const { rerender } = render(
       <ScreenStage
+        localTrack={null}
         remoteTrack={track}
         localState="idle"
         remoteOwnerName={null}
@@ -182,6 +183,7 @@ describe('desktop share controls', () => {
 
     rerender(
       <ScreenStage
+        localTrack={null}
         remoteTrack={track}
         localState="sharing"
         remoteOwnerName={null}
@@ -193,6 +195,7 @@ describe('desktop share controls', () => {
 
     rerender(
       <ScreenStage
+        localTrack={null}
         remoteTrack={track}
         localState="idle"
         remoteOwnerName="林远"
@@ -200,5 +203,23 @@ describe('desktop share controls', () => {
       />,
     );
     expect(screen.getByLabelText('林远的共享屏幕')).toBeTruthy();
+  });
+
+  it('previews the local screen track while sharing', () => {
+    const track = { kind: 'video' } as MediaStreamTrack;
+    render(
+      <ScreenStage
+        localTrack={track}
+        remoteTrack={null}
+        localState="sharing"
+        remoteOwnerName={null}
+        remoteBitrateBps={null}
+      />,
+    );
+
+    const preview = screen.getByLabelText('本地共享预览');
+    expect(preview.tagName).toBe('VIDEO');
+    expect((preview as HTMLVideoElement).muted).toBe(true);
+    expect(screen.queryByText('您正在共享屏幕')).toBeNull();
   });
 });

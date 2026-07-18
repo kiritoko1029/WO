@@ -238,6 +238,7 @@ export function RoomRoute({
           )}
         </div>
         <ScreenStage
+          localTrack={call.snapshot.localScreenTrack}
           remoteTrack={call.snapshot.remoteScreenTrack}
           localState={screenState}
           remoteOwnerName={remoteOwnerName}
