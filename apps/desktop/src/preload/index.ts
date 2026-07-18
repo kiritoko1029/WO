@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { createDesktopApi } from './api.js';
+import { createDesktopClipboardBridge } from './clipboard-api.js';
 import { createDesktopLanBridge } from './lan-api.js';
 import { createDesktopShellBridge } from './shell-config-api.js';
 
@@ -28,4 +29,8 @@ contextBridge.exposeInMainWorld(
 contextBridge.exposeInMainWorld(
   'woShell',
   createDesktopShellBridge(invoke, subscribe),
+);
+contextBridge.exposeInMainWorld(
+  'woClipboard',
+  createDesktopClipboardBridge(invoke),
 );

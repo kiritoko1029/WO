@@ -103,7 +103,15 @@ export function RoomRoute({
     setCopyError(null);
     let succeeded = false;
     try {
-      if (navigator.clipboard !== undefined) {
+      if (window.woClipboard !== undefined) {
+        await window.woClipboard.writeText(value);
+        succeeded = true;
+      }
+    } catch {
+      succeeded = false;
+    }
+    try {
+      if (!succeeded && navigator.clipboard !== undefined) {
         await navigator.clipboard.writeText(value);
         succeeded = true;
       }

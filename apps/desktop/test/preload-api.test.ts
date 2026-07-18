@@ -241,4 +241,28 @@ describe('desktop preload API', () => {
     expect(source).toContain('ipcRenderer.removeListener(channel, handler)');
     expect(source).not.toContain('webFrame');
   });
+
+  it('publishes a narrow IPC-backed clipboard writer through both preloads', async () => {
+    const sources = await Promise.all(
+      ['index.ts', 'index.acceptance.ts'].map((entry) =>
+        readFile(
+          new URL(`../src/preload/${entry}`, import.meta.url),
+          'utf8',
+        ),
+      ),
+    );
+
+    for (const source of sources) {
+      expect(source).toContain(
+        "import { contextBridge, ipcRenderer } from 'electron';",
+      );
+      expect(source).toMatch(
+        /contextBridge\.exposeInMainWorld\(\s*'woClipboard',\s*createDesktopClipboardBridge\(invoke\)/u,
+      );
+      expect(source).not.toMatch(
+        /import\s*\{[^}]*\bclipboard\b[^}]*\}\s*from\s*'electron'/u,
+      );
+      expect(source).not.toContain('readText');
+    }
+  });
 });

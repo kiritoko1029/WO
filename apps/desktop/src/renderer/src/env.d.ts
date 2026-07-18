@@ -8,6 +8,9 @@ declare global {
     readonly desktop: DesktopBridge;
     readonly woLan?: DesktopLanBridge;
     readonly woShell?: DesktopShellBridge;
+    readonly woClipboard?: {
+      writeText(value: string): void | Promise<void>;
+    };
   }
 }
 

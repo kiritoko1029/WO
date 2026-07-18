@@ -29,6 +29,7 @@ import type {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, 'woClipboard');
   Reflect.deleteProperty(window, 'woShell');
   Reflect.deleteProperty(navigator, 'clipboard');
   Reflect.deleteProperty(document, 'execCommand');
@@ -769,6 +770,86 @@ describe('desktop account and room workflow', () => {
     expect(execCommand).toHaveBeenLastCalledWith('copy');
     expect(
       screen.getByRole('button', { name: '已复制客户端链接' }),
+    ).toBeTruthy();
+  });
+
+  it('uses the desktop clipboard bridge when the Web API is unavailable', async () => {
+    const user = userEvent.setup();
+    const desktopClipboard = {
+      writeText: vi.fn().mockResolvedValue(undefined),
+    };
+    const browserClipboard = {
+      writeText: vi.fn().mockRejectedValue(new Error('denied')),
+    };
+    Object.defineProperty(window, 'woClipboard', {
+      configurable: true,
+      value: desktopClipboard,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: browserClipboard,
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn().mockReturnValue(false),
+    });
+    render(
+      <App desktop={createDesktop(session)} roomGateway={createRoomGateway()} />,
+    );
+    await waitForHome();
+    await user.click(screen.getByRole('button', { name: '创建房间' }));
+    await user.click(await screen.findByRole('button', { name: '分享房间' }));
+
+    await user.click(screen.getByRole('button', { name: '复制网页链接' }));
+
+    expect(desktopClipboard.writeText).toHaveBeenCalledWith(
+      'https://wo.example.cn/join/482731',
+    );
+    expect(browserClipboard.writeText).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole('button', { name: '已复制网页链接' }),
+    ).toBeTruthy();
+  });
+
+  it('falls back to the Web Clipboard API when the desktop bridge rejects', async () => {
+    const user = userEvent.setup();
+    const desktopClipboard = {
+      writeText: vi.fn().mockRejectedValue(new Error('unavailable')),
+    };
+    const browserClipboard = {
+      writeText: vi.fn().mockResolvedValue(undefined),
+    };
+    const execCommand = vi.fn().mockReturnValue(false);
+    Object.defineProperty(window, 'woClipboard', {
+      configurable: true,
+      value: desktopClipboard,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: browserClipboard,
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    render(
+      <App desktop={createDesktop(session)} roomGateway={createRoomGateway()} />,
+    );
+    await waitForHome();
+    await user.click(screen.getByRole('button', { name: '创建房间' }));
+    await user.click(await screen.findByRole('button', { name: '分享房间' }));
+
+    await user.click(screen.getByRole('button', { name: '复制网页链接' }));
+
+    expect(desktopClipboard.writeText).toHaveBeenCalledWith(
+      'https://wo.example.cn/join/482731',
+    );
+    expect(browserClipboard.writeText).toHaveBeenCalledWith(
+      'https://wo.example.cn/join/482731',
+    );
+    expect(execCommand).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole('button', { name: '已复制网页链接' }),
     ).toBeTruthy();
   });
 

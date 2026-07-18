@@ -1,12 +1,14 @@
 import { createHash, X509Certificate } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { connect, type DetailedPeerCertificate } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { expect, test } from '@playwright/test';
+import { _electron as electron, expect, test } from '@playwright/test';
+import electronPath from 'electron';
 
 import {
   acceptsPinnedAcceptanceCertificate,
@@ -39,6 +41,96 @@ async function textFiles(directory: string): Promise<string> {
     contents.push(await readFile(path, 'utf8'));
   }
   return contents.join('\n');
+}
+
+async function expectClipboardBridge(preload: string): Promise<void> {
+  const temporaryRoot = await mkdtemp(
+    join(tmpdir(), 'wo-clipboard-bridge-test-'),
+  );
+  const mainEntry = join(temporaryRoot, 'main.cjs');
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  delete environment.ELECTRON_RUN_AS_NODE;
+
+  await writeFile(
+    mainEntry,
+    `
+const { app, BrowserWindow } = require('electron');
+const { ipcMain } = require('electron');
+
+const clipboardWrites = [];
+global.__woClipboardWrites = clipboardWrites;
+ipcMain.handle('desktop:clipboard:write-text', (_event, ...arguments_) => {
+  clipboardWrites.push(arguments_);
+  return { ok: true, value: null };
+});
+
+app.whenReady().then(() => {
+  const window = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: ${JSON.stringify(preload)},
+      sandbox: true,
+    },
+  });
+  void window.loadURL('data:text/html,<title>WO clipboard bridge</title>');
+});
+`,
+    { mode: 0o600 },
+  );
+
+  let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
+  try {
+    application = await electron.launch({
+      executablePath: electronPath,
+      args: [mainEntry],
+      cwd: temporaryRoot,
+      env: environment,
+      timeout: 30_000,
+    });
+    const page = await application.firstWindow();
+    await expect(page).toHaveTitle('WO clipboard bridge');
+    const probeValue = 'https://wo.example.cn/join/482731';
+    const bridge = await page.evaluate(async (value) => {
+      const candidate = (
+        globalThis as unknown as {
+          woClipboard?: {
+            writeText?: (clipboardValue: string) => Promise<void>;
+          };
+        }
+      ).woClipboard;
+      const shape = {
+        bridgeType: typeof candidate,
+        keys: candidate === undefined ? [] : Object.keys(candidate),
+        writerType: typeof candidate?.writeText,
+      };
+      if (typeof candidate?.writeText !== 'function') return shape;
+      await candidate.writeText(value);
+      return shape;
+    }, probeValue);
+    expect(bridge).toEqual({
+      bridgeType: 'object',
+      keys: ['writeText'],
+      writerType: 'function',
+    });
+    const writes = await application.evaluate(
+      () =>
+        (
+          globalThis as unknown as {
+            __woClipboardWrites?: readonly (readonly unknown[])[];
+          }
+        ).__woClipboardWrites,
+    );
+    expect(writes).toEqual([[probeValue]]);
+  } finally {
+    await application?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
 }
 
 function pem(raw: Buffer): string {
@@ -118,6 +210,8 @@ test('keeps acceptance hooks in a separately pinned build', async () => {
     cwd: desktopDirectory,
     windowsHide: true,
   });
+  await expectClipboardBridge(join(acceptanceOutput, 'preload', 'index.js'));
+  await expectClipboardBridge(join(productionOutput, 'preload', 'index.js'));
 
   const acceptance = await textFiles(acceptanceOutput);
   const production = await textFiles(productionOutput);

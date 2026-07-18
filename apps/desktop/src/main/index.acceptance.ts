@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   app,
   BrowserWindow,
+  clipboard,
   desktopCapturer,
   ipcMain,
   safeStorage,
@@ -283,6 +284,7 @@ if (ownsSingleInstance) {
     auth,
     realtime,
     capture,
+    clipboard,
     permissions,
     rendererEntry: runtime.rendererEntry,
   });

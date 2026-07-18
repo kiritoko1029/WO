@@ -69,6 +69,9 @@ function createHarness() {
     select: vi.fn(),
     clear: vi.fn(),
   };
+  const clipboard = {
+    writeText: vi.fn(),
+  };
   const permissions = {
     status: vi.fn(() => ({
       status: 'granted' as const,
@@ -80,6 +83,7 @@ function createHarness() {
     auth,
     realtime,
     capture,
+    clipboard,
     permissions,
     rendererEntry,
   });
@@ -88,6 +92,7 @@ function createHarness() {
   return {
     auth,
     capture,
+    clipboard,
     event,
     handlers,
     ipcMain,
@@ -111,11 +116,12 @@ describe('desktop IPC boundary', () => {
       'desktop:capture:select',
       'desktop:capture:permission',
       'desktop:capture:open-settings',
+      'desktop:clipboard:write-text',
     ]);
   });
 
   it('validates arguments before invoking every broker operation', async () => {
-    const { auth, capture, event, handlers, permissions, realtime } =
+    const { auth, capture, clipboard, event, handlers, permissions, realtime } =
       createHarness();
 
     await expect(
@@ -185,6 +191,14 @@ describe('desktop IPC boundary', () => {
       handlers.get('desktop:capture:open-settings')?.(event),
     ).resolves.toEqual({ ok: true, value: null });
     expect(permissions.openSettings).toHaveBeenCalledOnce();
+    await expect(
+      handlers
+        .get('desktop:clipboard:write-text')
+        ?.(event, 'https://wo.example.cn/join/482731'),
+    ).resolves.toEqual({ ok: true, value: null });
+    expect(clipboard.writeText).toHaveBeenCalledWith(
+      'https://wo.example.cn/join/482731',
+    );
 
     const invalidArguments = {
       ok: false,
@@ -208,6 +222,20 @@ describe('desktop IPC boundary', () => {
     await expect(
       handlers.get('desktop:capture:select')?.(event, 'window:101:0'),
     ).resolves.toEqual(invalidArguments);
+    await expect(
+      handlers.get('desktop:clipboard:write-text')?.(event, undefined),
+    ).resolves.toEqual(invalidArguments);
+    await expect(
+      handlers
+        .get('desktop:clipboard:write-text')
+        ?.(event, 'x'.repeat(16_385)),
+    ).resolves.toEqual(invalidArguments);
+    await expect(
+      handlers
+        .get('desktop:clipboard:write-text')
+        ?.(event, 'value', 'extra'),
+    ).resolves.toEqual(invalidArguments);
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
   });
 
   it('serializes broker failures into fixed safe envelopes without stack or secrets', async () => {
@@ -299,6 +327,18 @@ describe('desktop IPC boundary', () => {
         message: 'IPC request was rejected',
       },
     });
+    await expect(
+      harness.handlers
+        .get('desktop:clipboard:write-text')
+        ?.(event, 'https://wo.example.cn/join/482731'),
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'IPC_FORBIDDEN',
+        message: 'IPC request was rejected',
+      },
+    });
     expect(harness.auth.refresh).not.toHaveBeenCalled();
+    expect(harness.clipboard.writeText).not.toHaveBeenCalled();
   });
 });

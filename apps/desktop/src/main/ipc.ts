@@ -27,6 +27,7 @@ export const DESKTOP_IPC_CHANNELS = Object.freeze([
   'desktop:capture:select',
   'desktop:capture:permission',
   'desktop:capture:open-settings',
+  'desktop:clipboard:write-text',
 ] as const);
 
 type DesktopIpcChannel = (typeof DESKTOP_IPC_CHANNELS)[number];
@@ -42,6 +43,9 @@ export interface DesktopIpcDependencies {
   readonly auth: AuthSessionBroker;
   readonly realtime: RealtimeTicketBroker;
   readonly capture: CaptureSourceService;
+  readonly clipboard: {
+    writeText(value: string): void;
+  };
   readonly permissions: ScreenPermissionService;
   readonly rendererEntry: string;
 }
@@ -104,6 +108,18 @@ function parseArguments<Result>(
   } catch {
     throw new DesktopIpcBoundaryError('INVALID_ARGUMENTS');
   }
+}
+
+const MAX_CLIPBOARD_TEXT_CODE_UNITS = 16_384;
+
+function parseClipboardText(input: unknown): string {
+  if (
+    typeof input !== 'string' ||
+    input.length > MAX_CLIPBOARD_TEXT_CODE_UNITS
+  ) {
+    throw new TypeError('Invalid clipboard text');
+  }
+  return input;
 }
 
 function registerHandler<Value>(
@@ -214,6 +230,18 @@ export function registerDesktopIpc(
       assertTrustedSender(event, dependencies.rendererEntry);
       parseArguments(arguments_, 0, () => undefined);
       await dependencies.permissions.openSettings();
+      return null;
+    },
+  );
+  registerHandler(
+    ipcMain,
+    'desktop:clipboard:write-text',
+    async (event, arguments_) => {
+      assertTrustedSender(event, dependencies.rendererEntry);
+      const value = parseArguments(arguments_, 1, () =>
+        parseClipboardText(arguments_[0]),
+      );
+      dependencies.clipboard.writeText(value);
       return null;
     },
   );

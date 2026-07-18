@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { createDesktopApi } from './api.js';
+import { createDesktopClipboardBridge } from './clipboard-api.js';
 import { createDesktopShellBridge } from './shell-config-api.js';
 
 const iceTransportPolicy =
@@ -10,6 +11,10 @@ const invoke = (channel: string, ...arguments_: readonly unknown[]) =>
 
 contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke));
 contextBridge.exposeInMainWorld('woShell', createDesktopShellBridge(invoke));
+contextBridge.exposeInMainWorld(
+  'woClipboard',
+  createDesktopClipboardBridge(invoke),
+);
 contextBridge.exposeInMainWorld(
   'woAcceptance',
   Object.freeze({
