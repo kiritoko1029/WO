@@ -124,6 +124,25 @@ describe('fixed transceiver plan', () => {
     );
   });
 
+  it('maps the remote offer without attaching audio when the microphone is unavailable', async () => {
+    const audio = transceiver('audio', '0');
+    const screen = transceiver('video', '1');
+    const pc = {
+      getTransceivers: vi.fn(() => [audio, screen]),
+    } as unknown as RTCPeerConnection;
+
+    const result = await configureJoinerTransceiverPlan(
+      pc,
+      null,
+      { audio: [], video: [] },
+    );
+
+    expect(result).toEqual({ audio, screen });
+    expect(audio.direction).toBe('sendrecv');
+    expect(screen.direction).toBe('sendrecv');
+    expect(audio.sender.replaceTrack).not.toHaveBeenCalled();
+  });
+
   it.each([
     [[transceiver('audio', '0')], 'exactly one audio and one video'],
     [[transceiver('audio', null), transceiver('video', '1')], 'non-null MID'],

@@ -50,7 +50,7 @@ export interface NegotiationControllerOptions {
   readonly peer: PeerConnectionController;
   readonly signaling: NegotiationSignaling;
   readonly roomId: string;
-  readonly microphone: () => MediaStreamTrack;
+  readonly microphone: () => MediaStreamTrack | null;
   readonly now?: () => number;
   readonly makeNegotiationId?: () => string;
   readonly makeRequestId?: () => string;

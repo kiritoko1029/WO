@@ -67,7 +67,7 @@ export interface PeerConnectionController {
   readonly signalingState: RTCSignalingState;
   beginNegotiation(negotiationId: string): number;
   configureJoinerTransceivers(
-    microphone: MediaStreamTrack,
+    microphone: MediaStreamTrack | null,
   ): Promise<TransceiverPlan>;
   setIceConfiguration(configuration: RtcConfiguration, expiresAt: string): void;
   acceptRemoteConnectionEpoch(epoch: number): boolean;

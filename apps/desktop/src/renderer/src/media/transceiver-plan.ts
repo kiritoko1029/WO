@@ -86,10 +86,10 @@ export function createCreatorTransceiverPlan(
 
 export async function configureJoinerTransceiverPlan(
   pc: RTCPeerConnection,
-  microphone: MediaStreamTrack,
+  microphone: MediaStreamTrack | null,
   capabilities: CodecCapabilities = browserCapabilities(),
 ): Promise<TransceiverPlan> {
-  if (microphone.kind !== 'audio') {
+  if (microphone !== null && microphone.kind !== 'audio') {
     throw new TypeError('Microphone track must be audio');
   }
   const transceivers = pc.getTransceivers();
@@ -118,7 +118,7 @@ export async function configureJoinerTransceiverPlan(
   }
   audio.direction = 'sendrecv';
   screen.direction = 'sendrecv';
-  await audio.sender.replaceTrack(microphone);
+  if (microphone !== null) await audio.sender.replaceTrack(microphone);
   applyCodecPreferences(audio, capabilities.audio, 'audio');
   applyCodecPreferences(screen, capabilities.video, 'video');
   return Object.freeze({ audio, screen });

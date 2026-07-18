@@ -1512,6 +1512,71 @@ describe('realtime room gateway', () => {
     expect(joinerPeer.pc.close).toHaveBeenCalledOnce();
   });
 
+  it('negotiates the screen receiver when the joiner microphone is unavailable', async () => {
+    const bus = pairedSignaling();
+    const creatorGateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: bus.creator,
+    });
+    const joinerGateway = createRealtimeRoomGateway({
+      desktop,
+      user: peerUser,
+      signaling: bus.joiner,
+    });
+    const creatorRoom = await creatorGateway.createRoom('creator-token');
+    const joinerRoom = await joinerGateway.joinRoom(
+      'joiner-token',
+      creatorRoom.roomCode,
+    );
+    const creatorPeer = peerConnectionFactory();
+    const joinerPeer = peerConnectionFactory();
+    const creatorCall = createCallController({
+      room: creatorRoom,
+      gateway: creatorGateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: creatorPeer.factory,
+    });
+    const joinerCall = createCallController({
+      room: joinerRoom,
+      gateway: joinerGateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockRejectedValue(
+          Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+        ),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: joinerPeer.factory,
+    });
+
+    const results = await Promise.allSettled([
+      creatorCall.start(),
+      joinerCall.start(),
+    ]);
+
+    expect(results[0]).toMatchObject({ status: 'fulfilled' });
+    expect(results[1]).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'MICROPHONE_PERMISSION_DENIED' },
+    });
+    await vi.waitFor(() =>
+      expect(
+        bus.records.filter(({ type }) => type === 'webrtc.answerApplied'),
+      ).toHaveLength(1),
+    );
+    expect(creatorCall.getSnapshot().remoteScreenTrack).toBe(
+      creatorPeer.transceivers[1]!.receiver.track,
+    );
+    expect(
+      joinerPeer.transceivers[0]!.sender.replaceTrack,
+    ).not.toHaveBeenCalled();
+
+    await Promise.all([creatorCall.cleanup(), joinerCall.cleanup()]);
+  });
+
   it('resumes signaling with a fresh epoch while keeping healthy voice and transport alive', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
@@ -2941,7 +3006,7 @@ describe('realtime room gateway', () => {
     await vi.waitFor(() => expect(call.getSnapshot().status).toBe('relay'));
   });
 
-  it('never marks ready when cleanup wins while device enumeration is pending', async () => {
+  it('keeps early readiness single-shot when cleanup wins during device enumeration', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -2969,7 +3034,7 @@ describe('realtime room gateway', () => {
     await expect(starting).rejects.toThrow('Call lifecycle changed');
     expect(
       client.request.mock.calls.filter(([type]) => type === 'peer.ready'),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
   });
 });
 // @vitest-environment jsdom

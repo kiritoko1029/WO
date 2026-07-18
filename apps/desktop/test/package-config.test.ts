@@ -7,6 +7,17 @@ async function readDesktopFile(path: string): Promise<string> {
 }
 
 describe('desktop production package configuration', () => {
+  it('declares the workspace package manager for Windows builder discovery', async () => {
+    const [desktopPackage, rootPackage] = await Promise.all([
+      readDesktopFile('package.json'),
+      readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+    ]);
+
+    expect(JSON.parse(desktopPackage)).toMatchObject({
+      packageManager: JSON.parse(rootPackage).packageManager,
+    });
+  });
+
   it('uses a fixed identity, asar, and an explicit runtime allowlist', async () => {
     const config = await readDesktopFile('electron-builder.yml');
 

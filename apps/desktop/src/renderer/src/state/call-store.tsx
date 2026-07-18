@@ -1021,11 +1021,7 @@ export function createCallController(
       peer: createdPeer,
       signaling: options.gateway.signaling,
       roomId: options.room.roomId,
-      microphone: () => {
-        const track = voice!.microphoneTrack;
-        if (track === null) throw new Error('Microphone is unavailable');
-        return track;
-      },
+      microphone: () => voice!.microphoneTrack,
       onError: fail,
       now: options.now,
     });
@@ -1393,7 +1389,9 @@ export function createCallController(
                   }
                   ensureScreenController();
                   const sender = activePeer.audioSender;
-                  if (sender !== null) await voice!.bindSender(sender, true);
+                  if (sender !== null && voice!.microphoneTrack !== null) {
+                    await voice!.bindSender(sender, true);
+                  }
                 })
                 .catch((error: unknown) => {
                   if (
@@ -1755,12 +1753,23 @@ export function createCallController(
       startPromise = (async () => {
         const generation = lifecycleGeneration;
         try {
+          if (!localReady) {
+            assertCurrentLifecycle(generation);
+            await options.gateway.markReady(options.room.roomId);
+            assertCurrentLifecycle(generation);
+            localReady = true;
+            maybeOffer();
+          }
           if (!microphoneAcquired) {
-            const sender =
-              callSession.role === 'creator' ? peer!.audioSender : undefined;
-            await voice!.start(sender ?? undefined);
+            const initialSender = peer!.audioSender;
+            await voice!.start(initialSender ?? undefined);
             assertCurrentLifecycle(generation);
             microphoneAcquired = true;
+            const currentSender = peer!.audioSender;
+            if (initialSender === null && currentSender !== null) {
+              await voice!.bindSender(currentSender);
+              assertCurrentLifecycle(generation);
+            }
             update({ microphoneRetryAvailable: false });
           }
           try {
@@ -1777,13 +1786,6 @@ export function createCallController(
           } catch {
             assertCurrentLifecycle(generation);
             update({ supportsOutputSelection: voice!.supportsOutputSelection });
-          }
-          if (!localReady) {
-            assertCurrentLifecycle(generation);
-            await options.gateway.markReady(options.room.roomId);
-            assertCurrentLifecycle(generation);
-            localReady = true;
-            maybeOffer();
           }
         } catch (error) {
           startPromise = null;
