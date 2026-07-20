@@ -108,6 +108,144 @@ refresh token 按 origin 隔离。打开来自其他服务的邀请时，桌面�
 本地集成的自签证书只适用于隔离测试。桌面手工联调应安装公开 CA 证书，不能
 关闭 TLS 校验。
 
+## 外部 Nginx / OpenResty 反代（1Panel 等）
+
+标准 `deploy/compose.yaml` 使用内置 Caddy 终止 HTTPS。若改用仓库根目录
+`docker-compose.yml` / `docker-compose.external-db.yml`，只发布 server
+（默认 `18080→3000`）和 coturn，则由宿主机上的 Nginx、OpenResty 或 1Panel
+负责 `APP_DOMAIN` 的 HTTPS 与反代。
+
+### 必须反代与禁止反代
+
+| 流量 | 处理 |
+|------|------|
+| `https://${APP_DOMAIN}/`、`/v1/*` | 反代到 `http://127.0.0.1:18080`（或你设置的 `WO_HTTP_PORT`） |
+| `wss://${APP_DOMAIN}/v1/realtime` | **同一 origin**，必须正确升级 WebSocket |
+| `stun:` / `turn:` / `turns:`（`TURN_HOST`） | **不要** HTTP 反代；客户端直连 coturn 的 `3478`/`5349` 与 relay UDP 段 |
+
+桌面与 Web 的「后端服务」均填 canonical HTTPS origin，例如
+`https://wo.example.com`，不要填 `turn.` 子域或带路径的 URL。
+
+### WebSocket 关键配置
+
+信令依赖 `GET /v1/realtime` 的 WebSocket 升级。下列错误几乎都来自反代未正确
+传递 `Upgrade` / `Connection`：
+
+```text
+HTTP/1.1 400 Bad Request
+Invalid Upgrade header
+```
+
+客户端会表现为「实时服务暂不可用」，登录与 REST 仍可能正常。
+
+**禁止**使用 `proxy_set_header Connection $http_connection;`。客户端常见
+`Connection: keep-alive`，上游收不到 `upgrade`，101 握手会失败。
+
+### 推荐配置
+
+在 `http {}`（1Panel 全局配置或站点配置最上方）增加：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+站点 `server` 内（TLS 证书由 1Panel / certbot 管理时可保留其 `listen` 与
+`ssl_certificate` 段，只替换 `location`）：
+
+```nginx
+# WebSocket 信令：单独 location，显式 upgrade
+location = /v1/realtime {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-Port  $server_port;
+
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
+    proxy_connect_timeout 60s;
+    proxy_read_timeout    3600s;
+    proxy_send_timeout    3600s;
+
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    proxy_redirect off;
+}
+
+# Web SPA、REST、其余路径
+location / {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-Port  $server_port;
+
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
+    proxy_connect_timeout 60s;
+    proxy_read_timeout    3600s;
+    proxy_send_timeout    3600s;
+
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    proxy_redirect off;
+
+    client_max_body_size 2m;
+}
+```
+
+将 `18080` 换成实际的 `WO_HTTP_PORT`。`PUBLIC_URL` / `APP_DOMAIN` 必须与对外
+HTTPS 域名一致（例如 `https://wo.example.com`）。
+
+### 无法写 map 时的简化写法
+
+1Panel 若不允许编辑 `http` 级 `map`，把两处 `Connection` 都写成固定值：
+
+```nginx
+proxy_set_header Upgrade    $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+`/v1/realtime` 必须如此；`location /` 使用固定 `"upgrade"` 在本部署下可接受。
+
+### 1Panel 检查清单
+
+- 网站 WebSocket 支持：**开启**
+- `APP_DOMAIN` 证书使用**完整链**（fullchain），不要只挂叶子证书
+- `TURN_HOST` **不要**建 HTTP 反向代理站点；DNS A 记录指向同一公网 IP 即可
+- 防火墙 / 安全组放行：`80/443`（HTTPS）、`3478` TCP+UDP、`5349` TCP+UDP、
+  `49160-49200/UDP`（或你在 `.env` 中配置的 relay 范围）
+
+### 验收
+
+```bash
+# REST
+curl -sS https://wo.example.com/v1/health/ready
+
+# 申请 ticket 时不要带 JSON body（有 body 会 400 VALIDATION_ERROR）
+curl -sS -X POST https://wo.example.com/v1/realtime/ticket \
+  -H "Authorization: Bearer <accessToken>"
+```
+
+使用合法 ticket 连接 `wss://wo.example.com/v1/realtime`，子协议为
+`wo-v1` 与 `ticket.<ticket>`。成功时应为 **101 Switching Protocols**，而不是
+`400 Invalid Upgrade header`。
+
 ## 局域网轻量模式边界
 
 轻量模式不使用本 Compose。创建者的桌面进程只在可用的 RFC1918 私网 IPv4

@@ -8,6 +8,7 @@ import {
   clipboard,
   desktopCapturer,
   ipcMain,
+  net,
   powerMonitor,
   safeStorage,
   shell,
@@ -168,7 +169,12 @@ if (ownsSingleInstance) {
     apiOrigin: runtime.apiOrigin,
     encryption: safeStorage,
   });
-  const http = createMainHttpClient({ apiOrigin: runtime.apiOrigin });
+  // Use Chromium-backed net.fetch so system HTTP proxies (Clash/V2Ray) work.
+  // Node/globalThis.fetch often fails with ECONNRESET through local proxies.
+  const http = createMainHttpClient({
+    apiOrigin: runtime.apiOrigin,
+    fetch: net.fetch.bind(net),
+  });
   const auth = createAuthSessionBroker({ http, sessionStore });
   const realtime = createRealtimeTicketBroker({
     http,

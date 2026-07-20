@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { parseP2pServerConfig } from '@wo/config';
@@ -17,6 +19,7 @@ import { hashPassword } from './modules/auth/password.ts';
 import { createSignalTicketStore } from './modules/signaling/signal-ticket-store.ts';
 
 const DUMMY_LOGIN_PASSWORD = 'not a real account password';
+const BUNDLED_WEB_ROOT = resolve(import.meta.dirname, '../web');
 
 export interface RunningServer {
   readonly app: FastifyInstance;
@@ -90,6 +93,7 @@ export async function startServer(
           screenBitrateRange: config.screen.bitrateRange,
         },
       },
+      webRoot: existsSync(BUNDLED_WEB_ROOT) ? BUNDLED_WEB_ROOT : undefined,
     });
     await app.listen({ host: config.server.host, port: config.server.port });
   } catch (startupError) {

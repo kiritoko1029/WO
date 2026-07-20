@@ -18,13 +18,23 @@ afterEach(async () => {
 });
 
 describe('extra CA installation', () => {
-  it('does nothing without an explicit certificate path', () => {
+  it('adds system certificates without an explicit certificate path', () => {
     const setDefaultCertificates = vi.fn();
 
-    expect(installExtraCaFromEnvironment({}, { setDefaultCertificates })).toBe(
-      false,
-    );
-    expect(setDefaultCertificates).not.toHaveBeenCalled();
+    expect(
+      installExtraCaFromEnvironment(
+        {},
+        {
+          getDefaultCertificates: () => ['default-ca'],
+          getSystemCertificates: () => ['system-ca'],
+          setDefaultCertificates,
+        },
+      ),
+    ).toBe(false);
+    expect(setDefaultCertificates).toHaveBeenCalledWith([
+      'default-ca',
+      'system-ca',
+    ]);
   });
 
   it('appends valid PEM certificates to the existing defaults', async () => {
@@ -39,12 +49,14 @@ describe('extra CA installation', () => {
         { WO_EXTRA_CA_CERTS: path },
         {
           getDefaultCertificates: () => ['existing-ca'],
+          getSystemCertificates: () => ['system-ca'],
           setDefaultCertificates,
         },
       ),
     ).toBe(true);
     expect(setDefaultCertificates).toHaveBeenCalledWith([
       'existing-ca',
+      'system-ca',
       rootCertificates[0],
     ]);
   });

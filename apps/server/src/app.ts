@@ -1,8 +1,11 @@
 import rateLimit from '@fastify/rate-limit';
+import staticFiles from '@fastify/static';
 import websocket from '@fastify/websocket';
 import type { IdentityRepository } from '@wo/database';
 import Fastify, {
   type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
   type FastifyServerOptions,
 } from 'fastify';
 
@@ -79,6 +82,7 @@ export interface AppDependencies {
   readonly authRateLimit?: AuthRateLimit;
   readonly bodyLimit?: number;
   readonly realtime?: RealtimeAppDependencies;
+  readonly webRoot?: string;
 }
 
 export async function createApp(
@@ -196,6 +200,20 @@ export async function createApp(
       roomOperationLimiter.clear();
       realtime.ticketStore.clear();
     });
+  }
+  if (dependencies.webRoot !== undefined) {
+    await app.register(staticFiles, {
+      root: dependencies.webRoot,
+      immutable: true,
+      maxAge: '30d',
+    });
+    const sendWebApp = (
+      _request: FastifyRequest,
+      reply: FastifyReply,
+    ): FastifyReply =>
+      reply.sendFile('index.html', { immutable: false, maxAge: 0 });
+    app.get('/', sendWebApp);
+    app.get('/join/*', sendWebApp);
   }
   return app;
 }

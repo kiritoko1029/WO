@@ -36,9 +36,14 @@ deploy/*
 !deploy/caddy/
 deploy/caddy/*
 !deploy/caddy/Dockerfile
+!deploy/server/
+deploy/server/*
+!deploy/server/entrypoint.sh
 !deploy/coturn/
 deploy/coturn/*
 !deploy/coturn/health-probe.c
+!deploy/coturn/entrypoint.sh
+!deploy/coturn/turnserver.conf
 
 **/test/
 **/coverage/

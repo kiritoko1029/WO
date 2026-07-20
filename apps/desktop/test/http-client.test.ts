@@ -118,6 +118,22 @@ describe('main-process HTTP client', () => {
     );
   });
 
+  it('accepts a same-origin response when response.url is empty (Electron net.fetch)', async () => {
+    const client = createMainHttpClient({
+      apiOrigin: 'https://rtc.example.cn',
+      fetch: vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ value: 'ok' }, { url: '' })),
+    });
+
+    await expect(
+      client.post({
+        path: '/v1/test',
+        responseSchema: valueSchema,
+      }),
+    ).resolves.toEqual({ value: 'ok' });
+  });
+
   it('rejects a response whose final origin differs from startup configuration', async () => {
     const client = createMainHttpClient({
       apiOrigin: 'https://rtc.example.cn',

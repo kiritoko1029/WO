@@ -1,0 +1,95 @@
+name: wo
+
+services:
+  server:
+    image: 195658/wo-server:${WO_IMAGE_TAG:-2026.07.19}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: '3000'
+      PUBLIC_URL: https://${APP_DOMAIN:?APP_DOMAIN is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_HOST: ${POSTGRES_HOST:?POSTGRES_HOST is required}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      TURN_REALM: ${TURN_REALM:?TURN_REALM is required}
+      TURN_HOST: ${TURN_HOST:?TURN_HOST is required}
+      TURN_URLS: ${TURN_URLS:?TURN_URLS is required}
+      TURN_CREDENTIAL_TTL_SECONDS: ${TURN_CREDENTIAL_TTL_SECONDS:-600}
+      ROOM_CODE_TTL_SECONDS: ${ROOM_CODE_TTL_SECONDS:-600}
+      ROOM_DISCONNECT_GRACE_SECONDS: ${ROOM_DISCONNECT_GRACE_SECONDS:-120}
+      SCREEN_LEASE_TTL_SECONDS: ${SCREEN_LEASE_TTL_SECONDS:-15}
+      SCREEN_BITRATE_MIN: ${SCREEN_BITRATE_MIN:-1000000}
+      SCREEN_BITRATE_MAX: ${SCREEN_BITRATE_MAX:-10000000}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/v1/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    ports:
+      - ${WO_HTTP_PORT:-18080}:3000
+    networks:
+      - edge
+    secrets:
+      - jwt_access_secret
+      - postgres_password
+      - turn_shared_secret
+
+  coturn:
+    image: 195658/wo-coturn:${WO_IMAGE_TAG:-2026.07.19}
+    restart: unless-stopped
+    environment:
+      TURN_EXTERNAL_IP: ${PUBLIC_IPV4:?PUBLIC_IPV4 is required}
+      TURN_LISTEN_PORT: '3478'
+      TURN_TLS_LISTEN_PORT: '5349'
+      TURN_REALM: ${TURN_REALM:?TURN_REALM is required}
+      TURN_RELAY_MIN_PORT: ${TURN_RELAY_MIN_PORT:-49160}
+      TURN_RELAY_MAX_PORT: ${TURN_RELAY_MAX_PORT:-49200}
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" >/dev/null 2>&1',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - ${TURN_PORT:-3478}:3478/tcp
+      - ${TURN_PORT:-3478}:3478/udp
+      - ${TURN_TLS_PORT:-5349}:5349/tcp
+      - ${TURN_TLS_PORT:-5349}:5349/udp
+      - ${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
+    networks:
+      - turn_edge
+    secrets:
+      - turn_shared_secret
+      - turn_tls_cert
+      - turn_tls_key
+    tmpfs:
+      - /run/wo-turn:uid=65534,gid=65533,mode=0700
+
+networks:
+  edge: {}
+  turn_edge: {}
+
+secrets:
+  jwt_access_secret:
+    environment: JWT_ACCESS_SECRET
+  postgres_password:
+    environment: POSTGRES_PASSWORD
+  turn_shared_secret:
+    environment: TURN_SHARED_SECRET
+  turn_tls_cert:
+    file: ${TURN_TLS_CERT_FILE:-./turn_tls_cert.pem}
+  turn_tls_key:
+    file: ${TURN_TLS_KEY_FILE:-./turn_tls_key.pem}

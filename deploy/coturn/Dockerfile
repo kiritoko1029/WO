@@ -8,3 +8,8 @@ RUN cc -O2 -Wall -Wextra /tmp/health-probe.c -lcrypto -o /tmp/turn-healthcheck
 FROM coturn/coturn:4.14.0-r0-alpine
 
 COPY --from=probe-build /tmp/turn-healthcheck /usr/local/bin/turn-healthcheck
+COPY --chmod=0755 deploy/coturn/entrypoint.sh /opt/wo/turn-entrypoint.sh
+COPY deploy/coturn/turnserver.conf /etc/coturn/turnserver.wo.conf
+
+USER root
+ENTRYPOINT ["/bin/sh", "/opt/wo/turn-entrypoint.sh"]

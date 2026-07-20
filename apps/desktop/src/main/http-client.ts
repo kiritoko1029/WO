@@ -282,9 +282,15 @@ export function createMainHttpClient(
           );
         }
 
+        // Electron net.fetch may leave response.url empty even for successful
+        // same-origin responses; fall back to the request URL in that case.
         let responseOrigin: string;
         try {
-          responseOrigin = new URL(response.url).origin;
+          const effectiveUrl =
+            typeof response.url === 'string' && response.url.length > 0
+              ? response.url
+              : requestUrl.href;
+          responseOrigin = new URL(effectiveUrl).origin;
         } catch {
           responseOrigin = '';
         }

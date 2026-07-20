@@ -9,6 +9,7 @@ import {
   clipboard,
   desktopCapturer,
   ipcMain,
+  net,
   safeStorage,
   shell,
   systemPreferences,
@@ -274,7 +275,10 @@ if (ownsSingleInstance) {
     apiOrigin: runtime.apiOrigin,
     encryption: safeStorage,
   });
-  const http = createMainHttpClient({ apiOrigin: runtime.apiOrigin });
+  const http = createMainHttpClient({
+    apiOrigin: runtime.apiOrigin,
+    fetch: net.fetch.bind(net),
+  });
   const auth = createAuthSessionBroker({ http, sessionStore });
   const realtime = createRealtimeTicketBroker({
     http,
