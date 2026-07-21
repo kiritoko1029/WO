@@ -486,7 +486,7 @@ export const screenTargetBitrateSchema = z
   .number()
   .int()
   .min(1_000_000)
-  .max(10_000_000);
+  .max(20_000_000);
 export const screenSetTargetBitratePayloadSchema = z
   .object({
     roomId: roomIdSchema,

@@ -17,7 +17,7 @@ describe('screen encoding policy', () => {
 
   test.each([
     [100_000, 1_000_000],
-    [15_000_000, 10_000_000],
+    [25_000_000, 20_000_000],
   ])('clamps %i bps to %i bps', async (target, expected) => {
     const { buildScreenEncodings } = await import('../src/screen-encoding.js');
 
@@ -131,8 +131,8 @@ describe('screen encoding policy', () => {
   test.each([
     [0, 1_000_000],
     [999_999, 1_000_000],
-    [10_000_001, 10_000_000],
-    [20_000_000, 10_000_000],
+    [20_000_001, 20_000_000],
+    [30_000_000, 20_000_000],
   ])('clamps finite hot-update target %i to %i', async (target, expected) => {
     const { updateEncodingBitrate } = await import('../src/screen-encoding.js');
     const input = [

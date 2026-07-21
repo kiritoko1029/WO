@@ -6,8 +6,34 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0071e3" />
     <title>WO</title>
+    <script>
+      (function () {
+        try {
+          var key = 'wo-theme';
+          var pref = localStorage.getItem(key) || 'system';
+          if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
+          var dark =
+            pref === 'dark' ||
+            (pref === 'system' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var resolved = dark ? 'dark' : 'light';
+          var root = document.documentElement;
+          root.dataset.theme = resolved;
+          root.dataset.themePref = pref;
+          root.style.colorScheme = resolved;
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          if (meta) {
+            meta.setAttribute(
+              'content',
+              pref === 'system' ? 'light dark' : resolved,
+            );
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

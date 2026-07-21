@@ -30,7 +30,7 @@ const validP2pEnv = (): Record<string, string> => ({
   ROOM_DISCONNECT_GRACE_SECONDS: '120',
   SCREEN_LEASE_TTL_SECONDS: '15',
   SCREEN_BITRATE_MIN: '1000000',
-  SCREEN_BITRATE_MAX: '10000000',
+  SCREEN_BITRATE_MAX: '20000000',
 });
 
 const productionP2pEnv = (): Record<string, string> => ({
@@ -70,6 +70,13 @@ describe('parseP2pServerConfig', () => {
       auth: {
         jwtAccessSecret: 'test-access-secret-at-least-32-characters',
       },
+      email: {
+        domainAllowlist: [],
+        verificationRequired: false,
+        codeTtlSeconds: 600,
+        superAdminEmails: [],
+        smtp: null,
+      },
       turn: {
         sharedSecret: 'test-turn-secret-at-least-32-characters',
         realm: 'rtc.example.test',
@@ -85,7 +92,7 @@ describe('parseP2pServerConfig', () => {
       room: { codeTtlSeconds: 600, disconnectGraceSeconds: 120 },
       screen: {
         leaseTtlSeconds: 15,
-        bitrateRange: { min: 1_000_000, max: 10_000_000 },
+        bitrateRange: { min: 1_000_000, max: 20_000_000 },
       },
     });
     expect(config).not.toHaveProperty('redis');
@@ -159,6 +166,29 @@ describe('parseP2pServerConfig', () => {
     expect(error.message).toContain(field);
     expect(error.message).not.toContain(value);
     expect(JSON.stringify(error.issues)).not.toContain(value);
+  });
+
+  test('parses SUPER_ADMIN_EMAILS as a normalized unique list', () => {
+    const config = parseP2pServerConfig({
+      ...validP2pEnv(),
+      SUPER_ADMIN_EMAILS: ' Admin@Example.com ,ops@example.com,admin@example.com ',
+    });
+
+    expect(config.email.superAdminEmails).toEqual([
+      'admin@example.com',
+      'ops@example.com',
+    ]);
+    expect(Object.isFrozen(config.email.superAdminEmails)).toBe(true);
+  });
+
+  test('rejects invalid SUPER_ADMIN_EMAILS entries', () => {
+    const error = captureError({
+      ...validP2pEnv(),
+      SUPER_ADMIN_EMAILS: 'not-an-email',
+    });
+    expect(error.issues).toContainEqual(
+      expect.objectContaining({ field: 'SUPER_ADMIN_EMAILS' }),
+    );
   });
 
   test('preserves valid P2P secret bytes exactly', () => {
@@ -626,7 +656,7 @@ describe('parseP2pServerConfig', () => {
     ['SERVER_PORT', '0'],
     ['SERVER_PORT', '65536'],
     ['SCREEN_BITRATE_MIN', '999999'],
-    ['SCREEN_BITRATE_MAX', '10000001'],
+    ['SCREEN_BITRATE_MAX', '20000001'],
   ])('rejects out-of-range numeric field %s=%s', (field, value) => {
     const env = validP2pEnv();
     env[field] = value;

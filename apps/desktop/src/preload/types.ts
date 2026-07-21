@@ -1,6 +1,11 @@
 import type {
+  AuthChangePasswordBody,
+  AuthConfirmEmailChangeBody,
   AuthLoginBody,
   AuthRegisterBody,
+  AuthRequestEmailChangeBody,
+  AuthResendVerificationBody,
+  AuthVerifyEmailBody,
   JoinIntent,
   PublicAuthUser,
   ServerJoinIntent,
@@ -14,6 +19,10 @@ export interface PublicAuthSession {
   readonly accessToken: string;
   readonly accessTokenExpiresAt: number;
 }
+
+export type AuthRegisterResult =
+  | Readonly<{ kind: 'session'; session: PublicAuthSession }>
+  | Readonly<{ kind: 'verification_required'; email: string }>;
 
 export interface RealtimeConnectionGrant extends SignalTicketResponse {
   readonly endpoint: string;
@@ -36,8 +45,19 @@ export interface ScreenPermissionSnapshot {
 
 export interface DesktopApi {
   readonly auth: {
-    register(input: AuthRegisterBody): Promise<PublicAuthSession>;
+    register(input: AuthRegisterBody): Promise<AuthRegisterResult>;
     login(input: AuthLoginBody): Promise<PublicAuthSession>;
+    verifyEmail(input: AuthVerifyEmailBody): Promise<PublicAuthSession>;
+    resendVerification(
+      input: AuthResendVerificationBody,
+    ): Promise<Readonly<{ email: string }>>;
+    changePassword(input: AuthChangePasswordBody): Promise<void>;
+    requestEmailChange(
+      input: AuthRequestEmailChangeBody,
+    ): Promise<Readonly<{ email: string }>>;
+    confirmEmailChange(
+      input: AuthConfirmEmailChangeBody,
+    ): Promise<PublicAuthSession>;
     refresh(): Promise<PublicAuthSession>;
     logout(): Promise<void>;
   };
@@ -56,8 +76,23 @@ export interface DesktopBridge {
   readonly auth: {
     register(
       input: AuthRegisterBody,
-    ): Promise<DesktopIpcEnvelope<PublicAuthSession>>;
+    ): Promise<DesktopIpcEnvelope<AuthRegisterResult>>;
     login(input: AuthLoginBody): Promise<DesktopIpcEnvelope<PublicAuthSession>>;
+    verifyEmail(
+      input: AuthVerifyEmailBody,
+    ): Promise<DesktopIpcEnvelope<PublicAuthSession>>;
+    resendVerification(
+      input: AuthResendVerificationBody,
+    ): Promise<DesktopIpcEnvelope<Readonly<{ email: string }>>>;
+    changePassword(
+      input: AuthChangePasswordBody,
+    ): Promise<DesktopIpcEnvelope<null>>;
+    requestEmailChange(
+      input: AuthRequestEmailChangeBody,
+    ): Promise<DesktopIpcEnvelope<Readonly<{ email: string }>>>;
+    confirmEmailChange(
+      input: AuthConfirmEmailChangeBody,
+    ): Promise<DesktopIpcEnvelope<PublicAuthSession>>;
     refresh(): Promise<DesktopIpcEnvelope<PublicAuthSession>>;
     logout(): Promise<DesktopIpcEnvelope<null>>;
   };

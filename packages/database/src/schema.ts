@@ -77,9 +77,41 @@ export const refreshSessions = pgTable(
   ],
 );
 
+export const emailVerificationChallenges = pgTable(
+  'email_verification_challenges',
+  {
+    id: uuid('id').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    emailNormalized: text('email_normalized').notNull(),
+    purpose: text('purpose').notNull(),
+    codeHash: varchar('code_hash', { length: 64 }).notNull(),
+    expiresAt: timestamp('expires_at', {
+      mode: 'date',
+      withTimezone: true,
+    }).notNull(),
+    consumedAt: timestamp('consumed_at', { mode: 'date', withTimezone: true }),
+    createdAt: timestamp('created_at', {
+      mode: 'date',
+      withTimezone: true,
+    }).notNull(),
+  },
+  (table) => [
+    index('email_verification_challenges_user_purpose_index').on(
+      table.userId,
+      table.purpose,
+    ),
+    index('email_verification_challenges_email_index').on(
+      table.emailNormalized,
+    ),
+  ],
+);
+
 export const databaseSchema = {
   users,
   authIdentities,
   passwordCredentials,
   refreshSessions,
+  emailVerificationChallenges,
 } as const;

@@ -771,7 +771,7 @@ describe('media semantic validation', () => {
 });
 
 describe('screen sharing protocol', () => {
-  test.each([1_000_000, 10_000_000])(
+  test.each([1_000_000, 20_000_000])(
     'accepts target bitrate boundary %i',
     (bitrate) => {
       expect(
@@ -786,7 +786,7 @@ describe('screen sharing protocol', () => {
     },
   );
 
-  test.each([999_999, 10_000_001, 1_500_000.5])(
+  test.each([999_999, 20_000_001, 1_500_000.5])(
     'rejects invalid target bitrate %s',
     (bitrate) => {
       expect(

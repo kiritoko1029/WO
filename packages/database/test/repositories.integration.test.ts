@@ -82,6 +82,9 @@ function createSessionRepository(
       repository.findRefreshSessionUserId(tokenHash),
     revokeRefreshTokenFamily: (input) =>
       repository.revokeRefreshTokenFamily(input),
+    listActiveSessionSummaries: () => repository.listActiveSessionSummaries(),
+    revokeAllSessionsForUser: (userId) =>
+      repository.revokeAllSessionsForUser(userId),
   };
 }
 
@@ -183,7 +186,7 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
         SELECT count(*)::int AS migration_count
         FROM wo_meta.schema_migrations
       `;
-    expect(migration_count).toBe(1);
+    expect(migration_count).toBe(2);
   }, 60_000);
 
   test('journals the migration once and skips an identical checksum', async () => {

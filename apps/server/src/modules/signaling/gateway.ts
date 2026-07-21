@@ -72,6 +72,7 @@ export interface SignalingGatewayDependencies {
 
 export interface SignalingGateway {
   processIntent(intent: RoomIntent): void;
+  listConnections(): readonly SignalingConnection[];
   shutdown(): void;
 }
 
@@ -837,6 +838,9 @@ export function registerSignalingGateway(
 
   return Object.freeze({
     processIntent,
+    listConnections() {
+      return connectionRegistry.listConnections();
+    },
     shutdown() {
       if (shuttingDown) {
         return;

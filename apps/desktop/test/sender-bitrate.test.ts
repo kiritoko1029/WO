@@ -120,8 +120,8 @@ describe('one screen sender bitrate transaction', () => {
   test.each([
     [0, 1_000_000],
     [999_999, 1_000_000],
-    [10_000_001, 10_000_000],
-    [20_000_000, 10_000_000],
+    [20_000_001, 20_000_000],
+    [30_000_000, 20_000_000],
   ])('clamps %i bps to the server range %i', async (requested, expected) => {
     const sender = createSender(() =>
       parameters('clamp-transaction', [{ rid: 'f', scaleResolutionDownBy: 1 }]),

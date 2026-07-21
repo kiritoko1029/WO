@@ -13,6 +13,10 @@ import { registerAuthentication } from './http/authenticate.ts';
 import { registerErrorHandler } from './http/errors.ts';
 import type { AccessTokenService } from './modules/auth/access-token.ts';
 import {
+  registerAdminRoutes,
+  type AdminRouteDependencies,
+} from './modules/admin/admin-routes.ts';
+import {
   registerAuthRoutes,
   type AuthRateLimit,
 } from './modules/auth/auth-routes.ts';
@@ -71,6 +75,10 @@ export interface RealtimeAppDependencies {
   readonly joinAttemptLimiter?: JoinAttemptLimiter;
   readonly gatewayOptions?: SignalingGatewayOptions;
   readonly createFreshIce?: CreateFreshIce;
+  readonly onRealtimeReady?: (handles: {
+    readonly listConnections: () => readonly import('./modules/signaling/connection-registry.ts').SignalingConnection[];
+    readonly roomRegistry: import('./modules/rooms/room-types.ts').RoomRegistry;
+  }) => void;
 }
 
 export interface AppDependencies {
@@ -83,6 +91,7 @@ export interface AppDependencies {
   readonly bodyLimit?: number;
   readonly realtime?: RealtimeAppDependencies;
   readonly webRoot?: string;
+  readonly admin?: AdminRouteDependencies;
 }
 
 export async function createApp(
@@ -114,6 +123,10 @@ export async function createApp(
     authService: dependencies.authService,
     rateLimit: dependencies.authRateLimit ?? DEFAULT_AUTH_RATE_LIMIT,
   });
+
+  if (dependencies.admin !== undefined) {
+    registerAdminRoutes(app, dependencies.admin);
+  }
 
   if (dependencies.realtime !== undefined) {
     const realtime = dependencies.realtime;
@@ -192,6 +205,10 @@ export async function createApp(
       ticketStore: realtime.ticketStore,
       rateLimiter: ticketIssueLimiter,
     });
+    realtime.onRealtimeReady?.({
+      listConnections: () => gateway.listConnections(),
+      roomRegistry,
+    });
     app.addHook('onClose', async () => {
       gateway.shutdown();
       roomRegistry.clear();
@@ -212,8 +229,15 @@ export async function createApp(
       reply: FastifyReply,
     ): FastifyReply =>
       reply.sendFile('index.html', { immutable: false, maxAge: 0 });
+    const sendAdminApp = (
+      _request: FastifyRequest,
+      reply: FastifyReply,
+    ): FastifyReply =>
+      reply.sendFile('admin.html', { immutable: false, maxAge: 0 });
     app.get('/', sendWebApp);
     app.get('/join/*', sendWebApp);
+    app.get('/admin', sendAdminApp);
+    app.get('/admin/*', sendAdminApp);
   }
   return app;
 }

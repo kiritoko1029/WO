@@ -162,10 +162,10 @@ describe('producer bitrate controller', () => {
       .mockReturnValueOnce('2026-07-15T12:00:00.025Z');
 
     await expect(
-      applyProducerBitrateWithEvent(producer, 12_000_000, now),
+      applyProducerBitrateWithEvent(producer, 25_000_000, now),
     ).resolves.toEqual({
-      requestedBitrateBps: 12_000_000,
-      clampedBitrateBps: 10_000_000,
+      requestedBitrateBps: 25_000_000,
+      clampedBitrateBps: 20_000_000,
       requestedAt: '2026-07-15T12:00:00.000Z',
       appliedAt: '2026-07-15T12:00:00.025Z',
       success: true,
@@ -175,7 +175,7 @@ describe('producer bitrate controller', () => {
       producerIdUnchanged: true,
     });
     expect(sender.setParameters).toHaveBeenCalledWith({
-      encodings: [encodings[0], { ...encodings[1], maxBitrate: 10_000_000 }],
+      encodings: [encodings[0], { ...encodings[1], maxBitrate: 20_000_000 }],
     });
   });
 

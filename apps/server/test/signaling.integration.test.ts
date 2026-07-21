@@ -139,6 +139,7 @@ async function createFixture(
             ? null
             : {
                 emailNormalized: `${userId}@example.test`,
+                verifiedAt: new Date(),
                 user: {
                   id: userId,
                   displayName: user.displayName,

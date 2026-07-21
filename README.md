@@ -47,7 +47,7 @@ node deploy/scripts/smoke.mjs --env-file=deploy/.env
 
 ## 桌面端连接自建服务
 
-桌面客户端在登录页和登录后的首页都显示“后端服务”。填写的值必须是规范的
+桌面客户端在登录页和登录后的首页都显示“服务器”。填写的值必须是规范的
 HTTPS origin：
 
 ```text

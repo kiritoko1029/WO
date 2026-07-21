@@ -17,6 +17,16 @@ function cloneBridge(bridge: DesktopBridge): DesktopBridge {
       register: async (input) =>
         structuredClone(await bridge.auth.register(input)),
       login: async (input) => structuredClone(await bridge.auth.login(input)),
+      verifyEmail: async (input) =>
+        structuredClone(await bridge.auth.verifyEmail(input)),
+      resendVerification: async (input) =>
+        structuredClone(await bridge.auth.resendVerification(input)),
+      changePassword: async (input) =>
+        structuredClone(await bridge.auth.changePassword(input)),
+      requestEmailChange: async (input) =>
+        structuredClone(await bridge.auth.requestEmailChange(input)),
+      confirmEmailChange: async (input) =>
+        structuredClone(await bridge.auth.confirmEmailChange(input)),
       refresh: async () => structuredClone(await bridge.auth.refresh()),
       logout: async () => structuredClone(await bridge.auth.logout()),
     },
@@ -51,6 +61,11 @@ function createHarness() {
     login: vi.fn().mockResolvedValue({ kind: 'login' }),
     refresh: vi.fn().mockResolvedValue({ kind: 'refresh' }),
     logout: vi.fn().mockResolvedValue(undefined),
+      verifyEmail: vi.fn(),
+      resendVerification: vi.fn(),
+      changePassword: vi.fn(),
+      requestEmailChange: vi.fn(),
+      confirmEmailChange: vi.fn(),
   };
   const realtime = {
     issueTicket: vi

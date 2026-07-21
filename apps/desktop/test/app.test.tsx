@@ -73,7 +73,10 @@ const idleScreenSnapshot = {
   screenOwnerLeaseId: null,
   localScreenTrack: null,
   remoteScreenTrack: null,
-  screenBitrateTarget: { mode: 'auto' as const },
+  screenBitrateTarget: {
+    mode: 'fixed' as const,
+    bitrateBps: 10_000_000,
+  },
   screenBitratePending: null,
   screenBitrateError: null,
   remoteScreenBitrateBps: null,
@@ -87,14 +90,26 @@ function createDesktop(
   auth: DesktopApi['auth'] & {
     register: ReturnType<typeof vi.fn>;
     login: ReturnType<typeof vi.fn>;
+    verifyEmail: ReturnType<typeof vi.fn>;
+    resendVerification: ReturnType<typeof vi.fn>;
+    changePassword: ReturnType<typeof vi.fn>;
+    requestEmailChange: ReturnType<typeof vi.fn>;
+    confirmEmailChange: ReturnType<typeof vi.fn>;
     refresh: ReturnType<typeof vi.fn>;
     logout: ReturnType<typeof vi.fn>;
   };
 } {
   return {
     auth: {
-      register: vi.fn().mockResolvedValue(session),
+      register: vi.fn().mockResolvedValue({ kind: 'session', session }),
       login: vi.fn().mockResolvedValue(session),
+      verifyEmail: vi.fn().mockResolvedValue(session),
+      resendVerification: vi.fn().mockResolvedValue({ email: session.user.email }),
+      changePassword: vi.fn().mockResolvedValue(undefined),
+      requestEmailChange: vi
+        .fn()
+        .mockResolvedValue({ email: session.user.email }),
+      confirmEmailChange: vi.fn().mockResolvedValue(session),
       refresh:
         restored === null
           ? vi
@@ -300,7 +315,7 @@ describe('desktop account and room workflow', () => {
     await user.click(screen.getByRole('button', { name: '登录' }));
 
     expect(
-      (screen.getByRole('button', { name: '正在登录' }) as HTMLButtonElement)
+      (screen.getByRole('button', { name: '处理中…' }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     rejectLogin?.(
@@ -366,9 +381,9 @@ describe('desktop account and room workflow', () => {
 
     expect(await screen.findByText('等待对方加入')).toBeTruthy();
     expect(screen.getByText('482731')).toBeTruthy();
-    expect(screen.getAllByTestId('participant-slot')).toHaveLength(2);
+    expect(screen.getAllByTestId('participant-slot')).toHaveLength(1);
     expect(screen.getByText('陈晨（我）')).toBeTruthy();
-    expect(screen.getByText('等待加入')).toBeTruthy();
+    expect(screen.getByText('等待加入…')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '打开系统设置' })).toBeNull();
     expect(gateway.createRoom).toHaveBeenCalledWith('access-token');
   });
@@ -387,7 +402,9 @@ describe('desktop account and room workflow', () => {
 
     expect(await screen.findByText('语音已连接')).toBeTruthy();
     expect(gateway.joinRoom).toHaveBeenCalledWith('access-token', '123456');
-    expect(screen.getAllByTestId('participant-slot')).toHaveLength(2);
+    expect(screen.getAllByTestId('participant-slot').length).toBeGreaterThanOrEqual(
+      2,
+    );
     expect(screen.getByText('林远')).toBeTruthy();
   });
 

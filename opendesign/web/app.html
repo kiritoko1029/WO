@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>WO · Web</title>
+  <script>
+    (function () {
+      try {
+        var m = localStorage.getItem('wo-theme') || 'system';
+        var dark = m === 'dark' || (m !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.themePref = m === 'light' || m === 'dark' ? m : 'system';
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="../shared/tokens.css" />
+  <link rel="stylesheet" href="../shared/app.css" />
+  <script src="../shared/icons.js"></script>
+  <script src="../shared/theme.js"></script>
+  <style>
+    body { min-height: 100vh; }
+    .web-app { min-height: 100vh; display: flex; flex-direction: column; }
+    .web-app #app-root { flex: 1; min-height: 0; }
+    .web-app.room-mode { background: var(--stage-bg); }
+    .web-skip {
+      position: absolute; left: -999px; top: 8px;
+      background: var(--accent); color: var(--accent-on); padding: 8px 12px; border-radius: 8px; z-index: 20;
+    }
+    .web-skip:focus { left: 8px; }
+    @media (max-width: 720px) {
+      .web-topbar .hide-sm { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="web-skip" href="#app-root">跳到内容</a>
+  <div class="web-app" id="web-shell" data-od-id="web-app">
+    <header class="web-topbar" id="web-topbar" data-od-id="web-topbar">
+      <a class="product-lockup compact" href="./landing.html" data-od-id="web-brand">
+        <span class="mark" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"/></svg>
+        </span>
+        <span>WO</span>
+      </a>
+      <nav class="hide-sm" aria-label="产品导航">
+        <a href="./landing.html">产品</a>
+        <a href="./app.html">Web 应用</a>
+        <a href="../desktop/app.html">桌面端</a>
+      </nav>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <a class="btn btn-ghost btn-sm" href="./admin.html">管理</a>
+        <a class="btn btn-primary btn-sm btn-pill" href="./landing.html#cta">下载客户端</a>
+      </div>
+    </header>
+    <div id="app-root" data-od-id="web-root"></div>
+  </div>
+
+  <script src="../shared/app-core.js"></script>
+  <script>
+    (function () {
+      if (window.WOTheme) window.WOTheme.mountCorner();
+
+      const params = new URLSearchParams(location.search);
+      const start = params.get('start') || 'auth';
+      const screen = params.get('screen') || 'idle';
+      const initial = {
+        route: ['auth', 'home', 'room'].includes(start) ? start : 'auth',
+        user: start === 'auth' ? null : { displayName: '陈响', email: 'chen@example.com' },
+        roomCode: start === 'room' ? (params.get('code') || '482913') : '',
+        screen: start === 'room' && (screen === 'sharing' || screen === 'picking') ? screen : 'idle',
+        displayName: '陈响',
+        email: 'chen@example.com',
+        password: 'password123',
+      };
+
+      const root = document.getElementById('app-root');
+      const shell = document.getElementById('web-shell');
+      const topbar = document.getElementById('web-topbar');
+
+      window.WOApp.mount(root, initial, (state) => {
+        const inRoom = state.route === 'room';
+        shell.classList.toggle('room-mode', inRoom);
+        topbar.style.display = inRoom ? 'none' : '';
+        if (state.route === 'auth') {
+          return window.WOApp.authView(state, {
+            extraFooter: `<p class="auth-footer-link">还没有客户端？<a href="./landing.html" style="color:var(--accent);font-weight:500;">了解 WO</a></p>`
+          });
+        }
+        if (state.route === 'home') return window.WOApp.homeView(state);
+        return window.WOApp.roomView(state);
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -1,4 +1,8 @@
 import {
+  authChangePasswordBodySchema,
+  authChangePasswordResponseSchema,
+  authConfirmEmailChangeBodySchema,
+  authEmailChangeRequestedResponseSchema,
   authLoginBodySchema,
   authLoginResponseSchema,
   authLogoutBodySchema,
@@ -7,12 +11,17 @@ import {
   authRefreshResponseSchema,
   authRegisterBodySchema,
   authRegisterResponseSchema,
+  authRequestEmailChangeBodySchema,
+  authResendVerificationBodySchema,
+  authResponseSchema,
+  authVerifyEmailBodySchema,
   opaqueTokenSchema,
   signalTicketResponseSchema,
   type AuthResponse,
 } from '@wo/protocol';
 
 import type {
+  AuthRegisterResult,
   CaptureSourceSummary,
   DesktopApi,
   PublicAuthSession,
@@ -258,18 +267,84 @@ export function createBrowserDesktopApi(
     storage.setItem(REFRESH_TOKEN_KEY, response.refreshToken);
     return publicSession(response, now());
   };
+  const asAuthResponse = (value: unknown): AuthResponse =>
+    authResponseSchema.parse(value);
+
+  const refresh = (): Promise<PublicAuthSession> => {
+    if (refreshInFlight !== null) return refreshInFlight;
+    const operation = exclusive(async () => {
+      const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
+      if (refreshToken === null) {
+        throw new BrowserApiError(
+          null,
+          'AUTH_REQUIRED',
+          'Authentication is required',
+        );
+      }
+      let body: unknown;
+      try {
+        body = authRefreshBodySchema.parse({ refreshToken });
+      } catch (error) {
+        storage.removeItem(REFRESH_TOKEN_KEY);
+        throw new BrowserApiError(
+          null,
+          'AUTH_REQUIRED',
+          'Authentication is required',
+          { cause: error },
+        );
+      }
+      try {
+        return persistResponse(
+          await post('/v1/auth/refresh', authRefreshResponseSchema, body),
+        );
+      } catch (error) {
+        if (error instanceof BrowserApiError && error.status === 401) {
+          storage.removeItem(REFRESH_TOKEN_KEY);
+        }
+        throw error;
+      }
+    });
+    refreshInFlight = operation;
+    void operation.then(
+      () => {
+        if (refreshInFlight === operation) refreshInFlight = null;
+      },
+      () => {
+        if (refreshInFlight === operation) refreshInFlight = null;
+      },
+    );
+    return operation;
+  };
+
+  const authorizedPost = async <Value>(
+    path: string,
+    schema: RuntimeSchema<Value>,
+    body: unknown,
+  ): Promise<Value> => {
+    const session = await refresh();
+    return post(path, schema, body, session.accessToken);
+  };
 
   const auth: DesktopApi['auth'] = Object.freeze({
     register: (input) =>
-      exclusiveNonRefresh(async () =>
-        persistResponse(
-          await post(
-            '/v1/auth/register',
-            authRegisterResponseSchema,
-            authRegisterBodySchema.parse(input),
-          ),
-        ),
-      ),
+      exclusiveNonRefresh(async (): Promise<AuthRegisterResult> => {
+        const response = await post(
+          '/v1/auth/register',
+          authRegisterResponseSchema,
+          authRegisterBodySchema.parse(input),
+        );
+        if (
+          'status' in response &&
+          response.status === 'verification_required'
+        ) {
+          return Object.freeze({
+            kind: 'verification_required' as const,
+            email: response.email,
+          });
+        }
+        const session = persistResponse(asAuthResponse(response));
+        return Object.freeze({ kind: 'session' as const, session });
+      }),
     login: (input) =>
       exclusiveNonRefresh(async () =>
         persistResponse(
@@ -280,51 +355,53 @@ export function createBrowserDesktopApi(
           ),
         ),
       ),
-    refresh: () => {
-      if (refreshInFlight !== null) return refreshInFlight;
-      const operation = exclusive(async () => {
-        const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
-        if (refreshToken === null) {
-          throw new BrowserApiError(
-            null,
-            'AUTH_REQUIRED',
-            'Authentication is required',
-          );
-        }
-        let body: unknown;
-        try {
-          body = authRefreshBodySchema.parse({ refreshToken });
-        } catch (error) {
-          storage.removeItem(REFRESH_TOKEN_KEY);
-          throw new BrowserApiError(
-            null,
-            'AUTH_REQUIRED',
-            'Authentication is required',
-            { cause: error },
-          );
-        }
-        try {
-          return persistResponse(
-            await post('/v1/auth/refresh', authRefreshResponseSchema, body),
-          );
-        } catch (error) {
-          if (error instanceof BrowserApiError && error.status === 401) {
-            storage.removeItem(REFRESH_TOKEN_KEY);
-          }
-          throw error;
-        }
-      });
-      refreshInFlight = operation;
-      void operation.then(
-        () => {
-          if (refreshInFlight === operation) refreshInFlight = null;
-        },
-        () => {
-          if (refreshInFlight === operation) refreshInFlight = null;
-        },
-      );
-      return operation;
-    },
+    verifyEmail: (input) =>
+      exclusiveNonRefresh(async () =>
+        persistResponse(
+          await post(
+            '/v1/auth/email/verify',
+            authResponseSchema,
+            authVerifyEmailBodySchema.parse(input),
+          ),
+        ),
+      ),
+    resendVerification: (input) =>
+      exclusiveNonRefresh(async () => {
+        const response = await post(
+          '/v1/auth/email/resend',
+          authEmailChangeRequestedResponseSchema,
+          authResendVerificationBodySchema.parse(input),
+        );
+        return Object.freeze({ email: response.email });
+      }),
+    changePassword: (input) =>
+      exclusiveNonRefresh(async () => {
+        await authorizedPost(
+          '/v1/auth/password',
+          authChangePasswordResponseSchema,
+          authChangePasswordBodySchema.parse(input),
+        );
+      }),
+    requestEmailChange: (input) =>
+      exclusiveNonRefresh(async () => {
+        const response = await authorizedPost(
+          '/v1/auth/email/change/request',
+          authEmailChangeRequestedResponseSchema,
+          authRequestEmailChangeBodySchema.parse(input),
+        );
+        return Object.freeze({ email: response.email });
+      }),
+    confirmEmailChange: (input) =>
+      exclusiveNonRefresh(async () =>
+        persistResponse(
+          await authorizedPost(
+            '/v1/auth/email/change/confirm',
+            authResponseSchema,
+            authConfirmEmailChangeBodySchema.parse(input),
+          ),
+        ),
+      ),
+    refresh,
     logout: () =>
       exclusiveNonRefresh(async () => {
         const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);

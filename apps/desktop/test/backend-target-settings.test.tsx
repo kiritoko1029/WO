@@ -43,7 +43,7 @@ describe('backend target settings', () => {
     render(<BackendTargetSettings />);
 
     await screen.findByText('https://old.example.cn');
-    await user.click(screen.getByRole('button', { name: '配置后端服务' }));
+    await user.click(screen.getByRole('button', { name: '配置服务器' }));
     const input = screen.getByLabelText('HTTPS 服务地址');
     await user.clear(input);
     await user.type(input, 'https://next.example.cn');
@@ -65,7 +65,7 @@ describe('backend target settings', () => {
     render(<BackendTargetSettings />);
 
     await screen.findByText('https://managed.example.cn');
-    await user.click(screen.getByRole('button', { name: '配置后端服务' }));
+    await user.click(screen.getByRole('button', { name: '配置服务器' }));
 
     expect(screen.getByText('由 WO_API_ORIGIN 管理')).toBeTruthy();
     expect(
@@ -97,7 +97,7 @@ describe('backend target settings', () => {
     render(<BackendTargetSettings />);
 
     await screen.findByText('https://old.example.cn');
-    await user.click(screen.getByRole('button', { name: '配置后端服务' }));
+    await user.click(screen.getByRole('button', { name: '配置服务器' }));
     const input = screen.getByLabelText('HTTPS 服务地址');
     await user.clear(input);
     await user.type(input, 'http://invalid.example.cn');
@@ -122,7 +122,7 @@ describe('backend target settings', () => {
     render(<BackendTargetSettings />);
 
     await screen.findByText('无法读取服务地址');
-    await user.click(screen.getByRole('button', { name: '配置后端服务' }));
+    await user.click(screen.getByRole('button', { name: '配置服务器' }));
 
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(screen.getByRole('alert').textContent).toBe('无法读取服务地址');

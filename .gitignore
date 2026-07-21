@@ -33,6 +33,7 @@ node_modules/
 **/.certs/
 # SSH / deploy private keys (never commit)
 /key
+/.key
 
 # Local media-lab evidence (the directory itself remains documented)
 /docs/poc/results/*

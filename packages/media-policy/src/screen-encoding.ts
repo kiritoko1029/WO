@@ -1,5 +1,5 @@
 export const MIN_SCREEN_BITRATE_BPS = 1_000_000;
-export const MAX_SCREEN_BITRATE_BPS = 10_000_000;
+export const MAX_SCREEN_BITRATE_BPS = 20_000_000;
 
 export interface ScreenEncoding {
   readonly rid?: string;

@@ -338,6 +338,11 @@ const desktop = {
     login: vi.fn(),
     refresh: vi.fn(),
     logout: vi.fn(),
+      verifyEmail: vi.fn(),
+      resendVerification: vi.fn(),
+      changePassword: vi.fn(),
+      requestEmailChange: vi.fn(),
+      confirmEmailChange: vi.fn(),
   },
   realtime: { issueTicket: vi.fn() },
   capture: {

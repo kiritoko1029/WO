@@ -74,6 +74,7 @@ async function createHarness(options: RouteHarnessOptions) {
           ? null
           : {
               emailNormalized: 'person@example.com',
+              verifiedAt: new Date(),
               user: {
                 id: options.user.id,
                 displayName: options.user.displayName,

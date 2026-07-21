@@ -290,6 +290,7 @@ export async function startLiteRoomService(
     roomCodeTtlMs: SESSION_TTL_MS,
     maxCodeAttempts: 1,
     maxRooms: 1,
+    maxMembersPerRoom: 8,
   });
   const createLanIce = (): LanIceConfigurationData =>
     lanIceConfigurationDataSchema.parse({
@@ -320,13 +321,8 @@ export async function startLiteRoomService(
       ) {
         throw new SignalingHandlerError('FORBIDDEN');
       }
-      if (
-        request.type === 'room.join' &&
-        guestClientId !== null &&
-        context.identity.userId !== guestClientId
-      ) {
-        throw new SignalingHandlerError('ROOM_FULL');
-      }
+      // LAN lite rooms still cap concurrent media peers via room registry
+      // maxMembersPerRoom; no single-guest lock here.
       const result = baseRoomHandler.handle(context, request);
       if (request.type === 'room.join') {
         guestClientId = context.identity.userId;
@@ -426,12 +422,6 @@ export async function startLiteRoomService(
             },
           });
       }
-      if (guestClientId !== null && guestClientId !== parsed.data.clientId) {
-        return reply
-          .status(409)
-          .header('Cache-Control', 'no-store')
-          .send({ error: { code: 'ROOM_FULL', message: 'Room is full' } });
-      }
       try {
         return reply.header('Cache-Control', 'no-store').send(
           ticketResponse(ticketStore, {
@@ -461,7 +451,7 @@ export async function startLiteRoomService(
       dispatcher,
       options: {
         now,
-        maxConnections: 2,
+        maxConnections: 8,
         frameCodec: createLanFrameCodec(inviteKey, 'server'),
       },
     });

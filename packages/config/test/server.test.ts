@@ -22,7 +22,7 @@ const developmentEnv = (): Record<string, string> => ({
   MEDIASOUP_WORKER_PORT_MIN: '40000',
   MEDIASOUP_WORKER_PORT_MAX: '40100',
   SCREEN_BITRATE_MIN: '1000000',
-  SCREEN_BITRATE_MAX: '10000000',
+  SCREEN_BITRATE_MAX: '20000000',
 });
 
 const productionEnv = (): Record<string, string> => ({
@@ -41,7 +41,7 @@ const productionEnv = (): Record<string, string> => ({
   MEDIASOUP_WORKER_PORT_MIN: '40000',
   MEDIASOUP_WORKER_PORT_MAX: '40100',
   SCREEN_BITRATE_MIN: '1000000',
-  SCREEN_BITRATE_MAX: '10000000',
+  SCREEN_BITRATE_MAX: '20000000',
 });
 
 const captureError = (env: Record<string, string | undefined>) => {
@@ -80,7 +80,7 @@ describe('parseServerConfig', () => {
         workerPortRange: { min: 40000, max: 40100 },
       },
       screen: {
-        bitrateRange: { min: 1_000_000, max: 10_000_000 },
+        bitrateRange: { min: 1_000_000, max: 20_000_000 },
       },
     });
     expect(Object.isFrozen(config)).toBe(true);
@@ -268,8 +268,8 @@ describe('parseServerConfig', () => {
 
   test.each([
     ['SCREEN_BITRATE_MIN', '999999'],
-    ['SCREEN_BITRATE_MIN', '10000000.5'],
-    ['SCREEN_BITRATE_MAX', '10000001'],
+    ['SCREEN_BITRATE_MIN', '20000000.5'],
+    ['SCREEN_BITRATE_MAX', '20000001'],
   ])('rejects out-of-product bitrate for %s', (field, value) => {
     const env = developmentEnv();
     env[field] = value;

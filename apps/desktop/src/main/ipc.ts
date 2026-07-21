@@ -20,6 +20,11 @@ import { isAllowedRendererUrl } from './window-security.js';
 export const DESKTOP_IPC_CHANNELS = Object.freeze([
   'desktop:auth:register',
   'desktop:auth:login',
+  'desktop:auth:verify-email',
+  'desktop:auth:resend-verification',
+  'desktop:auth:change-password',
+  'desktop:auth:request-email-change',
+  'desktop:auth:confirm-email-change',
   'desktop:auth:refresh',
   'desktop:auth:logout',
   'desktop:realtime:issue-ticket',
@@ -161,6 +166,57 @@ export function registerDesktopIpc(
     );
     return dependencies.auth.login(input);
   });
+  registerHandler(
+    ipcMain,
+    'desktop:auth:verify-email',
+    async (event, arguments_) => {
+      assertTrustedSender(event, dependencies.rendererEntry);
+      return dependencies.auth.verifyEmail(
+        parseArguments(arguments_, 1, () => arguments_[0] as never),
+      );
+    },
+  );
+  registerHandler(
+    ipcMain,
+    'desktop:auth:resend-verification',
+    async (event, arguments_) => {
+      assertTrustedSender(event, dependencies.rendererEntry);
+      return dependencies.auth.resendVerification(
+        parseArguments(arguments_, 1, () => arguments_[0] as never),
+      );
+    },
+  );
+  registerHandler(
+    ipcMain,
+    'desktop:auth:change-password',
+    async (event, arguments_) => {
+      assertTrustedSender(event, dependencies.rendererEntry);
+      await dependencies.auth.changePassword(
+        parseArguments(arguments_, 1, () => arguments_[0] as never),
+      );
+      return null;
+    },
+  );
+  registerHandler(
+    ipcMain,
+    'desktop:auth:request-email-change',
+    async (event, arguments_) => {
+      assertTrustedSender(event, dependencies.rendererEntry);
+      return dependencies.auth.requestEmailChange(
+        parseArguments(arguments_, 1, () => arguments_[0] as never),
+      );
+    },
+  );
+  registerHandler(
+    ipcMain,
+    'desktop:auth:confirm-email-change',
+    async (event, arguments_) => {
+      assertTrustedSender(event, dependencies.rendererEntry);
+      return dependencies.auth.confirmEmailChange(
+        parseArguments(arguments_, 1, () => arguments_[0] as never),
+      );
+    },
+  );
   registerHandler(
     ipcMain,
     'desktop:auth:refresh',

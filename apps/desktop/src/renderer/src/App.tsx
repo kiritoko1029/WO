@@ -20,6 +20,7 @@ import {
   ConnectionModeSelector,
   type ConnectionMode,
 } from './components/ConnectionModeSelector.js';
+import { ThemeFab } from './components/ThemeFab.js';
 import { createLanIpcWebSocket } from './media/lan-signaling-socket.js';
 import { createSignalingClient } from './media/signaling-client.js';
 import { AuthRoute } from './routes/AuthRoute.js';
@@ -560,6 +561,7 @@ export function App({
             </section>
           </div>
         )}
+      <ThemeFab />
     </>
   );
 }

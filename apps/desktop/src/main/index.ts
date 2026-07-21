@@ -53,6 +53,7 @@ import {
 } from './shell-config-ipc.js';
 import {
   buildContentSecurityPolicy,
+  buildDevelopmentContentSecurityPolicy,
   createWindowOptions,
   installContentSecurityPolicy,
   installMediaPermissionPolicy,
@@ -133,7 +134,16 @@ function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow(
     createWindowOptions(join(directory, '../preload/index.js')),
   );
-  const csp = buildContentSecurityPolicy(runtime.realtimeOrigin);
+  // Dev mode runs against the Vite dev server, which injects an inline HMR
+  // client and relies on eval for dependency optimization. Production CSP
+  // (`script-src 'self'`) would block both, so we relax it only when the
+  // app is unpackaged. See window-security.buildDevelopmentContentSecurityPolicy.
+  const csp = app.isPackaged
+    ? buildContentSecurityPolicy(runtime.realtimeOrigin)
+    : buildDevelopmentContentSecurityPolicy(
+        new URL(runtime.rendererEntry).origin,
+        runtime.realtimeOrigin,
+      );
   installContentSecurityPolicy(
     window.webContents.session,
     runtime.rendererEntry,

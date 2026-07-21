@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { AudioLines, LogOut, Plus, Users } from 'lucide-react';
 
+import { AccountSecurityPanel } from '../components/AccountSecurityPanel.js';
 import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
 import { useAuth } from '../state/auth-store.js';
 import { useRoom } from '../state/room-store.js';
@@ -30,12 +31,13 @@ export function HomeRoute({
       <header className="app-header">
         <div className="product-lockup compact">
           <span className="product-mark" aria-hidden="true">
-            <AudioLines size={20} />
+            <AudioLines size={14} />
           </span>
           <span>WO</span>
         </div>
         <div className="account-summary">
           <span>{auth.session?.user.displayName}</span>
+          <AccountSecurityPanel />
           <button
             className="icon-button subtle"
             type="button"
@@ -50,7 +52,7 @@ export function HomeRoute({
       </header>
       <main className="home-content">
         <div className="home-heading">
-          <p>双人语音房间</p>
+          <p>语音与屏幕共享</p>
           <h1>开始通话</h1>
         </div>
         {modeSelector}

@@ -1,0 +1,26 @@
+{
+  "kind": "critique-panel",
+  "score": 4,
+  "axes": {
+    "clarity": {
+      "score": 4,
+      "notes": "Auth → Home → Room flow is explicit; Chinese labels match product routes; launcher documents entry points."
+    },
+    "hierarchy": {
+      "score": 4,
+      "notes": "Room stage dominates when sharing; chrome stays thin. Landing hero prioritizes WO brand + product shot."
+    },
+    "typography": {
+      "score": 5,
+      "notes": "SF Pro Display/Text stacks via Apple tokens; mono reserved for room codes, quality stats, URLs."
+    },
+    "motion": {
+      "score": 4,
+      "notes": "rise-in on panels/toolbars, stage-reveal on share canvas, fade-in on modal — three purposeful motions only."
+    },
+    "brand": {
+      "score": 4,
+      "notes": "Neutral #fff/#f5f5f7/#000 + single #0071e3 accent; no purple SaaS gradients; desktop traffic-light chrome vs web topbar only differ by shell."
+    }
+  }
+}

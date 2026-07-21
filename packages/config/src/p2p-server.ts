@@ -21,6 +21,20 @@ export type P2pServerConfig = Readonly<{
   publicUrl: string;
   database: Readonly<{ url: string }>;
   auth: Readonly<{ jwtAccessSecret: string }>;
+  email: Readonly<{
+    domainAllowlist: readonly string[];
+    verificationRequired: boolean;
+    codeTtlSeconds: number;
+    superAdminEmails: readonly string[];
+    smtp: Readonly<{
+      host: string;
+      port: number;
+      secure: boolean;
+      user: string;
+      pass: string;
+      from: string;
+    }> | null;
+  }>;
   turn: Readonly<{
     sharedSecret: string;
     realm: string;
@@ -372,10 +386,117 @@ const parseTurnUrls = (
   return urls;
 };
 
+const parseOptionalBoolean = (
+  field: string,
+  value: string | undefined,
+  fallback: boolean,
+  issues: ConfigIssue[],
+): boolean => {
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+    return false;
+  }
+  addIssue(issues, field, 'must be a boolean');
+  return fallback;
+};
+
+const parseEmailDomainAllowlist = (
+  value: string | undefined,
+  issues: ConfigIssue[],
+): string[] => {
+  if (value === undefined || value.trim() === '') return [];
+  const domains = value
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part.length > 0);
+  for (const domain of domains) {
+    if (
+      domain.length > 253 ||
+      hasControlCharacter(domain) ||
+      !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/u.test(domain)
+    ) {
+      addIssue(
+        issues,
+        'EMAIL_DOMAIN_ALLOWLIST',
+        'must be a comma-separated list of DNS domains',
+      );
+      return [];
+    }
+  }
+  return [...new Set(domains)];
+};
+
+const parseSuperAdminEmails = (
+  value: string | undefined,
+  issues: ConfigIssue[],
+): string[] => {
+  if (value === undefined || value.trim() === '') return [];
+  const emails = value
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part.length > 0);
+  for (const email of emails) {
+    if (
+      email.length > 254 ||
+      hasControlCharacter(email) ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)
+    ) {
+      addIssue(
+        issues,
+        'SUPER_ADMIN_EMAILS',
+        'must be a comma-separated list of email addresses',
+      );
+      return [];
+    }
+  }
+  return [...new Set(emails)];
+};
+
+const parseSmtpConfig = (
+  env: Record<string, string | undefined>,
+  issues: ConfigIssue[],
+): P2pServerConfig['email']['smtp'] => {
+  const host = env.SMTP_HOST?.trim() ?? '';
+  if (host.length === 0) return null;
+  const port = parseInteger('SMTP_PORT', env.SMTP_PORT ?? '587', 1, 65_535, issues);
+  const secure = parseOptionalBoolean(
+    'SMTP_SECURE',
+    env.SMTP_SECURE,
+    false,
+    issues,
+  );
+  const user = env.SMTP_USER?.trim() ?? '';
+  const pass = env.SMTP_PASS ?? env.SMTP_PASSWORD ?? '';
+  const from = env.SMTP_FROM?.trim() ?? '';
+  if (from.length === 0 || from.length > 320 || hasControlCharacter(from)) {
+    addIssue(issues, 'SMTP_FROM', 'must be a non-empty sender address');
+  }
+  if (host.length > 253 || hasControlCharacter(host)) {
+    addIssue(issues, 'SMTP_HOST', 'must be a valid hostname');
+  }
+  if (port === undefined) return null;
+  return Object.freeze({
+    host,
+    port,
+    secure,
+    user,
+    pass,
+    from,
+  });
+};
+
 const freezeConfig = (config: P2pServerConfig): P2pServerConfig => {
   Object.freeze(config.server);
   Object.freeze(config.database);
   Object.freeze(config.auth);
+  Object.freeze(config.email.domainAllowlist);
+  Object.freeze(config.email.superAdminEmails);
+  if (config.email.smtp !== null) Object.freeze(config.email.smtp);
+  Object.freeze(config.email);
   Object.freeze(config.turn.urls);
   Object.freeze(config.turn);
   Object.freeze(config.room);
@@ -456,14 +577,14 @@ export const parseP2pServerConfig = (
     'SCREEN_BITRATE_MIN',
     raw.SCREEN_BITRATE_MIN,
     1_000_000,
-    10_000_000,
+    20_000_000,
     issues,
   );
   const screenBitrateMax = parseInteger(
     'SCREEN_BITRATE_MAX',
     raw.SCREEN_BITRATE_MAX,
     1_000_000,
-    10_000_000,
+    20_000_000,
     issues,
   );
 
@@ -478,6 +599,31 @@ export const parseP2pServerConfig = (
       'must be less than or equal to SCREEN_BITRATE_MAX',
     );
   }
+
+  const domainAllowlist = parseEmailDomainAllowlist(
+    env.EMAIL_DOMAIN_ALLOWLIST,
+    issues,
+  );
+  const superAdminEmails = parseSuperAdminEmails(
+    env.SUPER_ADMIN_EMAILS,
+    issues,
+  );
+  const verificationRequired = parseOptionalBoolean(
+    'EMAIL_VERIFICATION_REQUIRED',
+    env.EMAIL_VERIFICATION_REQUIRED,
+    // Opt-in so existing deployments keep working until SMTP is configured.
+    false,
+    issues,
+  );
+  const codeTtlSeconds =
+    parseInteger(
+      'EMAIL_CODE_TTL_SECONDS',
+      env.EMAIL_CODE_TTL_SECONDS ?? '600',
+      60,
+      MAX_TTL_SECONDS,
+      issues,
+    ) ?? 600;
+  const smtp = parseSmtpConfig(env, issues);
 
   if (raw.NODE_ENV === 'production') {
     if (publicUrl) {
@@ -517,6 +663,13 @@ export const parseP2pServerConfig = (
       raw.TURN_SHARED_SECRET,
       issues,
     );
+    if (verificationRequired && smtp === null) {
+      addIssue(
+        issues,
+        'SMTP_HOST',
+        'must be configured when EMAIL_VERIFICATION_REQUIRED is true',
+      );
+    }
   }
 
   if (issues.length > 0) {
@@ -544,6 +697,13 @@ export const parseP2pServerConfig = (
     publicUrl,
     database: { url: databaseUrl },
     auth: { jwtAccessSecret: raw.JWT_ACCESS_SECRET },
+    email: {
+      domainAllowlist,
+      verificationRequired,
+      codeTtlSeconds,
+      superAdminEmails,
+      smtp,
+    },
     turn: {
       sharedSecret: raw.TURN_SHARED_SECRET,
       realm: raw.TURN_REALM,

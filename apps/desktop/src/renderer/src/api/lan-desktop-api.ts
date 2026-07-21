@@ -30,6 +30,21 @@ export function createLanDesktopApi(
       login: unavailable,
       refresh: async () => current,
       logout: () => lan.stop(),
+      verifyEmail: async () => {
+        throw new Error('LAN mode does not support account email verification');
+      },
+      resendVerification: async () => {
+        throw new Error('LAN mode does not support account email verification');
+      },
+      changePassword: async () => {
+        throw new Error('LAN mode does not support password changes');
+      },
+      requestEmailChange: async () => {
+        throw new Error('LAN mode does not support email changes');
+      },
+      confirmEmailChange: async () => {
+        throw new Error('LAN mode does not support email changes');
+      },
     }),
     realtime: Object.freeze({
       issueTicket: (accessToken: string) => {

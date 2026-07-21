@@ -92,6 +92,13 @@ export interface SessionRepositoryDependencies {
   readonly now?: () => Date;
 }
 
+export interface ActiveSessionSummary {
+  readonly userId: string;
+  readonly activeSessionCount: number;
+  readonly latestSessionCreatedAt: Date | null;
+  readonly latestSessionExpiresAt: Date | null;
+}
+
 export interface SessionRepository {
   createRefreshSession(
     input: CreateRefreshSessionInput,
@@ -103,6 +110,8 @@ export interface SessionRepository {
   revokeRefreshTokenFamily(
     input: RevokeRefreshTokenFamilyInput,
   ): Promise<RefreshTokenFamilyRevocationRecord>;
+  listActiveSessionSummaries(): Promise<readonly ActiveSessionSummary[]>;
+  revokeAllSessionsForUser(userId: string): Promise<number>;
 }
 
 interface PostgreSqlError {
@@ -466,6 +475,57 @@ export function createSessionRepository(
         }),
       );
       return throwIfRevocationFailed(outcome);
+    },
+
+    async listActiveSessionSummaries() {
+      const operationTime = cloneValidDate(now());
+      const nowTimestamp = toUtcTimestamp(operationTime);
+      const rows = await client.sql<
+        {
+          user_id: string;
+          active_session_count: number;
+          latest_created_at: Date | string | null;
+          latest_expires_at: Date | string | null;
+        }[]
+      >`
+        SELECT
+          user_id,
+          count(*)::int AS active_session_count,
+          max(created_at) AS latest_created_at,
+          max(expires_at) AS latest_expires_at
+        FROM refresh_sessions
+        WHERE revoked_at IS NULL
+          AND rotated_at IS NULL
+          AND expires_at > ${nowTimestamp}
+        GROUP BY user_id
+      `;
+      return rows.map((row) =>
+        Object.freeze({
+          userId: row.user_id,
+          activeSessionCount: row.active_session_count,
+          latestSessionCreatedAt:
+            row.latest_created_at === null
+              ? null
+              : fromDatabaseTimestamp(row.latest_created_at),
+          latestSessionExpiresAt:
+            row.latest_expires_at === null
+              ? null
+              : fromDatabaseTimestamp(row.latest_expires_at),
+        }),
+      );
+    },
+
+    async revokeAllSessionsForUser(userId) {
+      assertCanonicalUuid(userId, 'User id');
+      const revokedAtTimestamp = toUtcTimestamp(cloneValidDate(now()));
+      const rows = await client.sql<{ id: string }[]>`
+        UPDATE refresh_sessions
+        SET revoked_at = COALESCE(revoked_at, ${revokedAtTimestamp})
+        WHERE user_id = ${userId}
+          AND revoked_at IS NULL
+        RETURNING id
+      `;
+      return rows.length;
     },
   };
 }

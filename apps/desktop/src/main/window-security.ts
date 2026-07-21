@@ -184,6 +184,44 @@ export function buildContentSecurityPolicy(realtimeOrigin: string): string {
   ].join('; ');
 }
 
+/**
+ * Relaxed CSP for the Vite dev server. Vite injects an inline HMR client
+ * script into the HTML and relies on `eval` for dependency optimization,
+ * so production-grade `script-src 'self'` would block the renderer. The
+ * dev policy also allows HMR websocket connections back to localhost.
+ * Never used in packaged builds.
+ */
+export function buildDevelopmentContentSecurityPolicy(
+  rendererOrigin: string,
+  realtimeOrigin?: string,
+): string {
+  const connectSources = [
+    "'self'",
+    rendererOrigin,
+    // Vite HMR + reactive reloads
+    'ws://localhost:*',
+    'wss://localhost:*',
+    'ws://127.0.0.1:*',
+    'wss://127.0.0.1:*',
+  ];
+  if (realtimeOrigin !== undefined) connectSources.push(realtimeOrigin);
+  return [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    // Vite needs inline scripts (HMR preamble) and eval (dep optimizer)
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    // Vite injects styles via <style> and inline style attributes
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    `connect-src ${connectSources.join(' ')}`,
+  ].join('; ');
+}
+
 export function installContentSecurityPolicy(
   session: SecuritySession,
   rendererEntry: string,

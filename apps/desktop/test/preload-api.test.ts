@@ -12,6 +12,16 @@ function cloneBridge(bridge: DesktopBridge): DesktopBridge {
       register: async (input) =>
         structuredClone(await bridge.auth.register(input)),
       login: async (input) => structuredClone(await bridge.auth.login(input)),
+      verifyEmail: async (input) =>
+        structuredClone(await bridge.auth.verifyEmail(input)),
+      resendVerification: async (input) =>
+        structuredClone(await bridge.auth.resendVerification(input)),
+      changePassword: async (input) =>
+        structuredClone(await bridge.auth.changePassword(input)),
+      requestEmailChange: async (input) =>
+        structuredClone(await bridge.auth.requestEmailChange(input)),
+      confirmEmailChange: async (input) =>
+        structuredClone(await bridge.auth.confirmEmailChange(input)),
       refresh: async () => structuredClone(await bridge.auth.refresh()),
       logout: async () => structuredClone(await bridge.auth.logout()),
     },
@@ -45,23 +55,29 @@ describe('desktop preload API', () => {
     const invoke = vi.fn(async (channel: string) => {
       const value =
         channel === 'desktop:auth:logout' ||
+        channel === 'desktop:auth:change-password' ||
         channel === 'desktop:capture:select' ||
         channel === 'desktop:capture:open-settings'
           ? null
-          : channel === 'desktop:realtime:issue-ticket'
-            ? { ticket: 'A'.repeat(43), expiresInSeconds: 30 }
-            : channel === 'desktop:capture:list'
-              ? [
-                  {
-                    token: '00000000-0000-4000-8000-000000000001',
-                    name: 'Editor',
-                    kind: 'window',
-                    thumbnailDataUrl: 'data:image/png;base64,AAAA',
-                  },
-                ]
-              : channel === 'desktop:capture:permission'
-                ? { status: 'granted', canOpenSettings: false }
-                : authSession;
+          : channel === 'desktop:auth:register'
+            ? { kind: 'session', session: authSession }
+            : channel === 'desktop:auth:resend-verification' ||
+                channel === 'desktop:auth:request-email-change'
+              ? { email: authSession.user.email }
+              : channel === 'desktop:realtime:issue-ticket'
+                ? { ticket: 'A'.repeat(43), expiresInSeconds: 30 }
+                : channel === 'desktop:capture:list'
+                  ? [
+                      {
+                        token: '00000000-0000-4000-8000-000000000001',
+                        name: 'Editor',
+                        kind: 'window',
+                        thumbnailDataUrl: 'data:image/png;base64,AAAA',
+                      },
+                    ]
+                  : channel === 'desktop:capture:permission'
+                    ? { status: 'granted', canOpenSettings: false }
+                    : authSession;
       return { ok: true, value };
     });
     const bridge = createDesktopApi(invoke);
@@ -70,6 +86,11 @@ describe('desktop preload API', () => {
     expect(Object.keys(bridge.auth)).toEqual([
       'register',
       'login',
+      'verifyEmail',
+      'resendVerification',
+      'changePassword',
+      'requestEmailChange',
+      'confirmEmailChange',
       'refresh',
       'logout',
     ]);

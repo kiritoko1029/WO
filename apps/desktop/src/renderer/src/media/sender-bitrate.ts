@@ -1,8 +1,21 @@
 import { clampScreenBitrate } from '@wo/media-policy';
 
-export const SCREEN_BITRATE_PRESETS_BPS = Object.freeze([
-  2_000_000, 4_000_000, 6_000_000, 8_000_000,
+/** User-facing quality tiers. Values are maxBitrate ceilings, not fixed rates. */
+export const SCREEN_BITRATE_PRESETS = Object.freeze([
+  Object.freeze({ label: '清晰', bitrateBps: 5_000_000 }),
+  Object.freeze({ label: '高清', bitrateBps: 10_000_000 }),
+  Object.freeze({ label: '原画', bitrateBps: 20_000_000 }),
 ] as const);
+
+export const SCREEN_BITRATE_PRESETS_BPS = Object.freeze(
+  SCREEN_BITRATE_PRESETS.map((preset) => preset.bitrateBps),
+);
+
+/** Default quality tier when screen share starts (高清, 10 Mbps ceiling). */
+export const DEFAULT_SCREEN_BITRATE_TARGET = Object.freeze({
+  mode: 'fixed' as const,
+  bitrateBps: 10_000_000,
+});
 
 export type ScreenBitrateTarget =
   Readonly<{ mode: 'auto' }> | Readonly<{ mode: 'fixed'; bitrateBps: number }>;

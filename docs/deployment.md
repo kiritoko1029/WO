@@ -123,7 +123,7 @@ refresh token 按 origin 隔离。打开来自其他服务的邀请时，桌面�
 | `wss://${APP_DOMAIN}/v1/realtime` | **同一 origin**，必须正确升级 WebSocket |
 | `stun:` / `turn:` / `turns:`（`TURN_HOST`） | **不要** HTTP 反代；客户端直连 coturn 的 `3478`/`5349` 与 relay UDP 段 |
 
-桌面与 Web 的「后端服务」均填 canonical HTTPS origin，例如
+桌面与 Web 的「服务器」均填 canonical HTTPS origin，例如
 `https://wo.example.com`，不要填 `turn.` 子域或带路径的 URL。
 
 ### WebSocket 关键配置

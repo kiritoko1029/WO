@@ -61,8 +61,11 @@ export interface CreateEmailUserWithRefreshSessionInput extends CreateEmailUserI
   }>;
 }
 
+export type EmailVerificationPurpose = 'register' | 'rebind';
+
 export interface EmailUserRecord {
   readonly emailNormalized: string;
+  readonly verifiedAt: Date | null;
   readonly user: UserRecord;
 }
 
@@ -72,6 +75,26 @@ export interface EmailCredentialRecord extends EmailUserRecord {
 
 export interface EmailUserWithRefreshSessionRecord extends EmailUserRecord {
   readonly session: RefreshSessionRecord;
+}
+
+export interface CreateEmailVerificationChallengeInput {
+  readonly challengeId: string;
+  readonly userId: string;
+  readonly emailNormalized: string;
+  readonly purpose: EmailVerificationPurpose;
+  readonly codeHash: string;
+  readonly expiresAt: Date;
+}
+
+export interface EmailVerificationChallengeRecord {
+  readonly id: string;
+  readonly userId: string;
+  readonly emailNormalized: string;
+  readonly purpose: EmailVerificationPurpose;
+  readonly codeHash: string;
+  readonly expiresAt: Date;
+  readonly consumedAt: Date | null;
+  readonly createdAt: Date;
 }
 
 export interface IdentityRepositoryDependencies {
@@ -88,7 +111,23 @@ export interface IdentityRepository {
     emailNormalized: string,
   ): Promise<EmailCredentialRecord | null>;
   findEmailUserById(userId: string): Promise<EmailUserRecord | null>;
+  listEmailUsers(): Promise<readonly EmailUserRecord[]>;
   disableUser(userId: string, disabledAt?: Date): Promise<UserRecord>;
+  enableUser(userId: string): Promise<UserRecord>;
+  markEmailVerified(userId: string, verifiedAt?: Date): Promise<void>;
+  updatePasswordHash(userId: string, passwordHash: string): Promise<void>;
+  updateEmailIdentity(
+    userId: string,
+    emailNormalized: string,
+  ): Promise<EmailUserRecord>;
+  replaceEmailVerificationChallenge(
+    input: CreateEmailVerificationChallengeInput,
+  ): Promise<void>;
+  findLatestEmailVerificationChallenge(
+    userId: string,
+    purpose: EmailVerificationPurpose,
+  ): Promise<EmailVerificationChallengeRecord | null>;
+  consumeEmailVerificationChallenge(challengeId: string): Promise<boolean>;
 }
 
 interface PostgreSqlError {
@@ -303,6 +342,7 @@ export function createIdentityRepository(
       };
       return {
         emailNormalized: emailCanonical,
+        verifiedAt: null,
         user,
         session: {
           id: input.session.sessionId,
@@ -322,6 +362,7 @@ export function createIdentityRepository(
         {
           user_id: string;
           email_normalized: string;
+          verified_at: Date | string | null;
           display_name: string;
           password_hash: string;
           created_at: Date | string;
@@ -331,6 +372,7 @@ export function createIdentityRepository(
         SELECT
           u.id AS user_id,
           i.identifier_normalized AS email_normalized,
+          i.verified_at,
           u.display_name,
           p.password_hash,
           u.created_at,
@@ -347,6 +389,10 @@ export function createIdentityRepository(
 
       return {
         emailNormalized: credential.email_normalized,
+        verifiedAt:
+          credential.verified_at === null
+            ? null
+            : fromDatabaseTimestamp(credential.verified_at),
         passwordHash: credential.password_hash,
         user: {
           id: credential.user_id,
@@ -365,6 +411,7 @@ export function createIdentityRepository(
         {
           user_id: string;
           email_normalized: string;
+          verified_at: Date | string | null;
           display_name: string;
           created_at: Date | string;
           disabled_at: Date | string | null;
@@ -373,6 +420,7 @@ export function createIdentityRepository(
         SELECT
           u.id AS user_id,
           i.identifier_normalized AS email_normalized,
+          i.verified_at,
           u.display_name,
           u.created_at,
           u.disabled_at
@@ -387,6 +435,10 @@ export function createIdentityRepository(
 
       return {
         emailNormalized: identity.email_normalized,
+        verifiedAt:
+          identity.verified_at === null
+            ? null
+            : fromDatabaseTimestamp(identity.verified_at),
         user: {
           id: identity.user_id,
           displayName: identity.display_name,
@@ -397,6 +449,49 @@ export function createIdentityRepository(
               : fromDatabaseTimestamp(identity.disabled_at),
         },
       };
+    },
+
+    async listEmailUsers() {
+      const rows = await client.sql<
+        {
+          user_id: string;
+          email_normalized: string;
+          verified_at: Date | string | null;
+          display_name: string;
+          created_at: Date | string;
+          disabled_at: Date | string | null;
+        }[]
+      >`
+        SELECT
+          u.id AS user_id,
+          i.identifier_normalized AS email_normalized,
+          i.verified_at,
+          u.display_name,
+          u.created_at,
+          u.disabled_at
+        FROM users u
+        JOIN auth_identities i ON i.user_id = u.id
+        WHERE i.provider = 'email'
+        ORDER BY u.created_at DESC
+      `;
+      return rows.map((identity) =>
+        Object.freeze({
+          emailNormalized: identity.email_normalized,
+          verifiedAt:
+            identity.verified_at === null
+              ? null
+              : fromDatabaseTimestamp(identity.verified_at),
+          user: Object.freeze({
+            id: identity.user_id,
+            displayName: identity.display_name,
+            createdAt: fromDatabaseTimestamp(identity.created_at),
+            disabledAt:
+              identity.disabled_at === null
+                ? null
+                : fromDatabaseTimestamp(identity.disabled_at),
+          }),
+        }),
+      );
     },
 
     async disableUser(userId, disabledAt = now()) {
@@ -426,6 +521,227 @@ export function createIdentityRepository(
         createdAt: fromDatabaseTimestamp(user.created_at),
         disabledAt: fromDatabaseTimestamp(user.disabled_at),
       };
+    },
+
+    async enableUser(userId) {
+      assertCanonicalUuid(userId, 'User id');
+      const rows = await client.sql<
+        {
+          id: string;
+          display_name: string;
+          created_at: Date | string;
+          disabled_at: Date | string | null;
+        }[]
+      >`
+        UPDATE users
+        SET disabled_at = NULL
+        WHERE id = ${userId}
+        RETURNING id, display_name, created_at, disabled_at
+      `;
+      const user = rows[0];
+      if (!user) {
+        throw new IdentityRepositoryError('USER_NOT_FOUND');
+      }
+      return {
+        id: user.id,
+        displayName: user.display_name,
+        createdAt: fromDatabaseTimestamp(user.created_at),
+        disabledAt: null,
+      };
+    },
+
+    async markEmailVerified(userId, verifiedAt = now()) {
+      assertCanonicalUuid(userId, 'User id');
+      const verifiedAtTimestamp = toUtcTimestamp(cloneValidDate(verifiedAt));
+      const rows = await client.sql<{ user_id: string }[]>`
+        UPDATE auth_identities
+        SET verified_at = ${verifiedAtTimestamp}
+        WHERE user_id = ${userId} AND provider = 'email'
+        RETURNING user_id
+      `;
+      if (rows[0] === undefined) {
+        throw new IdentityRepositoryError('USER_NOT_FOUND');
+      }
+    },
+
+    async updatePasswordHash(userId, passwordHash) {
+      assertCanonicalUuid(userId, 'User id');
+      const changedAt = toUtcTimestamp(cloneValidDate(now()));
+      const rows = await client.sql<{ user_id: string }[]>`
+        UPDATE password_credentials
+        SET password_hash = ${passwordHash}, password_changed_at = ${changedAt}
+        WHERE user_id = ${userId}
+        RETURNING user_id
+      `;
+      if (rows[0] === undefined) {
+        throw new IdentityRepositoryError('USER_NOT_FOUND');
+      }
+    },
+
+    async updateEmailIdentity(userId, emailNormalized) {
+      assertCanonicalUuid(userId, 'User id');
+      const emailCanonical = canonicalizeEmailIdentity(emailNormalized);
+      const verifiedAtTimestamp = toUtcTimestamp(cloneValidDate(now()));
+      try {
+        const rows = await client.sql<
+          {
+            user_id: string;
+            email_normalized: string;
+            verified_at: Date | string;
+            display_name: string;
+            created_at: Date | string;
+            disabled_at: Date | string | null;
+          }[]
+        >`
+          UPDATE auth_identities AS i
+          SET
+            identifier_normalized = ${emailCanonical},
+            verified_at = ${verifiedAtTimestamp}
+          FROM users AS u
+          WHERE i.user_id = ${userId}
+            AND i.provider = 'email'
+            AND u.id = i.user_id
+          RETURNING
+            u.id AS user_id,
+            i.identifier_normalized AS email_normalized,
+            i.verified_at,
+            u.display_name,
+            u.created_at,
+            u.disabled_at
+        `;
+        const identity = rows[0];
+        if (identity === undefined) {
+          throw new IdentityRepositoryError('USER_NOT_FOUND');
+        }
+        return {
+          emailNormalized: identity.email_normalized,
+          verifiedAt: fromDatabaseTimestamp(identity.verified_at),
+          user: {
+            id: identity.user_id,
+            displayName: identity.display_name,
+            createdAt: fromDatabaseTimestamp(identity.created_at),
+            disabledAt:
+              identity.disabled_at === null
+                ? null
+                : fromDatabaseTimestamp(identity.disabled_at),
+          },
+        };
+      } catch (error) {
+        if (
+          isUniqueViolation(error) &&
+          constraintName(error) ===
+            'auth_identities_provider_identifier_normalized_unique'
+        ) {
+          throw new IdentityRepositoryError('IDENTITY_CONFLICT');
+        }
+        throw error;
+      }
+    },
+
+    async replaceEmailVerificationChallenge(input) {
+      assertCanonicalUuid(input.challengeId, 'Challenge id');
+      assertCanonicalUuid(input.userId, 'User id');
+      const emailCanonical = canonicalizeEmailIdentity(input.emailNormalized);
+      if (input.purpose !== 'register' && input.purpose !== 'rebind') {
+        throw new IdentityRepositoryError('IDENTITY_INVALID');
+      }
+      const createdAt = cloneValidDate(now());
+      const expiresAt = cloneValidDate(input.expiresAt);
+      await client.sql.begin(async (transaction) => {
+        await transaction`
+          UPDATE email_verification_challenges
+          SET consumed_at = ${toUtcTimestamp(createdAt)}
+          WHERE user_id = ${input.userId}
+            AND purpose = ${input.purpose}
+            AND consumed_at IS NULL
+        `;
+        await transaction`
+          INSERT INTO email_verification_challenges (
+            id,
+            user_id,
+            email_normalized,
+            purpose,
+            code_hash,
+            expires_at,
+            consumed_at,
+            created_at
+          )
+          VALUES (
+            ${input.challengeId},
+            ${input.userId},
+            ${emailCanonical},
+            ${input.purpose},
+            ${input.codeHash},
+            ${toUtcTimestamp(expiresAt)},
+            NULL,
+            ${toUtcTimestamp(createdAt)}
+          )
+        `;
+      });
+    },
+
+    async findLatestEmailVerificationChallenge(userId, purpose) {
+      assertCanonicalUuid(userId, 'User id');
+      const rows = await client.sql<
+        {
+          id: string;
+          user_id: string;
+          email_normalized: string;
+          purpose: string;
+          code_hash: string;
+          expires_at: Date | string;
+          consumed_at: Date | string | null;
+          created_at: Date | string;
+        }[]
+      >`
+        SELECT
+          id,
+          user_id,
+          email_normalized,
+          purpose,
+          code_hash,
+          expires_at,
+          consumed_at,
+          created_at
+        FROM email_verification_challenges
+        WHERE user_id = ${userId}
+          AND purpose = ${purpose}
+          AND consumed_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      const row = rows[0];
+      if (row === undefined) return null;
+      if (row.purpose !== 'register' && row.purpose !== 'rebind') {
+        return null;
+      }
+      return {
+        id: row.id,
+        userId: row.user_id,
+        emailNormalized: row.email_normalized,
+        purpose: row.purpose,
+        codeHash: row.code_hash,
+        expiresAt: fromDatabaseTimestamp(row.expires_at),
+        consumedAt:
+          row.consumed_at === null
+            ? null
+            : fromDatabaseTimestamp(row.consumed_at),
+        createdAt: fromDatabaseTimestamp(row.created_at),
+      };
+    },
+
+    async consumeEmailVerificationChallenge(challengeId) {
+      assertCanonicalUuid(challengeId, 'Challenge id');
+      const consumedAt = toUtcTimestamp(cloneValidDate(now()));
+      const rows = await client.sql<{ id: string }[]>`
+        UPDATE email_verification_challenges
+        SET consumed_at = ${consumedAt}
+        WHERE id = ${challengeId}
+          AND consumed_at IS NULL
+          AND expires_at > ${consumedAt}
+        RETURNING id
+      `;
+      return rows[0] !== undefined;
     },
   };
 }

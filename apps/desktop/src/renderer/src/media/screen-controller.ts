@@ -19,10 +19,9 @@ const RELEASE_PENDING_MESSAGE = '屏幕已在本机停止，服务端将在租�
 export const DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
   Object.freeze({
     audio: false,
+    // Prefer high frame rate without forcing a capture resolution downscale.
     video: Object.freeze({
-      width: Object.freeze({ ideal: 1_920 }),
-      height: Object.freeze({ ideal: 1_080 }),
-      frameRate: Object.freeze({ ideal: 60, max: 60 }),
+      frameRate: Object.freeze({ ideal: 60 }),
     }),
   });
 

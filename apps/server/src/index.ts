@@ -13,8 +13,10 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createApp } from './app.ts';
+import { createAdminService } from './modules/admin/admin-service.ts';
 import { createAccessTokenService } from './modules/auth/access-token.ts';
 import { createAuthService } from './modules/auth/auth-service.ts';
+import { createEmailDelivery } from './modules/auth/email-delivery.ts';
 import { hashPassword } from './modules/auth/password.ts';
 import { createSignalTicketStore } from './modules/signaling/signal-ticket-store.ts';
 
@@ -70,6 +72,23 @@ export async function startServer(
       sessionRepository,
       accessTokenService,
       dummyPasswordHash,
+      emailPolicy: {
+        domainAllowlist: config.email.domainAllowlist,
+        verificationRequired: config.email.verificationRequired,
+        codeTtlSeconds: config.email.codeTtlSeconds,
+      },
+      emailDelivery: createEmailDelivery(config.email.smtp),
+    });
+    const realtimeHandles: import('./modules/admin/admin-service.ts').AdminRealtimeHandles =
+      {
+        listConnections: () => [],
+        roomRegistry: null,
+      };
+    const adminService = createAdminService({
+      identityRepository,
+      sessionRepository,
+      superAdminEmails: config.email.superAdminEmails,
+      realtime: realtimeHandles,
     });
     app = await createApp({
       authService,
@@ -78,6 +97,7 @@ export async function startServer(
       readinessCheck: async () => {
         await databaseClient.sql`SELECT 1`;
       },
+      admin: { adminService },
       realtime: {
         identityRepository,
         ticketStore: createSignalTicketStore(),
@@ -91,6 +111,10 @@ export async function startServer(
           reconnectGraceMs: config.room.disconnectGraceSeconds * 1_000,
           screenLeaseTtlMs: config.screen.leaseTtlSeconds * 1_000,
           screenBitrateRange: config.screen.bitrateRange,
+        },
+        onRealtimeReady: (handles) => {
+          realtimeHandles.listConnections = handles.listConnections;
+          realtimeHandles.roomRegistry = handles.roomRegistry;
         },
       },
       webRoot: existsSync(BUNDLED_WEB_ROOT) ? BUNDLED_WEB_ROOT : undefined,

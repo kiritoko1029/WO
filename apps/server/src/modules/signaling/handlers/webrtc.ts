@@ -45,11 +45,36 @@ function memberRole(room: RoomSnapshot, userId: string) {
 }
 
 function peerUserId(room: RoomSnapshot, userId: string): string {
-  const peer = room.members.find((candidate) => candidate.userId !== userId);
-  if (peer === undefined || !peer.online) {
+  // 1:1 media path: joiners always talk to the creator; creator talks to the
+  // primary joiner (first joiner still online, otherwise any online joiner).
+  const self = room.members.find((candidate) => candidate.userId === userId);
+  if (self === undefined) {
+    throw new SignalingHandlerError('FORBIDDEN');
+  }
+  if (self.role === 'joiner') {
+    const creator = room.members.find(
+      (candidate) => candidate.role === 'creator' && candidate.online,
+    );
+    if (creator === undefined) {
+      throw new SignalingHandlerError('INVALID_STATE');
+    }
+    return creator.userId;
+  }
+  const primary =
+    room.joinerUserId === null
+      ? undefined
+      : room.members.find(
+          (candidate) =>
+            candidate.userId === room.joinerUserId && candidate.online,
+        );
+  if (primary !== undefined) return primary.userId;
+  const joiner = room.members.find(
+    (candidate) => candidate.role === 'joiner' && candidate.online,
+  );
+  if (joiner === undefined) {
     throw new SignalingHandlerError('INVALID_STATE');
   }
-  return peer.userId;
+  return joiner.userId;
 }
 
 function relay(

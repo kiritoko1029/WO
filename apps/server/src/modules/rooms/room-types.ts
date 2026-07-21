@@ -312,6 +312,8 @@ export interface RoomRegistryDependencies {
   readonly maxCodeAttempts?: number;
   readonly requestCacheMaxEntries?: number;
   readonly maxRooms?: number;
+  /** Maximum simultaneous members per room (creator included). Default 8. */
+  readonly maxMembersPerRoom?: number;
   readonly maxNegotiationGeneration?: number;
   readonly screenLeaseTtlMs?: number;
   readonly screenBitrateRange?: Readonly<{ min: number; max: number }>;
@@ -329,10 +331,12 @@ export interface RoomRegistry {
     input: DisconnectRoomInput,
   ): RoomMutationResult<Readonly<{ room: RoomSnapshot }>>;
   abortSessionSetup(input: CurrentConnectionInput): void;
-  /** Terminal calls are not replay-cached here; Task 10 owns per-connection ACK replay. */
+  /** Creator leave closes the room; joiner leave keeps it open for others. */
   leave(
     input: LeaveRoomInput,
-  ): RoomMutationResult<Readonly<{ room: ClosedRoomSnapshot }>>;
+  ): RoomMutationResult<
+    Readonly<{ room: ClosedRoomSnapshot | RoomSnapshot }>
+  >;
   /** Terminal calls are not replay-cached here; Task 10 owns per-connection ACK replay. */
   end(
     input: EndRoomInput,
@@ -390,6 +394,7 @@ export interface RoomRegistry {
   setScreenBitrate(
     input: SetScreenBitrateInput,
   ): RoomMutationResult<Readonly<{ bitrateBps: number }>>;
+  listRooms(): readonly RoomSnapshot[];
   getStats(): RoomRegistryStats;
   clear(): void;
 }

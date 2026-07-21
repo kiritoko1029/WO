@@ -340,12 +340,9 @@ async function entriesBelow(root, directory = root) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isSymbolicLink()) {
-      const target = resolve(dirname(path), await readlink(path));
-      if (!relativePathWithin(root, target)) {
-        fail(
-          `Package contains an escaping symbolic link: ${relative(root, path)}`,
-        );
-      }
+      // Resolve through realpath only. Comparing unresolved link targets against
+      // a non-canonical root (for example /var/folders vs /private/var/folders
+      // after hdiutil mount) produces false "escaping/invalid" failures on macOS.
       const realTarget = await realpath(path).catch(() => null);
       if (realTarget === null || !relativePathWithin(root, realTarget)) {
         fail(
@@ -366,7 +363,10 @@ async function entriesBelow(root, directory = root) {
 }
 
 async function filesBelow(directory) {
-  return (await entriesBelow(directory))
+  // Canonicalize the walk root so symlink containment checks stay valid when
+  // tmpdir()/mount points differ from their realpath form on macOS.
+  const root = await realpath(directory);
+  return (await entriesBelow(root, root))
     .filter((entry) => entry.type === 'file')
     .map((entry) => entry.path);
 }
@@ -483,8 +483,9 @@ async function shouldScanTextFile(path, extension) {
 }
 
 async function scanRuntimeDirectory(directory, label) {
-  for (const path of await filesBelow(directory)) {
-    const runtimePath = relative(directory, path).replaceAll('\\', '/');
+  const root = await realpath(directory);
+  for (const path of await filesBelow(root)) {
+    const runtimePath = relative(root, path).replaceAll('\\', '/');
     const displayPath = `${label}/${runtimePath}`;
     const extension = extname(path).toLowerCase();
     if (runtimePath.startsWith('node_modules/')) {
@@ -504,8 +505,9 @@ async function scanRuntimeDirectory(directory, label) {
 }
 
 async function scanPackageDirectory(packageDirectory) {
-  for (const path of await filesBelow(packageDirectory)) {
-    const runtimePath = relative(packageDirectory, path).replaceAll('\\', '/');
+  const root = await realpath(packageDirectory);
+  for (const path of await filesBelow(root)) {
+    const runtimePath = relative(root, path).replaceAll('\\', '/');
     const extension = extname(path).toLowerCase();
     if (extension === '.map' || runtimePath.includes('.map.')) {
       fail(`Package contains a source map file: package/${runtimePath}`);

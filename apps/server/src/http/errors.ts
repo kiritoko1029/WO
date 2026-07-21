@@ -29,6 +29,14 @@ function mapError(error: unknown): HttpError {
     switch (error.code) {
       case 'EMAIL_ALREADY_REGISTERED':
         return new HttpError(409, 'INVALID_STATE', error.message);
+      case 'EMAIL_DOMAIN_NOT_ALLOWED':
+        return new HttpError(403, 'INVALID_STATE', error.message);
+      case 'EMAIL_NOT_VERIFIED':
+        return new HttpError(403, 'INVALID_STATE', error.message);
+      case 'INVALID_VERIFICATION_CODE':
+        return new HttpError(400, 'VALIDATION_ERROR', error.message);
+      case 'SERVICE_UNAVAILABLE':
+        return new HttpError(503, 'SERVICE_UNAVAILABLE', error.message);
       case 'INVALID_CREDENTIALS':
         return new HttpError(401, 'INVALID_CREDENTIALS', error.message);
       case 'AUTH_REQUIRED':

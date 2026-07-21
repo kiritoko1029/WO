@@ -1,9 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import {
+  authChangePasswordBodySchema,
+  authConfirmEmailChangeBodySchema,
   authLoginBodySchema,
   authLogoutBodySchema,
   authRefreshBodySchema,
   authRegisterBodySchema,
+  authRequestEmailChangeBodySchema,
+  authResendVerificationBodySchema,
+  authVerifyEmailBodySchema,
 } from '@wo/protocol';
 
 import type { AuthService } from './auth-service.ts';
@@ -42,11 +47,19 @@ export function registerAuthRoutes(
     }
   };
   const routeOptions = { config: routeConfig, onRequest: requireJson };
+  const authenticatedRouteOptions = {
+    ...routeOptions,
+    preHandler: app.authenticate,
+  };
 
   app.post('/v1/auth/register', routeOptions, async (request, reply) => {
     const body = authRegisterBodySchema.parse(request.body);
     const response = await dependencies.authService.register(body);
-    return reply.status(201).send(response);
+    const status =
+      'status' in response && response.status === 'verification_required'
+        ? 202
+        : 201;
+    return reply.status(status).send(response);
   });
 
   app.post('/v1/auth/login', routeOptions, async (request) => {
@@ -63,4 +76,53 @@ export function registerAuthRoutes(
     const body = authLogoutBodySchema.parse(request.body);
     return dependencies.authService.logout(body);
   });
+
+  app.post('/v1/auth/email/verify', routeOptions, async (request) => {
+    const body = authVerifyEmailBodySchema.parse(request.body);
+    return dependencies.authService.verifyEmail(body);
+  });
+
+  app.post('/v1/auth/email/resend', routeOptions, async (request) => {
+    const body = authResendVerificationBodySchema.parse(request.body);
+    return dependencies.authService.resendVerification(body);
+  });
+
+  app.post(
+    '/v1/auth/password',
+    authenticatedRouteOptions,
+    async (request) => {
+      const identity = request.authIdentity;
+      if (identity === null) {
+        throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
+      }
+      const body = authChangePasswordBodySchema.parse(request.body);
+      return dependencies.authService.changePassword(identity.userId, body);
+    },
+  );
+
+  app.post(
+    '/v1/auth/email/change/request',
+    authenticatedRouteOptions,
+    async (request) => {
+      const identity = request.authIdentity;
+      if (identity === null) {
+        throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
+      }
+      const body = authRequestEmailChangeBodySchema.parse(request.body);
+      return dependencies.authService.requestEmailChange(identity.userId, body);
+    },
+  );
+
+  app.post(
+    '/v1/auth/email/change/confirm',
+    authenticatedRouteOptions,
+    async (request) => {
+      const identity = request.authIdentity;
+      if (identity === null) {
+        throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
+      }
+      const body = authConfirmEmailChangeBodySchema.parse(request.body);
+      return dependencies.authService.confirmEmailChange(identity.userId, body);
+    },
+  );
 }

@@ -54,6 +54,7 @@ import {
   createSenderBitrateController,
   type ScreenBitrateTarget,
   type SenderBitrateController,
+  DEFAULT_SCREEN_BITRATE_TARGET,
 } from '../media/sender-bitrate.js';
 import {
   createStatsBuffer,
@@ -278,22 +279,40 @@ export function createRealtimeRoomGateway(
     if (current === null || event.payload.roomId !== current.roomId) return;
     switch (event.type) {
       case 'peer.joined': {
-        if (callSession !== null) {
+        const alreadyPresent = current.participants.some(
+          (item) => item.userId === event.payload.peer.userId,
+        );
+        const hadRemotePeer = current.participants.some(
+          (item) => !item.isSelf && item.online,
+        );
+        // Only reset media readiness when the first remote peer appears.
+        if (callSession !== null && !hadRemotePeer) {
           callSession = Object.freeze({ ...callSession, peerReady: false });
         }
-        const existing = current.participants.filter((item) => item.isSelf);
         emitSnapshot({
           ...current,
-          connectionStatus: 'connecting',
-          participants: [
-            ...existing,
-            participant(
-              event.payload.peer.userId,
-              event.payload.peer.displayName,
-              false,
-              true,
-            ),
-          ],
+          connectionStatus: hadRemotePeer
+            ? current.connectionStatus
+            : 'connecting',
+          participants: alreadyPresent
+            ? current.participants.map((item) =>
+                item.userId === event.payload.peer.userId
+                  ? {
+                      ...item,
+                      displayName: event.payload.peer.displayName,
+                      online: true,
+                    }
+                  : item,
+              )
+            : [
+                ...current.participants,
+                participant(
+                  event.payload.peer.userId,
+                  event.payload.peer.displayName,
+                  false,
+                  true,
+                ),
+              ],
         });
         break;
       }
@@ -306,18 +325,28 @@ export function createRealtimeRoomGateway(
           online: true,
         }));
         break;
-      case 'peer.left':
-        if (callSession !== null) {
+      case 'peer.left': {
+        const remainingRemotes = current.participants.filter(
+          (item) =>
+            !item.isSelf &&
+            item.userId !== event.payload.userId &&
+            item.online,
+        );
+        if (callSession !== null && remainingRemotes.length === 0) {
           callSession = Object.freeze({ ...callSession, peerReady: false });
         }
-        updatePeer(event.payload.userId, (peer) => ({
-          ...peer,
-          online: false,
-        }));
-        if (current !== null) {
-          emitSnapshot({ ...current, connectionStatus: 'reconnecting' });
-        }
+        emitSnapshot({
+          ...current,
+          connectionStatus:
+            remainingRemotes.length === 0
+              ? 'reconnecting'
+              : current.connectionStatus,
+          participants: current.participants.filter(
+            (item) => item.userId !== event.payload.userId,
+          ),
+        });
         break;
+      }
       case 'room.closed': {
         const roomId = current.roomId;
         closeLocalRoom(roomId, event.payload.reason);
@@ -679,7 +708,7 @@ export function createCallController(
     screenOwnerLeaseId: callSession.screen.leaseId,
     localScreenTrack: null,
     remoteScreenTrack: null,
-    screenBitrateTarget: Object.freeze({ mode: 'auto' }),
+    screenBitrateTarget: DEFAULT_SCREEN_BITRATE_TARGET,
     screenBitratePending: null,
     screenBitrateError: null,
     remoteScreenBitrateBps: null,
@@ -725,6 +754,7 @@ export function createCallController(
   const bitrateController: SenderBitrateController =
     createSenderBitrateController({
       getSender: () => peer?.screenSender ?? null,
+      initialTarget: DEFAULT_SCREEN_BITRATE_TARGET,
     });
   let initialized = false;
   let microphoneAcquired = false;
@@ -1989,7 +2019,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     screenOwnerLeaseId: null,
     localScreenTrack: null,
     remoteScreenTrack: null,
-    screenBitrateTarget: Object.freeze({ mode: 'auto' }),
+    screenBitrateTarget: DEFAULT_SCREEN_BITRATE_TARGET,
     screenBitratePending: null,
     screenBitrateError: null,
     remoteScreenBitrateBps: null,

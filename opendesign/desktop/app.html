@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>WO · 桌面客户端</title>
+  <script>
+    (function () {
+      try {
+        var m = localStorage.getItem('wo-theme') || 'system';
+        var dark = m === 'dark' || (m !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.themePref = m === 'light' || m === 'dark' ? m : 'system';
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="../shared/tokens.css" />
+  <link rel="stylesheet" href="../shared/app.css" />
+  <script src="../shared/icons.js"></script>
+  <script src="../shared/theme.js"></script>
+</head>
+<body>
+  <div class="desktop-frame" data-od-id="desktop-frame">
+    <div class="window" data-od-id="desktop-window" role="application" aria-label="WO 桌面客户端">
+      <div class="titlebar" data-od-id="titlebar">
+        <div class="traffic" aria-hidden="true">
+          <span class="close"></span>
+          <span class="min"></span>
+          <span class="max"></span>
+        </div>
+        <div class="title" id="window-title">WO</div>
+        <div style="width:52px" aria-hidden="true"></div>
+      </div>
+      <div class="window-body" id="app-root" data-od-id="window-body"></div>
+    </div>
+  </div>
+
+  <script src="../shared/app-core.js"></script>
+  <script>
+    (function () {
+      if (window.WOTheme) {
+        window.WOTheme.mountCorner({ host: document.querySelector('.window') });
+      }
+
+      const params = new URLSearchParams(location.search);
+      const start = params.get('start') || 'auth';
+      const screen = params.get('screen') || 'idle';
+      const initial = {
+        route: start === 'room' || start === 'home' || start === 'auth' ? start : 'auth',
+        user: start === 'auth' ? null : { displayName: '陈响', email: 'chen@example.com' },
+        roomCode: start === 'room' ? (params.get('code') || '482913') : '',
+        screen: start === 'room' ? (screen === 'sharing' || screen === 'picking' ? screen : 'idle') : 'idle',
+        displayName: '陈响',
+        email: 'chen@example.com',
+        password: 'password123',
+      };
+
+      const root = document.getElementById('app-root');
+      const title = document.getElementById('window-title');
+
+      window.WOApp.mount(root, initial, (state) => {
+        title.textContent =
+          state.route === 'room'
+            ? `WO · 房间 ${state.roomCode || ''}`
+            : state.route === 'home'
+              ? 'WO · 开始通话'
+              : 'WO · 登录';
+        root.classList.toggle('dark', state.route === 'room');
+        if (state.route === 'auth') return window.WOApp.authView(state);
+        if (state.route === 'home') return window.WOApp.homeView(state);
+        return window.WOApp.roomView(state);
+      });
+    })();
+  </script>
+</body>
+</html>

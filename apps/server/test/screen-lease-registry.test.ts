@@ -13,7 +13,7 @@ function createHarness(
     randomInt: () => 123_456,
     randomUUID: () => `generated-${++uuid}`,
     screenLeaseTtlMs: 15_000,
-    screenBitrateRange: { min: 1_000_000, max: 10_000_000 },
+    screenBitrateRange: { min: 1_000_000, max: 20_000_000 },
     requestCacheMaxEntries: options.requestCacheMaxEntries,
     onAsyncIntent: (intent) => asyncIntents.push(intent),
   });
@@ -116,7 +116,7 @@ describe('authoritative screen lease registry', () => {
       ownerUserId: 'creator',
       leaseId: 'generated-2',
       expiresAtMs: 15_000,
-      targetBitrateBps: 4_000_000,
+      targetBitrateBps: 10_000_000,
     });
     expect(replay.data).toEqual(first.data);
     expect(replay.replayed).toBe(true);
@@ -334,7 +334,7 @@ describe('authoritative screen lease registry', () => {
       ...creator,
       requestId: 'bitrate',
       leaseId: lease.leaseId,
-      bitrateBps: 20_000_000,
+      bitrateBps: 30_000_000,
     });
     vi.advanceTimersByTime(5_000);
     const renewed = leases.renew({
@@ -343,8 +343,8 @@ describe('authoritative screen lease registry', () => {
       leaseId: lease.leaseId,
     });
 
-    expect(updated.data.bitrateBps).toBe(10_000_000);
-    expect(renewed.data.lease.targetBitrateBps).toBe(10_000_000);
+    expect(updated.data.bitrateBps).toBe(20_000_000);
+    expect(renewed.data.lease.targetBitrateBps).toBe(20_000_000);
   });
 
   test('rejects a stale connection epoch and releases on replacement', () => {

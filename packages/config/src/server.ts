@@ -161,14 +161,14 @@ export const parseServerConfig = (
     'SCREEN_BITRATE_MIN',
     raw.SCREEN_BITRATE_MIN,
     1_000_000,
-    10_000_000,
+    20_000_000,
     issues,
   );
   const screenBitrateMax = parseInteger(
     'SCREEN_BITRATE_MAX',
     raw.SCREEN_BITRATE_MAX,
     1_000_000,
-    10_000_000,
+    20_000_000,
     issues,
   );
 

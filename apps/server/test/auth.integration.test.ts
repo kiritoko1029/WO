@@ -43,6 +43,25 @@ const JWT_SECRET = Buffer.from(
 ).toString('base64url');
 const PUBLIC_URL = 'https://rtc.example.test/';
 const LOGIN_RACE_USER_ID = '00000000-0000-4000-8000-000000000099';
+function asAuthenticated<T extends { status?: string }>(response: T): Exclude<T, { status: 'verification_required' }> {
+  if ('status' in response && response.status === 'verification_required') {
+    throw new Error('expected authenticated response');
+  }
+  return response as Exclude<T, { status: 'verification_required' }>;
+}
+
+const defaultEmailDeps = {
+  emailPolicy: {
+    domainAllowlist: [] as const,
+    verificationRequired: false,
+    codeTtlSeconds: 600,
+  },
+  emailDelivery: {
+    async send() {
+      // no-op in integration tests
+    },
+  },
+};
 
 describe('HTTP email/password authentication', () => {
   let client: DatabaseClient;
@@ -70,6 +89,7 @@ describe('HTTP email/password authentication', () => {
       sessionRepository,
       accessTokenService,
       dummyPasswordHash,
+      ...defaultEmailDeps,
     });
     app = await createApp({
       authService,
@@ -140,7 +160,7 @@ describe('HTTP email/password authentication', () => {
 
     expect(registration.statusCode).toBe(201);
     const registered = authRegisterResponseSchema.parse(registration.json());
-    expect(registered.user).toMatchObject({
+    expect(asAuthenticated(registered).user).toMatchObject({
       email: 'person@example.com',
       displayName: 'Person',
     });
@@ -165,7 +185,7 @@ describe('HTTP email/password authentication', () => {
     });
     expect(login.statusCode).toBe(200);
     expect(authLoginResponseSchema.parse(login.json()).user).toEqual(
-      registered.user,
+      asAuthenticated(registered).user,
     );
   });
 
@@ -206,7 +226,7 @@ describe('HTTP email/password authentication', () => {
       },
     });
     const registered = authRegisterResponseSchema.parse(registration.json());
-    await identityRepository.disableUser(registered.user.userId);
+    await identityRepository.disableUser(asAuthenticated(registered).user.userId);
 
     const attempts = [
       { email: 'missing@example.com', password: 'wrong password value' },
@@ -266,6 +286,7 @@ describe('HTTP email/password authentication', () => {
           sessionRepository: failingSessionRepository,
           accessTokenService,
           dummyPasswordHash,
+      ...defaultEmailDeps,
         }),
         accessTokenService,
         readinessCheck: async () => undefined,
@@ -322,6 +343,7 @@ describe('HTTP email/password authentication', () => {
         sessionRepository: createSessionRepository(client),
         accessTokenService,
         dummyPasswordHash,
+      ...defaultEmailDeps,
       }),
       accessTokenService,
       readinessCheck: async () => undefined,
@@ -364,16 +386,16 @@ describe('HTTP email/password authentication', () => {
     const rotation = await app!.inject({
       method: 'POST',
       url: '/v1/auth/refresh',
-      payload: { refreshToken: registered.refreshToken },
+      payload: { refreshToken: asAuthenticated(registered).refreshToken },
     });
     expect(rotation.statusCode).toBe(200);
     const refreshed = authRefreshResponseSchema.parse(rotation.json());
-    expect(refreshed.refreshToken).not.toBe(registered.refreshToken);
+    expect(refreshed.refreshToken).not.toBe(asAuthenticated(registered).refreshToken);
 
     const reuse = await app!.inject({
       method: 'POST',
       url: '/v1/auth/refresh',
-      payload: { refreshToken: registered.refreshToken },
+      payload: { refreshToken: asAuthenticated(registered).refreshToken },
     });
     const replacementAfterReuse = await app!.inject({
       method: 'POST',
@@ -396,7 +418,7 @@ describe('HTTP email/password authentication', () => {
       },
     });
     const registered = authRegisterResponseSchema.parse(registration.json());
-    const payload = { refreshToken: registered.refreshToken };
+    const payload = { refreshToken: asAuthenticated(registered).refreshToken };
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const logout = await app!.inject({
@@ -438,6 +460,12 @@ describe('HTTP email/password authentication', () => {
       async revokeRefreshTokenFamily() {
         throw repositoryError;
       },
+      async listActiveSessionSummaries() {
+        throw repositoryError;
+      },
+      async revokeAllSessionsForUser() {
+        throw repositoryError;
+      },
     };
     const accessTokenService = createAccessTokenService({
       jwtAccessSecret: JWT_SECRET,
@@ -449,6 +477,7 @@ describe('HTTP email/password authentication', () => {
         sessionRepository: failingSessionRepository,
         accessTokenService,
         dummyPasswordHash,
+      ...defaultEmailDeps,
       }),
       accessTokenService,
       readinessCheck: async () => undefined,
@@ -505,6 +534,12 @@ describe('HTTP email/password authentication', () => {
         async revokeRefreshTokenFamily() {
           throw forgedError;
         },
+        async listActiveSessionSummaries() {
+          throw forgedError;
+        },
+        async revokeAllSessionsForUser() {
+          throw forgedError;
+        },
       };
       const accessTokenService = createAccessTokenService({
         jwtAccessSecret: JWT_SECRET,
@@ -516,6 +551,7 @@ describe('HTTP email/password authentication', () => {
           sessionRepository: failingSessionRepository,
           accessTokenService,
           dummyPasswordHash,
+      ...defaultEmailDeps,
         }),
         accessTokenService,
         readinessCheck: async () => undefined,
@@ -569,6 +605,7 @@ describe('HTTP email/password authentication', () => {
       sessionRepository: createSessionRepository(client),
       accessTokenService,
       dummyPasswordHash,
+      ...defaultEmailDeps,
     });
     app = await createApp({
       authService,
@@ -580,13 +617,13 @@ describe('HTTP email/password authentication', () => {
     const refresh = await app.inject({
       method: 'POST',
       url: '/v1/auth/refresh',
-      payload: { refreshToken: registered.refreshToken },
+      payload: { refreshToken: asAuthenticated(registered).refreshToken },
     });
     expect(refresh.statusCode).toBe(200);
     const refreshed = authRefreshResponseSchema.parse(refresh.json());
-    expect(refreshed.user).toEqual(registered.user);
+    expect(refreshed.user).toEqual(asAuthenticated(registered).user);
 
-    await identityRepository.disableUser(registered.user.userId);
+    await identityRepository.disableUser(asAuthenticated(registered).user.userId);
     const disabled = await app.inject({
       method: 'POST',
       url: '/v1/auth/refresh',
@@ -624,13 +661,13 @@ describe('HTTP email/password authentication', () => {
     const protectedResponse = await app!.inject({
       method: 'POST',
       url: '/test/protected',
-      headers: { authorization: `Bearer ${registered.accessToken}` },
+      headers: { authorization: `Bearer ${asAuthenticated(registered).accessToken}` },
       payload: { userId: 'attacker', sessionId: 'attacker-session' },
     });
     expect(protectedResponse.statusCode).toBe(200);
     expect(protectedResponse.json()).toEqual({
       identity: {
-        userId: registered.user.userId,
+        userId: asAuthenticated(registered).user.userId,
         sessionId: expect.any(String),
         accessTokenExpiresAtSeconds: expect.any(Number),
       },
@@ -707,6 +744,7 @@ describe('HTTP email/password authentication', () => {
           issuer: PUBLIC_URL,
         }),
         dummyPasswordHash,
+      ...defaultEmailDeps,
       }),
       accessTokenService: createAccessTokenService({
         jwtAccessSecret: JWT_SECRET,

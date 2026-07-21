@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>WO Prototype · Launcher</title>
+  <script>
+    (function () {
+      try {
+        var m = localStorage.getItem('wo-theme') || 'system';
+        var dark = m === 'dark' || (m !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.themePref = m === 'light' || m === 'dark' ? m : 'system';
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="./shared/tokens.css" />
+  <link rel="stylesheet" href="./shared/app.css" />
+  <script src="./shared/icons.js"></script>
+  <script src="./shared/theme.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(900px 420px at 15% -10%, color-mix(in oklab, var(--accent) 12%, transparent), transparent 55%),
+        var(--surface);
+      color: var(--fg);
+      font-family: var(--font-body);
+      font-size: var(--text-base);
+      line-height: var(--leading-body);
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 22px 72px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: end; margin-bottom: 28px; flex-wrap: wrap; }
+    .kicker {
+      margin: 0 0 8px; color: var(--accent); font-family: var(--font-mono);
+      font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600;
+    }
+    h1 {
+      margin: 0; font-family: var(--font-display); font-size: clamp(32px, 5vw, 44px);
+      letter-spacing: var(--tracking-display); font-weight: 600; line-height: 1.1;
+    }
+    .sub { margin: 10px 0 0; color: var(--muted); max-width: 52ch; }
+    .grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; }
+    .card {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 18px;
+      padding: 22px; box-shadow: var(--elev-raised);
+    }
+    .card h2 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+    .card p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+    .links { display: grid; gap: 8px; }
+    .link {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      min-height: 44px; padding: 10px 14px; border-radius: 12px;
+      border: 1px solid var(--border-soft); background: var(--surface-warm);
+      transition: border-color 150ms var(--ease-standard), background 150ms var(--ease-standard);
+    }
+    .link:hover { border-color: var(--meta); background: var(--bg); }
+    .link strong { font-size: 14px; font-weight: 600; }
+    .link span { color: var(--muted); font-size: 12px; font-family: var(--font-mono); }
+    .stack { display: grid; gap: 18px; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 500;
+      background: var(--accent-soft); color: var(--accent);
+    }
+    .chip.muted { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+    footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap" data-od-id="launcher">
+    <header>
+      <div>
+        <p class="kicker">WO product prototype</p>
+        <h1>桌面客户端 + 响应式 Web</h1>
+        <p class="sub">高保真可交互原型：Auth → Home → Room（空闲 / 屏幕共享），共享 Apple 视觉系统与中文产品文案。</p>
+      </div>
+      <div class="chip-row" style="align-items:center;">
+        <span class="chip">Apple DS</span>
+        <span class="chip muted">中文 UI</span>
+        <span class="chip muted">主题角落按钮</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <section class="card" data-od-id="launcher-desktop">
+        <h2>Desktop App（Electron 窗体）</h2>
+        <p>macOS 交通灯标题栏 + 密集但冷静的应用 chrome。推荐从登录或房间共享态进入。</p>
+        <div class="links">
+          <a class="link" href="./desktop/app.html?start=auth"><strong>Auth · 登录 / 注册 / 验证</strong><span>desktop/app.html?start=auth</span></a>
+          <a class="link" href="./desktop/app.html?start=home"><strong>Home · 创建 / 加入房间</strong><span>start=home</span></a>
+          <a class="link" href="./desktop/app.html?start=room&screen=idle"><strong>Room · 通话空闲</strong><span>screen=idle</span></a>
+          <a class="link" href="./desktop/app.html?start=room&screen=sharing"><strong>Room · 屏幕共享中</strong><span>screen=sharing</span></a>
+          <a class="link" href="./desktop/app.html?start=room&screen=picking"><strong>Room · 源选择器</strong><span>screen=picking</span></a>
+        </div>
+      </section>
+
+      <div class="stack">
+        <section class="card" data-od-id="launcher-web">
+          <h2>Responsive Web</h2>
+          <p>同一产品语言，浏览器 chrome；含营销落地页与轻量管理。</p>
+          <div class="links">
+            <a class="link" href="./web/landing.html"><strong>Marketing Landing</strong><span>web/landing.html</span></a>
+            <a class="link" href="./web/app.html?start=auth"><strong>Web App · Auth</strong><span>web/app.html</span></a>
+            <a class="link" href="./web/app.html?start=home"><strong>Web App · Home</strong><span>start=home</span></a>
+            <a class="link" href="./web/app.html?start=room&screen=sharing"><strong>Web App · Room 共享</strong><span>screen=sharing</span></a>
+            <a class="link" href="./web/admin.html"><strong>Admin · 轻量次级</strong><span>web/admin.html</span></a>
+          </div>
+        </section>
+
+        <section class="card" data-od-id="launcher-system">
+          <h2>Shared system</h2>
+          <p>实现时可直接映射到 Electron + Vite React 组件边界。</p>
+          <div class="links">
+            <a class="link" href="./shared/tokens.css"><strong>tokens.css</strong><span>Apple + dark</span></a>
+            <a class="link" href="./shared/app.css"><strong>app.css</strong><span>product chrome</span></a>
+            <a class="link" href="./shared/theme.js"><strong>theme.js</strong><span>light / dark / system</span></a>
+            <a class="link" href="./shared/app-core.js"><strong>app-core.js</strong><span>state + screens</span></a>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <footer>
+      流程：Landing → Auth → Home → Room。主题：右下角单按钮循环 自适应 → 浅色 → 深色（localStorage 记忆）。
+    </footer>
+  </div>
+  <script>
+    if (window.WOTheme) window.WOTheme.mountCorner();
+  </script>
+</body>
+</html>

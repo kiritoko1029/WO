@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>WO · 轻量管理</title>
+  <script>
+    (function () {
+      try {
+        var m = localStorage.getItem('wo-theme') || 'system';
+        var dark = m === 'dark' || (m !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.themePref = m === 'light' || m === 'dark' ? m : 'system';
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="../shared/tokens.css" />
+  <link rel="stylesheet" href="../shared/app.css" />
+  <script src="../shared/icons.js"></script>
+  <script src="../shared/theme.js"></script>
+  <style>
+    body { background: var(--surface); }
+    .admin {
+      max-width: 1080px; margin: 0 auto; padding: 28px 20px 64px;
+    }
+    .admin-header {
+      display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px;
+      align-items: end; margin-bottom: 22px;
+    }
+    .admin-header .kicker {
+      margin: 0 0 6px; color: var(--accent); font-size: 12px; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase; font-family: var(--font-mono);
+    }
+    .admin-header h1 {
+      margin: 0; font-family: var(--font-display); font-size: 32px; font-weight: 600;
+      letter-spacing: var(--tracking-display);
+    }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+    .stat {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
+    }
+    .stat .label { color: var(--muted); font-size: 13px; }
+    .stat .value {
+      margin-top: 6px; font-family: var(--font-mono); font-size: 28px; font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .table-card {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 18px; overflow: hidden;
+    }
+    .table-card header {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      padding: 16px 18px; border-bottom: 1px solid var(--border-soft);
+    }
+    .table-card h2 { margin: 0; font-size: 16px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border-soft); }
+    th { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; font-family: var(--font-mono); }
+    tr:last-child td { border-bottom: 0; }
+    .actions { display: flex; gap: 8px; }
+    @media (max-width: 720px) {
+      .stats { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="web-topbar" data-od-id="admin-topbar">
+    <a class="product-lockup compact" href="./landing.html">
+      <span class="mark" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"/></svg>
+      </span>
+      <span>WO</span>
+    </a>
+    <nav>
+      <a href="./app.html">应用</a>
+      <a href="./admin.html" style="color:var(--fg);font-weight:500;">管理</a>
+    </nav>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <a class="btn btn-secondary btn-sm" href="./app.html?start=home">返回产品</a>
+    </div>
+  </header>
+
+  <main class="admin" data-od-id="admin-shell">
+    <div class="admin-header">
+      <div>
+        <p class="kicker">Secondary · Ops</p>
+        <h1>轻量管理</h1>
+      </div>
+      <span class="badge">只读演示 · 不与主流程争抢</span>
+    </div>
+
+    <section class="stats" data-od-id="admin-stats">
+      <article class="stat">
+        <div class="label">在线用户</div>
+        <div class="value mono">128</div>
+      </article>
+      <article class="stat">
+        <div class="label">活跃房间</div>
+        <div class="value mono">17</div>
+      </article>
+      <article class="stat">
+        <div class="label">今日会话</div>
+        <div class="value mono">642</div>
+      </article>
+    </section>
+
+    <section class="table-card" data-od-id="admin-sessions">
+      <header>
+        <h2>最近会话</h2>
+        <button class="btn btn-secondary btn-sm" type="button">刷新</button>
+      </header>
+      <table>
+        <thead>
+          <tr>
+            <th>房间码</th>
+            <th>发起人</th>
+            <th>人数</th>
+            <th>状态</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">482913</td>
+            <td>陈响</td>
+            <td class="mono">2</td>
+            <td><span class="badge live"><span class="dot"></span> 通话中</span></td>
+            <td class="actions"><button class="btn btn-ghost btn-sm" type="button">查看</button></td>
+          </tr>
+          <tr>
+            <td class="mono">109284</td>
+            <td>林可</td>
+            <td class="mono">1</td>
+            <td><span class="badge">等待加入</span></td>
+            <td class="actions"><button class="btn btn-ghost btn-sm" type="button">查看</button></td>
+          </tr>
+          <tr>
+            <td class="mono">773150</td>
+            <td>周宁</td>
+            <td class="mono">3</td>
+            <td><span class="badge">已结束</span></td>
+            <td class="actions"><button class="btn btn-ghost btn-sm" type="button">查看</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    if (window.WOTheme) window.WOTheme.mountCorner();
+  </script>
+</body>
+</html>

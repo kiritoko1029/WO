@@ -7,6 +7,9 @@
     "node": ">=24 <25",
     "pnpm": "10.32.1"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["bufferutil", "utf-8-validate"]
+  },
   "scripts": {
     "build": "pnpm -r --if-present build",
     "test": "vitest run --config vitest.root.config.ts && pnpm -r --if-present test",

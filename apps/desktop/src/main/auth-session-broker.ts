@@ -1,22 +1,50 @@
 import {
+  authChangePasswordBodySchema,
+  authChangePasswordResponseSchema,
+  authConfirmEmailChangeBodySchema,
+  authEmailChangeRequestedResponseSchema,
   authLoginBodySchema,
   authLoginResponseSchema,
   authLogoutResponseSchema,
   authRefreshResponseSchema,
   authRegisterBodySchema,
   authRegisterResponseSchema,
+  authRequestEmailChangeBodySchema,
+  authResendVerificationBodySchema,
+  authResponseSchema,
+  authVerifyEmailBodySchema,
+  type AuthChangePasswordBody,
+  type AuthConfirmEmailChangeBody,
   type AuthLoginBody,
   type AuthRegisterBody,
+  type AuthRequestEmailChangeBody,
+  type AuthResendVerificationBody,
   type AuthResponse,
+  type AuthVerifyEmailBody,
 } from '@wo/protocol';
 
 import type { PublicAuthSession } from '../preload/types.js';
 import type { MainHttpClient } from './http-client.js';
 import type { SecureSessionStore } from './secure-session-store.js';
 
+export type AuthRegisterResult =
+  | Readonly<{ kind: 'session'; session: PublicAuthSession }>
+  | Readonly<{ kind: 'verification_required'; email: string }>;
+
 export interface AuthSessionBroker {
-  register(input: AuthRegisterBody): Promise<PublicAuthSession>;
+  register(input: AuthRegisterBody): Promise<AuthRegisterResult>;
   login(input: AuthLoginBody): Promise<PublicAuthSession>;
+  verifyEmail(input: AuthVerifyEmailBody): Promise<PublicAuthSession>;
+  resendVerification(
+    input: AuthResendVerificationBody,
+  ): Promise<Readonly<{ email: string }>>;
+  changePassword(input: AuthChangePasswordBody): Promise<void>;
+  requestEmailChange(
+    input: AuthRequestEmailChangeBody,
+  ): Promise<Readonly<{ email: string }>>;
+  confirmEmailChange(
+    input: AuthConfirmEmailChangeBody,
+  ): Promise<PublicAuthSession>;
   refresh(): Promise<PublicAuthSession>;
   logout(): Promise<void>;
 }
@@ -43,6 +71,10 @@ function publicSession(response: AuthResponse, now: number): PublicAuthSession {
     accessToken: response.accessToken,
     accessTokenExpiresAt: now + response.accessTokenExpiresInSeconds * 1_000,
   });
+}
+
+function asAuthResponse(value: unknown): AuthResponse {
+  return authResponseSchema.parse(value);
 }
 
 export function createAuthSessionBroker(
@@ -73,6 +105,22 @@ export function createAuthSessionBroker(
     return publicSession(response, now());
   };
 
+  const authorizedPost = async <Body, Response>(
+    path: string,
+    body: Body,
+    responseSchema: {
+      parse(input: unknown): Response;
+    },
+  ): Promise<Response> => {
+    const session = await broker.refresh();
+    return options.http.post({
+      path,
+      body,
+      bearerToken: session.accessToken,
+      responseSchema,
+    });
+  };
+
   const broker: AuthSessionBroker = {
     register: (input) =>
       exclusiveNonRefresh(async () => {
@@ -82,7 +130,17 @@ export function createAuthSessionBroker(
           body,
           responseSchema: authRegisterResponseSchema,
         });
-        return persistResponse(response);
+        if (
+          'status' in response &&
+          response.status === 'verification_required'
+        ) {
+          return Object.freeze({
+            kind: 'verification_required' as const,
+            email: response.email,
+          });
+        }
+        const session = await persistResponse(asAuthResponse(response));
+        return Object.freeze({ kind: 'session' as const, session });
       }),
     login: (input) =>
       exclusiveNonRefresh(async () => {
@@ -92,6 +150,55 @@ export function createAuthSessionBroker(
           body,
           responseSchema: authLoginResponseSchema,
         });
+        return persistResponse(asAuthResponse(response));
+      }),
+    verifyEmail: (input) =>
+      exclusiveNonRefresh(async () => {
+        const body = authVerifyEmailBodySchema.parse(input);
+        const response = await options.http.post({
+          path: '/v1/auth/email/verify',
+          body,
+          responseSchema: authResponseSchema,
+        });
+        return persistResponse(response);
+      }),
+    resendVerification: (input) =>
+      exclusiveNonRefresh(async () => {
+        const body = authResendVerificationBodySchema.parse(input);
+        const response = await options.http.post({
+          path: '/v1/auth/email/resend',
+          body,
+          responseSchema: authEmailChangeRequestedResponseSchema,
+        });
+        return Object.freeze({ email: response.email });
+      }),
+    changePassword: (input) =>
+      exclusiveNonRefresh(async () => {
+        const body = authChangePasswordBodySchema.parse(input);
+        await authorizedPost(
+          '/v1/auth/password',
+          body,
+          authChangePasswordResponseSchema,
+        );
+      }),
+    requestEmailChange: (input) =>
+      exclusiveNonRefresh(async () => {
+        const body = authRequestEmailChangeBodySchema.parse(input);
+        const response = await authorizedPost(
+          '/v1/auth/email/change/request',
+          body,
+          authEmailChangeRequestedResponseSchema,
+        );
+        return Object.freeze({ email: response.email });
+      }),
+    confirmEmailChange: (input) =>
+      exclusiveNonRefresh(async () => {
+        const body = authConfirmEmailChangeBodySchema.parse(input);
+        const response = await authorizedPost(
+          '/v1/auth/email/change/confirm',
+          body,
+          authResponseSchema,
+        );
         return persistResponse(response);
       }),
     refresh: () => {

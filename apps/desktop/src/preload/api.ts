@@ -185,6 +185,35 @@ async function invokeDesktop<Value>(
   return parseDesktopIpcEnvelope(envelope, parseValue);
 }
 
+function parseAuthRegisterResult(input: unknown): import('./types.js').AuthRegisterResult {
+  if (!isRecord(input) || typeof input.kind !== 'string') {
+    throw new TypeError('Invalid auth register result');
+  }
+  if (input.kind === 'session') {
+    return Object.freeze({
+      kind: 'session' as const,
+      session: parsePublicAuthSession(input.session),
+    });
+  }
+  if (input.kind === 'verification_required') {
+    if (typeof input.email !== 'string') {
+      throw new TypeError('Invalid auth register result');
+    }
+    return Object.freeze({
+      kind: 'verification_required' as const,
+      email: input.email,
+    });
+  }
+  throw new TypeError('Invalid auth register result');
+}
+
+function parseEmailOnly(input: unknown): Readonly<{ email: string }> {
+  if (!isRecord(input) || typeof input.email !== 'string') {
+    throw new TypeError('Invalid email response');
+  }
+  return Object.freeze({ email: input.email });
+}
+
 export function createDesktopApi(invoke: Invoke): Readonly<DesktopBridge> {
   const auth = Object.freeze({
     register: (input: Parameters<DesktopBridge['auth']['register']>[0]) =>
@@ -192,12 +221,50 @@ export function createDesktopApi(invoke: Invoke): Readonly<DesktopBridge> {
         invoke,
         'desktop:auth:register',
         [input],
-        parsePublicAuthSession,
+        parseAuthRegisterResult,
       ),
     login: (input: Parameters<DesktopBridge['auth']['login']>[0]) =>
       invokeDesktop(
         invoke,
         'desktop:auth:login',
+        [input],
+        parsePublicAuthSession,
+      ),
+    verifyEmail: (input: Parameters<DesktopBridge['auth']['verifyEmail']>[0]) =>
+      invokeDesktop(
+        invoke,
+        'desktop:auth:verify-email',
+        [input],
+        parsePublicAuthSession,
+      ),
+    resendVerification: (
+      input: Parameters<DesktopBridge['auth']['resendVerification']>[0],
+    ) =>
+      invokeDesktop(
+        invoke,
+        'desktop:auth:resend-verification',
+        [input],
+        parseEmailOnly,
+      ),
+    changePassword: (
+      input: Parameters<DesktopBridge['auth']['changePassword']>[0],
+    ) =>
+      invokeDesktop(invoke, 'desktop:auth:change-password', [input], parseNull),
+    requestEmailChange: (
+      input: Parameters<DesktopBridge['auth']['requestEmailChange']>[0],
+    ) =>
+      invokeDesktop(
+        invoke,
+        'desktop:auth:request-email-change',
+        [input],
+        parseEmailOnly,
+      ),
+    confirmEmailChange: (
+      input: Parameters<DesktopBridge['auth']['confirmEmailChange']>[0],
+    ) =>
+      invokeDesktop(
+        invoke,
+        'desktop:auth:confirm-email-change',
         [input],
         parsePublicAuthSession,
       ),

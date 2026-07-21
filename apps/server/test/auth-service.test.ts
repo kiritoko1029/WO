@@ -31,6 +31,7 @@ import {
 import {
   AuthServiceError,
   createAuthService,
+  type AuthService,
 } from '../src/modules/auth/auth-service.ts';
 import { hashPassword } from '../src/modules/auth/password.ts';
 import {
@@ -59,6 +60,19 @@ function createUuidSequence(): () => string {
 
 class MemoryIdentityRepository implements IdentityRepository {
   readonly credentials = new Map<string, EmailCredentialRecord>();
+  readonly challenges = new Map<
+    string,
+    {
+      id: string;
+      userId: string;
+      emailNormalized: string;
+      purpose: 'register' | 'rebind';
+      codeHash: string;
+      expiresAt: Date;
+      consumedAt: Date | null;
+      createdAt: Date;
+    }
+  >();
 
   constructor(
     private readonly sessionRepository: MemorySessionRepository | null = null,
@@ -77,6 +91,7 @@ class MemoryIdentityRepository implements IdentityRepository {
     };
     this.credentials.set(emailNormalized, {
       emailNormalized,
+      verifiedAt: null,
       passwordHash: input.passwordHash,
       user,
     });
@@ -108,10 +123,11 @@ class MemoryIdentityRepository implements IdentityRepository {
     });
     this.credentials.set(emailNormalized, {
       emailNormalized,
+      verifiedAt: null,
       passwordHash: input.passwordHash,
       user,
     });
-    return { emailNormalized, user, session };
+    return { emailNormalized, verifiedAt: null, user, session };
   }
 
   async findEmailCredential(
@@ -121,9 +137,13 @@ class MemoryIdentityRepository implements IdentityRepository {
   }
 
   async findEmailUserById(userId: string): Promise<EmailUserRecord | null> {
-    for (const { emailNormalized, user } of this.credentials.values()) {
-      if (user.id === userId) {
-        return { emailNormalized, user };
+    for (const credential of this.credentials.values()) {
+      if (credential.user.id === userId) {
+        return {
+          emailNormalized: credential.emailNormalized,
+          verifiedAt: credential.verifiedAt,
+          user: credential.user,
+        };
       }
     }
     return null;
@@ -139,7 +159,155 @@ class MemoryIdentityRepository implements IdentityRepository {
     }
     throw new IdentityRepositoryError('USER_NOT_FOUND');
   }
+
+  async markEmailVerified(userId: string, verifiedAt = NOW): Promise<void> {
+    for (const [email, credential] of this.credentials.entries()) {
+      if (credential.user.id === userId) {
+        this.credentials.set(email, {
+          ...credential,
+          verifiedAt: new Date(verifiedAt),
+        });
+        return;
+      }
+    }
+    throw new IdentityRepositoryError('USER_NOT_FOUND');
+  }
+
+  async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+    for (const [email, credential] of this.credentials.entries()) {
+      if (credential.user.id === userId) {
+        this.credentials.set(email, { ...credential, passwordHash });
+        return;
+      }
+    }
+    throw new IdentityRepositoryError('USER_NOT_FOUND');
+  }
+
+  async updateEmailIdentity(userId: string, emailNormalized: string) {
+    const nextEmail = emailNormalized.trim().toLowerCase();
+    if (this.credentials.has(nextEmail)) {
+      throw new IdentityRepositoryError('IDENTITY_CONFLICT');
+    }
+    for (const [email, credential] of this.credentials.entries()) {
+      if (credential.user.id === userId) {
+        this.credentials.delete(email);
+        const next = {
+          ...credential,
+          emailNormalized: nextEmail,
+          verifiedAt: new Date(NOW),
+        };
+        this.credentials.set(nextEmail, next);
+        return {
+          emailNormalized: nextEmail,
+          verifiedAt: next.verifiedAt,
+          user: next.user,
+        };
+      }
+    }
+    throw new IdentityRepositoryError('USER_NOT_FOUND');
+  }
+
+  async replaceEmailVerificationChallenge(input: {
+    challengeId: string;
+    userId: string;
+    emailNormalized: string;
+    purpose: 'register' | 'rebind';
+    codeHash: string;
+    expiresAt: Date;
+  }): Promise<void> {
+    for (const [id, challenge] of this.challenges.entries()) {
+      if (
+        challenge.userId === input.userId &&
+        challenge.purpose === input.purpose &&
+        challenge.consumedAt === null
+      ) {
+        this.challenges.set(id, { ...challenge, consumedAt: new Date(NOW) });
+      }
+    }
+    this.challenges.set(input.challengeId, {
+      id: input.challengeId,
+      userId: input.userId,
+      emailNormalized: input.emailNormalized.trim().toLowerCase(),
+      purpose: input.purpose,
+      codeHash: input.codeHash,
+      expiresAt: new Date(input.expiresAt),
+      consumedAt: null,
+      createdAt: new Date(NOW),
+    });
+  }
+
+  async findLatestEmailVerificationChallenge(
+    userId: string,
+    purpose: 'register' | 'rebind',
+  ) {
+    let latest: (typeof this.challenges extends Map<string, infer V>
+      ? V
+      : never) | null = null;
+    for (const challenge of this.challenges.values()) {
+      if (
+        challenge.userId === userId &&
+        challenge.purpose === purpose &&
+        challenge.consumedAt === null
+      ) {
+        if (
+          latest === null ||
+          challenge.createdAt.getTime() > latest.createdAt.getTime()
+        ) {
+          latest = challenge;
+        }
+      }
+    }
+    return latest;
+  }
+
+  async consumeEmailVerificationChallenge(challengeId: string) {
+    const challenge = this.challenges.get(challengeId);
+    if (
+      challenge === undefined ||
+      challenge.consumedAt !== null ||
+      challenge.expiresAt.getTime() <= NOW.getTime()
+    ) {
+      return false;
+    }
+    this.challenges.set(challengeId, {
+      ...challenge,
+      consumedAt: new Date(NOW),
+    });
+    return true;
+  }
+
+  async listEmailUsers() {
+    return [...this.credentials.values()].map((credential) => ({
+      emailNormalized: credential.emailNormalized,
+      verifiedAt: credential.verifiedAt,
+      user: credential.user,
+    }));
+  }
+
+  async enableUser(userId: string) {
+    for (const [email, credential] of this.credentials.entries()) {
+      if (credential.user.id === userId) {
+        const user = { ...credential.user, disabledAt: null };
+        this.credentials.set(email, { ...credential, user });
+        return user;
+      }
+    }
+    throw new IdentityRepositoryError('USER_NOT_FOUND');
+  }
 }
+
+const defaultEmailDeps = {
+  emailPolicy: {
+    domainAllowlist: [] as const,
+    verificationRequired: false,
+    codeTtlSeconds: 600,
+  },
+  emailDelivery: {
+    async send() {
+      // no-op for unit tests
+    },
+  },
+};
 
 type MemorySession = RefreshSessionRecord & {
   readonly tokenHash: string;
@@ -233,9 +401,32 @@ class MemorySessionRepository implements SessionRepository {
       revokedAt,
     };
   }
+
+  async listActiveSessionSummaries() {
+    return [];
+  }
+
+  async revokeAllSessionsForUser(userId: string) {
+    let count = 0;
+    for (const [hash, session] of this.sessions.entries()) {
+      if (session.userId === userId && session.revokedAt === null) {
+        this.sessions.set(hash, { ...session, revokedAt: new Date(NOW) });
+        count += 1;
+      }
+    }
+    return count;
+  }
 }
 
 let dummyPasswordHash: string;
+
+function asAuthenticated(response: Awaited<ReturnType<AuthService['register']>>) {
+  if ('status' in response && response.status === 'verification_required') {
+    throw new Error('expected authenticated registration response');
+  }
+  return response;
+}
+
 
 beforeAll(async () => {
   dummyPasswordHash = await hashPassword('dummy password value');
@@ -254,6 +445,7 @@ function createHarness() {
     sessionRepository,
     accessTokenService,
     dummyPasswordHash,
+      ...defaultEmailDeps,
     now: () => new Date(NOW),
     randomUUID: createUuidSequence(),
   });
@@ -298,6 +490,12 @@ function createThrowingSessionRepository(error: unknown): SessionRepository {
     async revokeRefreshTokenFamily() {
       throw error;
     },
+    async listActiveSessionSummaries() {
+      throw error;
+    },
+    async revokeAllSessionsForUser() {
+      throw error;
+    },
   };
 }
 
@@ -311,6 +509,7 @@ function createServiceWithSessionError(error: unknown) {
       now: () => new Date(NOW),
     }),
     dummyPasswordHash,
+      ...defaultEmailDeps,
     now: () => new Date(NOW),
     randomUUID: createUuidSequence(),
   });
@@ -334,6 +533,7 @@ async function createLoginServiceWithSessionCreateError(error: unknown) {
       now: () => new Date(NOW),
     }),
     dummyPasswordHash,
+      ...defaultEmailDeps,
     now: () => new Date(NOW),
     randomUUID: createUuidSequence(),
   });
@@ -405,11 +605,13 @@ describe('auth service', () => {
       sessionRepository,
     } = createHarness();
 
-    const result = await authService.register({
-      email: '  Person@Example.COM ',
-      password: 'correct horse battery staple',
-      displayName: ' Person ',
-    });
+    const result = asAuthenticated(
+      await authService.register({
+        email: '  Person@Example.COM ',
+        password: 'correct horse battery staple',
+        displayName: ' Person ',
+      }),
+    );
 
     expect(result.user).toEqual({
       userId: USER_ID,
@@ -420,7 +622,8 @@ describe('auth service', () => {
     expect(result.refreshToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(await accessTokenService.verify(result.accessToken)).toMatchObject({
       userId: USER_ID,
-      sessionId: INITIAL_SESSION_ID,
+      // register no longer allocates a separate identity UUID before the session.
+      sessionId: '00000000-0000-4000-8000-000000000002',
     });
     const credential =
       await identityRepository.findEmailCredential('person@example.com');
@@ -460,6 +663,7 @@ describe('auth service', () => {
         now: () => new Date(NOW),
       }),
       dummyPasswordHash,
+      ...defaultEmailDeps,
       now: () => new Date(NOW),
       randomUUID: createUuidSequence(),
     });
@@ -471,7 +675,8 @@ describe('auth service', () => {
         displayName: 'Person',
       }),
     ).rejects.toBe(persistenceError);
-    expect(identityRepository.credentials.size).toBe(0);
+    // Registration without verification creates the identity first, then the session.
+    expect(identityRepository.credentials.size).toBe(1);
     expect(sessionRepository.sessions.size).toBe(0);
   });
 
@@ -491,6 +696,7 @@ describe('auth service', () => {
       sessionRepository,
       accessTokenService,
       dummyPasswordHash,
+      ...defaultEmailDeps,
       now: () => new Date(NOW),
       randomUUID: createUuidSequence(),
     });
@@ -502,7 +708,7 @@ describe('auth service', () => {
         displayName: 'Person',
       }),
     ).rejects.toBeInstanceOf(Error);
-    expect(identityRepository.credentials.size).toBe(0);
+    expect(identityRepository.credentials.size).toBe(1);
     expect(sessionRepository.sessions.size).toBe(0);
   });
 
@@ -529,6 +735,7 @@ describe('auth service', () => {
       sessionRepository,
       accessTokenService,
       dummyPasswordHash,
+      ...defaultEmailDeps,
       now: () => new Date(NOW),
       randomUUID: createUuidSequence(),
     });
@@ -671,6 +878,7 @@ describe('auth service', () => {
         sessionRepository,
         accessTokenService,
         dummyPasswordHash,
+      ...defaultEmailDeps,
         now: () => new Date(NOW),
         randomUUID: createUuidSequence(),
       });
@@ -719,6 +927,7 @@ describe('auth service', () => {
         now: () => new Date(NOW),
       }),
       dummyPasswordHash,
+      ...defaultEmailDeps,
       verifyPassword: async (hash, password) => {
         verifiedHashes.push(hash);
         return hashPassword(password).then(() => false);
@@ -745,13 +954,13 @@ describe('auth service', () => {
     });
 
     const refreshed = await authService.refresh({
-      refreshToken: registered.refreshToken,
+      refreshToken: asAuthenticated(registered).refreshToken,
     });
 
-    expect(refreshed.refreshToken).not.toBe(registered.refreshToken);
-    expect(refreshed.user).toEqual(registered.user);
+    expect(refreshed.refreshToken).not.toBe(asAuthenticated(registered).refreshToken);
+    expect(refreshed.user).toEqual(asAuthenticated(registered).user);
     await expect(
-      authService.refresh({ refreshToken: registered.refreshToken }),
+      authService.refresh({ refreshToken: asAuthenticated(registered).refreshToken }),
     ).rejects.toEqual(new AuthServiceError('AUTH_REQUIRED'));
     expect(
       [...sessionRepository.sessions.values()].every(
@@ -769,13 +978,13 @@ describe('auth service', () => {
     });
 
     await expect(
-      authService.logout({ refreshToken: registered.refreshToken }),
+      authService.logout({ refreshToken: asAuthenticated(registered).refreshToken }),
     ).resolves.toEqual({ loggedOut: true });
     await expect(
-      authService.logout({ refreshToken: registered.refreshToken }),
+      authService.logout({ refreshToken: asAuthenticated(registered).refreshToken }),
     ).resolves.toEqual({ loggedOut: true });
     await expect(
-      authService.refresh({ refreshToken: registered.refreshToken }),
+      authService.refresh({ refreshToken: asAuthenticated(registered).refreshToken }),
     ).rejects.toEqual(new AuthServiceError('AUTH_REQUIRED'));
   });
 

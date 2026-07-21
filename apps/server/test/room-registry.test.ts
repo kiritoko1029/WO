@@ -31,6 +31,7 @@ interface HarnessOptions {
   readonly maxCodeAttempts?: number;
   readonly requestCacheMaxEntries?: number;
   readonly maxRooms?: number;
+  readonly maxMembersPerRoom?: number;
   readonly maxNegotiationGeneration?: number;
   readonly now?: () => number;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
@@ -58,6 +59,9 @@ function createHarness(options: HarnessOptions = {}) {
     maxCodeAttempts: options.maxCodeAttempts,
     requestCacheMaxEntries: options.requestCacheMaxEntries,
     maxRooms: options.maxRooms,
+    // Tests default to a 2-person room so legacy join-consumes-code assertions stay valid.
+    // Multi-member cases pass maxMembersPerRoom explicitly (e.g. 3 or 8).
+    maxMembersPerRoom: options.maxMembersPerRoom ?? 2,
     maxNegotiationGeneration: options.maxNegotiationGeneration,
   });
   return {
@@ -319,8 +323,11 @@ describe('room creation and joining', () => {
     });
   });
 
-  test('binds one different joiner and immediately consumes the public code', () => {
-    const { registry } = createHarness({ codeValues: [42] });
+  test('keeps the public code open so multiple joiners can enter until capacity', () => {
+    const { registry } = createHarness({
+      codeValues: [42],
+      maxMembersPerRoom: 3,
+    });
     const created = createRoom(registry).data;
 
     expectRoomError(
@@ -332,35 +339,48 @@ describe('room creation and joining', () => {
       'ROOM_CODE_INVALID',
     );
 
-    const joined = joinRoom(registry, created.roomCode).data;
-    expect(joined.room.joinerUserId).toBe('joiner');
-    expect(joined.room.code).toBeNull();
-    expect(joined.room.codeExpiresAtMs).toBeNull();
-    expect(joined.room.state).toBe('negotiating');
+    const first = joinRoom(registry, created.roomCode).data;
+    expect(first.room.joinerUserId).toBe('joiner');
+    expect(first.room.code).toBe(created.roomCode);
+    expect(first.room.state).toBe('negotiating');
+    expect(registry.getStats()).toMatchObject({ codes: 1, timers: 1 });
+
+    const second = joinRoom(registry, created.roomCode, {
+      userId: 'third-user',
+      connectionId: 'third-connection',
+      requestId: 'third-request',
+      displayName: 'Third',
+    }).data;
+    expect(second.room.members).toHaveLength(3);
+    expect(second.room.code).toBeNull();
     expect(registry.getStats()).toMatchObject({ codes: 0, timers: 0 });
 
-    for (const code of [created.roomCode, '999999']) {
-      const error = expectRoomError(
-        () =>
-          joinRoom(registry, code, {
-            userId: 'third-user',
-            connectionId: `third-${code}`,
-            requestId: `third-${code}`,
-          }),
-        'ROOM_CODE_INVALID',
-      );
-      expect(error.message).toBe('Room code is invalid');
-    }
+    const full = expectRoomError(
+      () =>
+        joinRoom(registry, created.roomCode, {
+          userId: 'fourth-user',
+          connectionId: 'fourth-connection',
+          requestId: 'fourth-request',
+        }),
+      'ROOM_CODE_INVALID',
+    );
+    expect(full.message).toBe('Room code is invalid');
   });
 
-  test('does not distinguish expired, consumed, and nonexistent codes', () => {
+  test('does not distinguish expired, full-room, and nonexistent codes', () => {
     const expiredHarness = createHarness({ codeValues: [1] });
     const expired = createRoom(expiredHarness.registry).data;
     vi.advanceTimersByTime(ROOM_CODE_TTL_MS);
 
-    const consumedHarness = createHarness({ codeValues: [2] });
-    const consumed = createRoom(consumedHarness.registry).data;
-    joinRoom(consumedHarness.registry, consumed.roomCode);
+    const fullHarness = createHarness({
+      codeValues: [2],
+      maxMembersPerRoom: 2,
+    });
+    const full = createRoom(fullHarness.registry).data;
+    joinRoom(fullHarness.registry, full.roomCode);
+    // Capacity reached removes the public code, so later joiners see the same
+    // invalid-code error as expired or nonexistent rooms.
+    expect(fullHarness.registry.getStats().codes).toBe(0);
 
     const errors = [
       expectRoomError(
@@ -369,15 +389,15 @@ describe('room creation and joining', () => {
       ),
       expectRoomError(
         () =>
-          joinRoom(consumedHarness.registry, consumed.roomCode, {
+          joinRoom(fullHarness.registry, full.roomCode, {
             userId: 'third-user',
-            requestId: 'third-consumed',
+            requestId: 'third-full',
           }),
         'ROOM_CODE_INVALID',
       ),
       expectRoomError(
         () =>
-          joinRoom(consumedHarness.registry, '999999', {
+          joinRoom(fullHarness.registry, '999999', {
             userId: 'fourth-user',
             connectionId: 'fourth-connection',
             requestId: 'fourth-nonexistent',
@@ -391,8 +411,11 @@ describe('room creation and joining', () => {
     );
   });
 
-  test('recovers a consumed code only for the bound joiner after ACK loss', () => {
-    const { registry } = createHarness({ codeValues: [42, 42, 43] });
+  test('recovers a disconnected joiner by code and still admits additional guests', () => {
+    const { registry } = createHarness({
+      codeValues: [42, 43],
+      maxMembersPerRoom: 3,
+    });
     const created = createRoom(registry).data;
     const joined = joinRoom(registry, created.roomCode).data;
     registry.disconnect({
@@ -410,15 +433,13 @@ describe('room creation and joining', () => {
     expect(recovered.connection.connectionEpoch).toBeGreaterThan(
       joined.connection.connectionEpoch,
     );
-    expectRoomError(
-      () =>
-        joinRoom(registry, created.roomCode, {
-          userId: 'third-user',
-          connectionId: 'third-connection',
-          requestId: 'third-request',
-        }),
-      'ROOM_CODE_INVALID',
-    );
+    const third = joinRoom(registry, created.roomCode, {
+      userId: 'third-user',
+      connectionId: 'third-connection',
+      requestId: 'third-request',
+      displayName: 'Third',
+    }).data;
+    expect(third.room.members).toHaveLength(3);
 
     const another = createRoom(registry, {
       userId: 'creator-2',
@@ -470,6 +491,8 @@ describe('room creation and joining', () => {
       state: 'reconnecting',
       closeAtMs: null,
     });
+    // Default test harness capacity is 2, so the first joiner fills the room
+    // and cancels the public code timer.
     expect(registry.getStats().timers).toBe(0);
   });
 
@@ -893,43 +916,88 @@ describe('connection epochs, replacement, and room lifetime', () => {
     ).toHaveLength(1);
   });
 
-  test.each(['creator', 'joiner'] as const)(
-    '%s explicit leave closes and cleans the entire temporary room',
-    (leavingUser) => {
-      const { registry } = createHarness();
-      const fixture = createJoinedRoom(registry);
-      const own = leavingUser === 'creator' ? fixture.created : fixture.joined;
+  test('creator explicit leave closes and cleans the entire temporary room', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    const own = fixture.created;
 
-      const result = registry.leave({
-        roomId: fixture.roomId,
-        userId: leavingUser,
-        connectionId: own.connection.connectionId,
-        connectionEpoch: own.connection.connectionEpoch,
-      });
+    const result = registry.leave({
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: own.connection.connectionId,
+      connectionEpoch: own.connection.connectionEpoch,
+    });
 
-      expect(result.data.room).toMatchObject({
-        id: fixture.roomId,
-        state: 'closed',
-      });
-      expect(registry.getStats()).toEqual({
-        rooms: 0,
-        codes: 0,
-        idempotencyEntries: 0,
-        timers: 0,
-      });
-      // Task 10's per-connection ACK cache handles wire retries; the domain keeps no tombstone.
-      expectRoomError(
-        () =>
-          registry.leave({
-            roomId: fixture.roomId,
-            userId: leavingUser,
-            connectionId: own.connection.connectionId,
-            connectionEpoch: own.connection.connectionEpoch,
-          }),
-        'ROOM_CLOSED',
-      );
-    },
-  );
+    expect(result.data.room).toMatchObject({
+      id: fixture.roomId,
+      state: 'closed',
+    });
+    expect(registry.getStats()).toEqual({
+      rooms: 0,
+      codes: 0,
+      idempotencyEntries: 0,
+      timers: 0,
+    });
+    expectRoomError(
+      () =>
+        registry.leave({
+          roomId: fixture.roomId,
+          userId: 'creator',
+          connectionId: own.connection.connectionId,
+          connectionEpoch: own.connection.connectionEpoch,
+        }),
+      'ROOM_CLOSED',
+    );
+  });
+
+  test('joiner explicit leave keeps the room open for remaining members', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    const own = fixture.joined;
+
+    const result = registry.leave({
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: own.connection.connectionId,
+      connectionEpoch: own.connection.connectionEpoch,
+    });
+
+    expect(result.data.room).toMatchObject({
+      id: fixture.roomId,
+      state: 'waiting',
+      joinerUserId: null,
+    });
+    expect(registry.getStats().rooms).toBe(1);
+    expect(
+      result.intents.some(
+        (intent) =>
+          intent.type === 'peer.left' && intent.userId === 'joiner',
+      ),
+    ).toBe(true);
+  });
+
+  test('legacy leave tombstone check for closed room', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    const own = fixture.created;
+    registry.leave({
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: own.connection.connectionId,
+      connectionEpoch: own.connection.connectionEpoch,
+    });
+    // Task 10's per-connection ACK cache handles wire retries; the domain keeps no tombstone.
+    expectRoomError(
+      () =>
+        registry.leave({
+          roomId: fixture.roomId,
+          userId: 'creator',
+          connectionId: own.connection.connectionId,
+          connectionEpoch: own.connection.connectionEpoch,
+        }),
+      'ROOM_CLOSED',
+    );
+  });
 
   test('only the creator can end and cleanup is immediate and idempotent internally', () => {
     const { registry } = createHarness();
@@ -2167,7 +2235,7 @@ describe('connection-bound screen leases', () => {
       connectionEpoch: creator.connectionEpoch,
       leaseId: lease.leaseId,
       expiresAtMs: 15_000,
-      targetBitrateBps: 4_000_000,
+      targetBitrateBps: 10_000_000,
     });
     vi.advanceTimersByTime(5_000);
     registry.renewScreenLease({

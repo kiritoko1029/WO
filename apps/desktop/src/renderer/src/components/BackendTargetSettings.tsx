@@ -99,13 +99,15 @@ function AvailableBackendTargetSettings({
       <button
         className="backend-target-trigger"
         type="button"
-        aria-label="配置后端服务"
-        title={target?.origin ?? '后端服务'}
+        aria-label="配置服务器"
+        title={target?.origin ?? '服务器'}
         onClick={showDialog}
       >
-        <Server size={17} aria-hidden="true" />
+        <span className="backend-target-icon" aria-hidden="true">
+          <Server size={17} />
+        </span>
         <span className="backend-target-copy">
-          <span>后端服务</span>
+          <span>服务器</span>
           <strong>{target?.origin ?? loadError ?? '正在读取'}</strong>
         </span>
         {target?.readOnly ? (
@@ -130,7 +132,7 @@ function AvailableBackendTargetSettings({
           >
             <header>
               <div>
-                <h2 id="backend-target-title">后端服务</h2>
+                <h2 id="backend-target-title">服务器</h2>
                 {target?.readOnly && <p>由 WO_API_ORIGIN 管理</p>}
               </div>
               <button

@@ -10,6 +10,7 @@ describe('bundled web client', () => {
     const webRoot = await mkdtemp(join(tmpdir(), 'wo-web-'));
     await mkdir(join(webRoot, 'assets'));
     await writeFile(join(webRoot, 'index.html'), '<main>WO web</main>');
+    await writeFile(join(webRoot, 'admin.html'), '<main>WO admin</main>');
     await writeFile(join(webRoot, 'assets', 'app.js'), 'window.wo = true;');
     const app = await createApp({
       authService: {} as never,
@@ -25,6 +26,11 @@ describe('bundled web client', () => {
         method: 'GET',
         url: '/join/123456',
       });
+      const adminPage = await app.inject({ method: 'GET', url: '/admin' });
+      const adminNested = await app.inject({
+        method: 'GET',
+        url: '/admin/users',
+      });
       const asset = await app.inject({
         method: 'GET',
         url: '/assets/app.js',
@@ -38,10 +44,14 @@ describe('bundled web client', () => {
       expect(home.body).toBe('<main>WO web</main>');
       expect(home.headers['cache-control']).toBe('public, max-age=0');
       expect(joinPage.body).toBe(home.body);
+      expect(adminPage.statusCode).toBe(200);
+      expect(adminPage.body).toBe('<main>WO admin</main>');
+      expect(adminNested.body).toBe(adminPage.body);
       expect(asset.statusCode).toBe(200);
       expect(asset.body).toBe('window.wo = true;');
       expect(missingApi.statusCode).toBe(404);
       expect(missingApi.body).not.toContain('WO web');
+      expect(missingApi.body).not.toContain('WO admin');
     } finally {
       await app.close();
       await rm(webRoot, { recursive: true, force: true });

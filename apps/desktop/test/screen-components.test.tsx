@@ -115,25 +115,55 @@ describe('desktop share controls', () => {
     expect(onStart).toHaveBeenCalledOnce();
   });
 
-  it('offers stable Auto and fixed bitrate targets', async () => {
+  it('offers quality tiers as max-bitrate ceilings and stats behind a toggle', async () => {
     const user = userEvent.setup();
     const onTargetChange = vi.fn();
     render(
       <ScreenShareToolbar
         settings={{ width: 1_920, height: 1_080, frameRate: 60 }}
-        target={{ mode: 'auto' }}
+        target={{ mode: 'fixed', bitrateBps: 10_000_000 }}
         pending={null}
         error={null}
+        quality={{
+          timestampMs: 2_000,
+          negotiationGeneration: 3,
+          path: { candidateType: 'host', protocol: 'udp' },
+          capture: { width: 1_920, height: 1_080, frameRate: 60 },
+          targetBitrateBps: 10_000_000,
+          outbound: {
+            bitrateBps: 7_500_000,
+            fps: 58,
+            width: 1_920,
+            height: 1_080,
+            lossPercent: 0.2,
+            rttMs: 24,
+            jitterMs: 3,
+            codec: 'video/H264',
+            nackCount: 1,
+            pliCount: 0,
+            freezeCount: null,
+          },
+          inbound: null,
+          presentationFps: 56,
+        }}
         onTargetChange={onTargetChange}
       />,
     );
 
+    expect(screen.queryByLabelText('传输信息详情')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '传输信息' }));
+    expect(screen.getByLabelText('传输信息详情')).toBeTruthy();
     expect(screen.getByText('1920 x 1080')).toBeTruthy();
     expect(screen.getByText('60 fps')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: '6 Mbps' }));
+    expect(screen.getByText('7.50 Mbps')).toBeTruthy();
+    expect(screen.getByText('24 ms')).toBeTruthy();
+
+    const select = screen.getByLabelText('码率上限') as HTMLSelectElement;
+    expect(select.value).toBe('10000000');
+    await user.selectOptions(select, '5000000');
     expect(onTargetChange).toHaveBeenCalledWith({
       mode: 'fixed',
-      bitrateBps: 6_000_000,
+      bitrateBps: 5_000_000,
     });
   });
 
@@ -180,6 +210,7 @@ describe('desktop share controls', () => {
 
     expect(screen.queryByLabelText('对方的共享屏幕')).toBeNull();
     expect(screen.getByText('等待屏幕共享')).toBeTruthy();
+    expect(screen.queryByLabelText('画面控制')).toBeNull();
 
     rerender(
       <ScreenStage
@@ -203,6 +234,10 @@ describe('desktop share controls', () => {
       />,
     );
     expect(screen.getByLabelText('林远的共享屏幕')).toBeTruthy();
+    expect(screen.getByLabelText('画面控制')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '适应窗口' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '铺满放大' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '全屏展示' })).toBeTruthy();
   });
 
   it('previews the local screen track while sharing', () => {
@@ -221,5 +256,27 @@ describe('desktop share controls', () => {
     expect(preview.tagName).toBe('VIDEO');
     expect((preview as HTMLVideoElement).muted).toBe(true);
     expect(screen.queryByText('您正在共享屏幕')).toBeNull();
+    expect(screen.getByLabelText('画面控制')).toBeTruthy();
+  });
+
+  it('switches the receiver between fit and fill presentation modes', async () => {
+    const user = userEvent.setup();
+    const track = { kind: 'video' } as MediaStreamTrack;
+    render(
+      <ScreenStage
+        localTrack={null}
+        remoteTrack={track}
+        localState="idle"
+        remoteOwnerName="林远"
+        remoteBitrateBps={null}
+      />,
+    );
+
+    const video = screen.getByLabelText('林远的共享屏幕');
+    expect(video.className).toContain('remote-screen-video--fit');
+    await user.click(screen.getByRole('button', { name: '铺满放大' }));
+    expect(video.className).toContain('remote-screen-video--fill');
+    await user.click(screen.getByRole('button', { name: '适应窗口' }));
+    expect(video.className).toContain('remote-screen-video--fit');
   });
 });

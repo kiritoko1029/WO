@@ -94,6 +94,11 @@ function createDesktop() {
     auth: {
       register: vi.fn<DesktopApi['auth']['register']>(),
       login: vi.fn<DesktopApi['auth']['login']>(),
+      verifyEmail: vi.fn<DesktopApi['auth']['verifyEmail']>(),
+      resendVerification: vi.fn<DesktopApi['auth']['resendVerification']>(),
+      changePassword: vi.fn<DesktopApi['auth']['changePassword']>(),
+      requestEmailChange: vi.fn<DesktopApi['auth']['requestEmailChange']>(),
+      confirmEmailChange: vi.fn<DesktopApi['auth']['confirmEmailChange']>(),
       refresh: vi
         .fn<DesktopApi['auth']['refresh']>()
         .mockResolvedValue(refreshed),

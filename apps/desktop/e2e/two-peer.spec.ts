@@ -224,17 +224,17 @@ async function proveScreenAndBitrates(pair: AcceptancePair): Promise<void> {
   const negotiationCount = initial.offers + initial.answers;
 
   for (const [label, bitrate] of [
-    ['2 Mbps', 2_000_000],
-    ['4 Mbps', 4_000_000],
-    ['6 Mbps', 6_000_000],
-    ['8 Mbps', 8_000_000],
-    ['自动', 0],
+    ['清晰 5M', 5_000_000],
+    ['高清 10M', 10_000_000],
+    ['原画 20M', 20_000_000],
   ] as const) {
     const remoteBefore = await waitForPeer(pair.second.page, () => true);
-    await pair.first.page.getByRole('button', { name: label }).click();
-    await expect(
-      pair.first.page.getByRole('button', { name: label }),
-    ).toHaveAttribute('aria-pressed', 'true');
+    await pair.first.page
+      .getByLabel('码率上限')
+      .selectOption({ label });
+    await expect(pair.first.page.getByLabel('码率上限')).toHaveValue(
+      String(bitrate),
+    );
     await waitForPeer(
       pair.first.page,
       (peer) =>

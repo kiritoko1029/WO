@@ -358,7 +358,7 @@ describe('single screen controller', () => {
     expect(harness.sender.replaceTrack).toHaveBeenCalledTimes(1);
   });
 
-  test('requests 1080p60 as ideal/max constraints without claiming achievement', async () => {
+  test('requests unconstrained resolution with ideal 60 fps without claiming achievement', async () => {
     const harness = createHarness();
     await harness.controller.prepare();
     await harness.controller.selectSource(
@@ -370,9 +370,7 @@ describe('single screen controller', () => {
     expect(DISPLAY_CAPTURE_CONSTRAINTS).toEqual({
       audio: false,
       video: {
-        width: { ideal: 1_920 },
-        height: { ideal: 1_080 },
-        frameRate: { ideal: 60, max: 60 },
+        frameRate: { ideal: 60 },
       },
     });
     expect(harness.track.getSettings).toHaveBeenCalledOnce();

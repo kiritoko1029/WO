@@ -69,6 +69,9 @@ export function RoomRoute({
   const remoteOwnerName = remoteOwnsScreen
     ? (call.snapshot.screenOwner?.displayName ?? null)
     : null;
+  const screenPresentationLive =
+    (remoteOwnsScreen && call.snapshot.remoteScreenTrack !== null) ||
+    (screenState === 'sharing' && call.snapshot.localScreenTrack !== null);
   const pickerOpen =
     screenState === 'acquiring' ||
     screenState === 'picking' ||
@@ -147,7 +150,7 @@ export function RoomRoute({
       <header className="room-header">
         <div className="product-lockup compact">
           <span className="product-mark" aria-hidden="true">
-            <AudioLines size={19} />
+            <AudioLines size={14} />
           </span>
           <span>WO</span>
         </div>
@@ -218,7 +221,9 @@ export function RoomRoute({
           )}
         </div>
       </header>
-      <main className="call-workspace">
+      <main
+        className={`call-workspace${screenPresentationLive ? ' call-workspace--screen-live' : ''}`}
+      >
         <ParticipantSlots
           participants={room.participants}
           muted={call.snapshot.muted}
@@ -251,6 +256,7 @@ export function RoomRoute({
             target={call.snapshot.screenBitrateTarget}
             pending={call.snapshot.screenBitratePending}
             error={call.snapshot.screenBitrateError}
+            quality={call.snapshot.quality}
             onTargetChange={(target) =>
               void call.controller
                 .setScreenBitrate(target)

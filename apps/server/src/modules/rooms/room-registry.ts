@@ -53,10 +53,11 @@ const DEFAULT_RECONNECT_GRACE_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_CODE_ATTEMPTS = 32;
 const DEFAULT_REQUEST_CACHE_MAX_ENTRIES = 4_096;
 const DEFAULT_MAX_ROOMS = 10_000;
+const DEFAULT_MAX_MEMBERS_PER_ROOM = 8;
 const DEFAULT_SCREEN_LEASE_TTL_MS = 15_000;
 const DEFAULT_SCREEN_BITRATE_MIN_BPS = 1_000_000;
-const DEFAULT_SCREEN_BITRATE_MAX_BPS = 10_000_000;
-const DEFAULT_SCREEN_BITRATE_BPS = 4_000_000;
+const DEFAULT_SCREEN_BITRATE_MAX_BPS = 20_000_000;
+const DEFAULT_SCREEN_BITRATE_BPS = 10_000_000;
 const DEFAULT_MAX_SCREEN_ACQUIRE_REQUEST_IDS = 4_096;
 const REPLACED_CLOSE_CODE = 4409;
 const REPLACED_CLOSE_REASON = 'SESSION_REPLACED';
@@ -267,6 +268,13 @@ export function createRoomRegistry(
     dependencies.maxRooms ?? DEFAULT_MAX_ROOMS,
     'maxRooms',
   );
+  const maxMembersPerRoom = positiveSafeInteger(
+    dependencies.maxMembersPerRoom ?? DEFAULT_MAX_MEMBERS_PER_ROOM,
+    'maxMembersPerRoom',
+  );
+  if (maxMembersPerRoom < 2) {
+    throw new RangeError('maxMembersPerRoom must be at least 2');
+  }
   const maxNegotiationGeneration = positiveSafeInteger(
     dependencies.maxNegotiationGeneration ?? Number.MAX_SAFE_INTEGER,
     'maxNegotiationGeneration',
@@ -385,10 +393,12 @@ export function createRoomRegistry(
     cancelTimer(room.graceTimer);
     room.graceTimer = null;
     reservedRoomCodes.delete(room.originalCode);
-    if (room.joinerUserId !== null) {
-      consumedRoomIdByJoinerCode.delete(
-        JSON.stringify([room.joinerUserId, room.originalCode]),
-      );
+    for (const member of room.membersByUserId.values()) {
+      if (member.role === 'joiner') {
+        consumedRoomIdByJoinerCode.delete(
+          JSON.stringify([member.userId, room.originalCode]),
+        );
+      }
     }
     if (room.code !== null) {
       roomIdByCode.delete(room.code);
@@ -596,17 +606,42 @@ export function createRoomRegistry(
     return connection;
   };
 
-  const allMembersOnlineAndReady = (room: TemporaryRoom): boolean =>
-    room.joinerUserId !== null &&
-    [...room.membersByUserId.keys()].every(
+  /** Media path remains creator + first joiner (1:1 WebRTC). */
+  const mediaParticipantIds = (
+    room: TemporaryRoom,
+  ): readonly string[] => {
+    if (room.joinerUserId === null) return [room.creatorUserId];
+    return [room.creatorUserId, room.joinerUserId];
+  };
+
+  const allMembersOnlineAndReady = (room: TemporaryRoom): boolean => {
+    if (room.joinerUserId === null) return false;
+    // Negotiation still runs on the 1:1 media pair. Additional members may
+    // join for presence while the primary pair keeps the media path.
+    return mediaParticipantIds(room).every(
       (userId) => room.connectionsByUserId.get(userId)?.ready === true,
     );
+  };
 
-  const allMembersOnline = (room: TemporaryRoom): boolean =>
-    room.joinerUserId !== null &&
-    [...room.membersByUserId.keys()].every((userId) =>
+  const allMembersOnline = (room: TemporaryRoom): boolean => {
+    if (room.joinerUserId === null) return false;
+    return mediaParticipantIds(room).every((userId) =>
       room.connectionsByUserId.has(userId),
     );
+  };
+
+  const reassignPrimaryJoiner = (room: TemporaryRoom): void => {
+    if (
+      room.joinerUserId !== null &&
+      room.membersByUserId.has(room.joinerUserId)
+    ) {
+      return;
+    }
+    const next = [...room.membersByUserId.values()].find(
+      (member) => member.role === 'joiner',
+    );
+    room.joinerUserId = next?.userId ?? null;
+  };
 
   const nextNegotiationGeneration = (room: TemporaryRoom): number => {
     if (room.negotiationGeneration >= maxNegotiationGeneration) {
@@ -1150,8 +1185,8 @@ export function createRoomRegistry(
             room.code !== input.roomCode ||
             room.codeExpiresAtMs === null ||
             room.codeExpiresAtMs <= operationTime(now) ||
-            room.joinerUserId !== null ||
-            room.creatorUserId === input.userId
+            room.creatorUserId === input.userId ||
+            room.membersByUserId.has(input.userId)
           ) {
             if (
               room !== undefined &&
@@ -1162,8 +1197,13 @@ export function createRoomRegistry(
             }
             throw new RoomDomainError('ROOM_CODE_INVALID');
           }
+          if (room.membersByUserId.size >= maxMembersPerRoom) {
+            throw new RoomDomainError('ROOM_FULL');
+          }
 
-          room.joinerUserId = input.userId;
+          if (room.joinerUserId === null) {
+            room.joinerUserId = input.userId;
+          }
           consumedRoomIdByJoinerCode.set(
             JSON.stringify([input.userId, input.roomCode]),
             room.id,
@@ -1178,11 +1218,15 @@ export function createRoomRegistry(
             input.userId,
             input.connectionId,
           );
-          roomIdByCode.delete(input.roomCode);
-          room.code = null;
-          room.codeExpiresAtMs = null;
-          cancelTimer(room.codeTimer);
-          room.codeTimer = null;
+          // Keep the room code open until capacity is reached so more guests
+          // can join the same session.
+          if (room.membersByUserId.size >= maxMembersPerRoom) {
+            roomIdByCode.delete(input.roomCode);
+            room.code = null;
+            room.codeExpiresAtMs = null;
+            cancelTimer(room.codeTimer);
+            room.codeTimer = null;
+          }
           cancelGrace(room);
           room.state =
             room.connectionsByUserId.size === room.membersByUserId.size
@@ -1305,19 +1349,80 @@ export function createRoomRegistry(
       const room = requireRoom(input.roomId);
       const member = requireMembership(room, input.userId);
       requireCurrentConnection(room, input);
-      const reason: RoomClosedReason =
-        member.role === 'creator' ? 'creator_left' : 'ended';
-      const intents: RoomIntent[] = [
-        {
-          type: 'peer.left',
-          roomId: room.id,
-          userId: input.userId,
-          reason: 'left',
-        },
-        ...cleanupRoom(room, reason),
-      ];
+      if (member.role === 'creator') {
+        const intents: RoomIntent[] = [
+          {
+            type: 'peer.left',
+            roomId: room.id,
+            userId: input.userId,
+            reason: 'left',
+          },
+          ...cleanupRoom(room, 'creator_left'),
+        ];
+        return mutationResult(
+          frozen({ room: closedRoomSnapshot(input.roomId, 'creator_left') }),
+          intents,
+        );
+      }
+
+      // Non-creator leave keeps the room open for remaining members.
+      const intents: RoomIntent[] = [];
+      const connection = room.connectionsByUserId.get(input.userId);
+      if (connection !== undefined) {
+        const leaseIntent = releaseLeaseForConnection(
+          room,
+          input.userId,
+          connection.connectionId,
+          connection.connectionEpoch,
+        );
+        if (leaseIntent !== null) intents.push(leaseIntent);
+      }
+      room.connectionsByUserId.delete(input.userId);
+      room.membersByUserId.delete(input.userId);
+      removeUserIdempotencyEntries(room, input.userId);
+      consumedRoomIdByJoinerCode.delete(
+        JSON.stringify([input.userId, room.originalCode]),
+      );
+      if (room.joinerUserId === input.userId) {
+        room.joinerUserId = null;
+        reassignPrimaryJoiner(room);
+      }
+      // Re-open the public code when capacity frees up so new guests can join.
+      if (
+        room.code === null &&
+        room.membersByUserId.size < maxMembersPerRoom &&
+        !roomIdByCode.has(room.originalCode)
+      ) {
+        room.code = room.originalCode;
+        room.codeExpiresAtMs = operationTime(now) + roomCodeTtlMs;
+        roomIdByCode.set(room.originalCode, room.id);
+        reservedRoomCodes.add(room.originalCode);
+        try {
+          scheduleCodeExpiry(room);
+        } catch {
+          roomIdByCode.delete(room.originalCode);
+          room.code = null;
+          room.codeExpiresAtMs = null;
+        }
+      }
+      invalidateIncompleteNegotiation(room, 'signaling_reset');
+      room.state =
+        room.joinerUserId === null
+          ? 'waiting'
+          : allMembersOnlineAndReady(room)
+            ? room.hasConnected
+              ? 'connected'
+              : 'negotiating'
+            : 'reconnecting';
+      intents.push({
+        type: 'peer.left',
+        roomId: room.id,
+        userId: input.userId,
+        reason: 'left',
+      });
+      scheduleGraceIfEmpty(room);
       return mutationResult(
-        frozen({ room: closedRoomSnapshot(room.id, reason) }),
+        frozen({ room: snapshotRoom(room) }),
         intents,
       );
     },
@@ -1401,7 +1506,7 @@ export function createRoomRegistry(
             }
           }
           const expectedConnectionEpochByUserId = new Map<string, number>();
-          for (const userId of room.membersByUserId.keys()) {
+          for (const userId of mediaParticipantIds(room)) {
             const epoch = room.currentConnectionEpochByUserId.get(userId);
             if (epoch === undefined) {
               throw new RoomDomainError('INVALID_STATE');
@@ -1483,7 +1588,7 @@ export function createRoomRegistry(
           }
 
           const expectedConnectionEpochByUserId = new Map<string, number>();
-          for (const userId of room.membersByUserId.keys()) {
+          for (const userId of mediaParticipantIds(room)) {
             const epoch = room.currentConnectionEpochByUserId.get(userId);
             if (epoch === undefined) {
               throw new RoomDomainError('INVALID_STATE');
@@ -2174,6 +2279,12 @@ export function createRoomRegistry(
         );
       }
       return result;
+    },
+
+    listRooms() {
+      return Object.freeze(
+        [...roomsById.values()].map((room) => snapshotRoom(room)),
+      );
     },
 
     getStats(): RoomRegistryStats {

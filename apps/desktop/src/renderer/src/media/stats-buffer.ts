@@ -208,7 +208,7 @@ function sanitizeSample(
     capture: sanitizeCapture(input.capture),
     targetBitrateBps: finiteNumber(input.targetBitrateBps, 'target bitrate', {
       minimum: 1_000_000,
-      maximum: 10_000_000,
+      maximum: 20_000_000,
       integer: true,
     }),
     outbound: sanitizeMedia(input.outbound),
