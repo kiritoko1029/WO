@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -235,8 +235,6 @@ describe('desktop share controls', () => {
     );
     expect(screen.getByLabelText('林远的共享屏幕')).toBeTruthy();
     expect(screen.getByLabelText('画面控制')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '适应窗口' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '铺满放大' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '全屏展示' })).toBeTruthy();
   });
 
@@ -259,7 +257,7 @@ describe('desktop share controls', () => {
     expect(screen.getByLabelText('画面控制')).toBeTruthy();
   });
 
-  it('switches the receiver between fit and fill presentation modes', async () => {
+  it('zooms the receiver toward the cursor on wheel and resets via toolbar', async () => {
     const user = userEvent.setup();
     const track = { kind: 'video' } as MediaStreamTrack;
     render(
@@ -272,11 +270,108 @@ describe('desktop share controls', () => {
       />,
     );
 
-    const video = screen.getByLabelText('林远的共享屏幕');
-    expect(video.className).toContain('remote-screen-video--fit');
-    await user.click(screen.getByRole('button', { name: '铺满放大' }));
-    expect(video.className).toContain('remote-screen-video--fill');
-    await user.click(screen.getByRole('button', { name: '适应窗口' }));
-    expect(video.className).toContain('remote-screen-video--fit');
+    const stage = document.querySelector('.screen-stage') as HTMLElement;
+    const video = screen.getByLabelText('林远的共享屏幕') as HTMLVideoElement;
+    expect(video.style.transform).toBe('translate(0px, 0px) scale(1)');
+
+    // Wheel up should zoom in. stage needs a measurable rect for the
+    // cursor-anchored calculation.
+    stage.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        right: 800,
+        bottom: 600,
+        width: 800,
+        height: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => undefined,
+      }) as DOMRect;
+    await act(async () => {
+      stage.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 300 }),
+      );
+    });
+
+    expect(video.style.transform).toContain('scale(');
+    expect(video.style.transform).not.toBe('translate(0px, 0px) scale(1)');
+
+    // Reset button only appears after zoom.
+    const resetBtn = screen.getByRole('button', { name: '还原缩放' });
+    await user.click(resetBtn);
+    expect(video.style.transform).toBe('translate(0px, 0px) scale(1)');
+  });
+
+  it('does not show the reset control before zoom', () => {
+    const track = { kind: 'video' } as MediaStreamTrack;
+    render(
+      <ScreenStage
+        localTrack={null}
+        remoteTrack={track}
+        localState="idle"
+        remoteOwnerName="林远"
+        remoteBitrateBps={null}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: '还原缩放' })).toBeNull();
+  });
+
+  it('resets zoom on double click', async () => {
+    const track = { kind: 'video' } as MediaStreamTrack;
+    render(
+      <ScreenStage
+        localTrack={null}
+        remoteTrack={track}
+        localState="idle"
+        remoteOwnerName="林远"
+        remoteBitrateBps={null}
+      />,
+    );
+
+    const stage = document.querySelector('.screen-stage') as HTMLElement;
+    stage.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        right: 800,
+        bottom: 600,
+        width: 800,
+        height: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => undefined,
+      }) as DOMRect;
+    const video = screen.getByLabelText('林远的共享屏幕') as HTMLVideoElement;
+
+    await act(async () => {
+      stage.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -100, clientX: 200, clientY: 150 }),
+      );
+    });
+    expect(video.style.transform).not.toBe('translate(0px, 0px) scale(1)');
+
+    fireEvent.dblClick(video);
+    expect(video.style.transform).toBe('translate(0px, 0px) scale(1)');
+  });
+
+  it('requests fullscreen on the video element when toggling fullscreen', () => {
+    const track = { kind: 'video' } as MediaStreamTrack;
+    render(
+      <ScreenStage
+        localTrack={null}
+        remoteTrack={track}
+        localState="idle"
+        remoteOwnerName="林远"
+        remoteBitrateBps={null}
+      />,
+    );
+
+    const video = screen.getByLabelText('林远的共享屏幕') as HTMLVideoElement;
+    const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+    video.requestFullscreen = requestFullscreen as unknown as typeof video.requestFullscreen;
+
+    fireEvent.click(screen.getByRole('button', { name: '全屏展示' }));
+    expect(requestFullscreen).toHaveBeenCalled();
   });
 });

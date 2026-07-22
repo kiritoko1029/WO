@@ -64,6 +64,17 @@ const directory = fileURLToPath(new URL('.', import.meta.url));
 const packagedRendererEntry = pathToFileURL(
   join(directory, '../renderer/index.html'),
 ).href;
+
+// Dev-only: allow CDP clients (chrome-devtools MCP, chrome-remote-interface)
+// to connect when REMOTE_DEBUGGING_PORT is set. Production builds ignore this
+// because electron-vite only forwards the port flag in dev mode.
+if (
+  !app.isPackaged &&
+  process.env.REMOTE_DEBUGGING_PORT !== undefined &&
+  process.env.REMOTE_ALLOW_ORIGINS === undefined
+) {
+  app.commandLine.appendSwitch('remote-allow-origins', '*');
+}
 const runtimeInput = {
   isPackaged: app.isPackaged,
   environment: process.env,
@@ -163,6 +174,26 @@ function createMainWindow(): BrowserWindow {
   const clearCaptureSources = (): void => capture.clear(window.webContents.id);
   window.webContents.on('did-start-navigation', clearCaptureSources);
   window.webContents.once('destroyed', clearCaptureSources);
+  // A blank window with no diagnostic is the worst-case UX for a renderer
+  // crash. Log the reason so it shows up in the terminal/log file, and try
+  // to reload once in dev mode so the developer is not stuck on white screen.
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.error(
+      '[main] Renderer process gone:',
+      `reason=${details.reason}`,
+      `exitCode=${details.exitCode}`,
+    );
+    if (!app.isPackaged && !window.isDestroyed()) {
+      window
+        .loadURL(runtime.rendererEntry)
+        .catch((error: unknown) =>
+          console.error('[main] Renderer reload failed:', error),
+        );
+    }
+  });
+  window.webContents.on('unresponsive', () => {
+    console.error('[main] Renderer became unresponsive');
+  });
   if (packageSmokeRequest === null) {
     window.once('ready-to-show', () => window.show());
   }

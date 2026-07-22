@@ -202,8 +202,18 @@ export function isDisplayCaptureRequestAllowed(
     request.frame !== policy.mainFrame ||
     typeof request.frame !== 'object' ||
     request.frame === null ||
-    !('url' in request.frame) ||
-    request.frame.url !== policy.rendererEntry
+    !('url' in request.frame)
+  ) {
+    return false;
+  }
+  // Compare at origin level rather than exact-string matching. Vite dev mode
+  // serves on http://localhost:5173/ while electron-vite reports the renderer
+  // entry as http://127.0.0.1:5173/; the existing origin normalization (also
+  // used for securityOrigin below) treats those as equivalent.
+  const frameUrl = String(request.frame.url);
+  if (
+    captureSecurityOrigin(frameUrl) !==
+    captureSecurityOrigin(policy.rendererEntry)
   ) {
     return false;
   }

@@ -1,20 +1,41 @@
-import { useEffect, useRef, useState } from 'react';
-import {
-  Expand,
-  Maximize2,
-  Minimize2,
-  Monitor,
-  MonitorUp,
-  Shrink,
-} from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Expand, Monitor, MonitorUp, Shrink, ZoomOut } from 'lucide-react';
 
 import type { ScreenShareState } from '../media/screen-controller.js';
 
-export type ScreenViewMode = 'fit' | 'fill';
+interface PanOffset {
+  readonly x: number;
+  readonly y: number;
+}
 
-function isFullscreenElement(element: HTMLElement | null): boolean {
-  if (element === null) return false;
-  const doc = element.ownerDocument;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 5;
+const ZOOM_STEP = 1.15;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampPan(
+  pan: PanOffset,
+  width: number,
+  height: number,
+  zoom: number,
+): PanOffset {
+  if (zoom <= 1) return { x: 0, y: 0 };
+  // video 是 width:100% height:100%，放大后多出的尺寸就是可平移的范围。
+  const maxX = ((zoom - 1) * width) / 2;
+  const maxY = ((zoom - 1) * height) / 2;
+  return {
+    x: clamp(pan.x, -maxX, maxX),
+    y: clamp(pan.y, -maxY, maxY),
+  };
+}
+
+function isFullscreenElement(
+  element: HTMLElement | null,
+  doc: Document,
+): boolean {
   return doc.fullscreenElement === element;
 }
 
@@ -35,8 +56,12 @@ export function ScreenStage({
 }) {
   const stageRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [viewMode, setViewMode] = useState<ScreenViewMode>('fit');
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState<PanOffset>({ x: 0, y: 0 });
   const [fullscreen, setFullscreen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const dragOrigin = useRef<PanOffset | null>(null);
+
   const localSharing = localState === 'sharing';
   const showRemoteTrack = remoteOwnerName !== null && remoteTrack !== null;
   const showLocalTrack =
@@ -48,6 +73,16 @@ export function ScreenStage({
       : null;
   const live = presentationTrack !== null;
   const viewerControls = showRemoteTrack || showLocalTrack;
+  const reset = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  // Track switches (remote → local, or different source) must reset the
+  // viewport so the new feed is shown fitted, not at the previous zoom.
+  useEffect(() => {
+    reset();
+  }, [presentationTrack, reset]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -72,52 +107,133 @@ export function ScreenStage({
     return () => onPresentationVideo?.(null);
   }, [onPresentationVideo, showRemoteTrack]);
 
+  // Wheel zoom focused on the cursor, and pan-by-drag. Both need
+  // non-passive listeners (wheel) and document-level capture (drag).
   useEffect(() => {
     const stage = stageRef.current;
-    if (stage === null) return;
-    const syncFullscreen = (): void => {
-      setFullscreen(isFullscreenElement(stage));
+    if (stage === null || !live) return;
+    const onWheel = (event: WheelEvent): void => {
+      event.preventDefault();
+      const rect = stage.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      // Cursor position relative to the stage centre (the transform origin).
+      const cursorX = event.clientX - rect.left - rect.width / 2;
+      const cursorY = event.clientY - rect.top - rect.height / 2;
+      setZoom((currentZoom) => {
+        const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+        const nextZoom = clamp(currentZoom * factor, MIN_ZOOM, MAX_ZOOM);
+        if (nextZoom === currentZoom) return currentZoom;
+        setPan((currentPan) => {
+          // Keep the point under the cursor anchored: the same stage-space
+          // point stays under the cursor after the scale change.
+          // p' = cursor - (cursor - p) * (nextZoom / currentZoom)
+          const ratio = nextZoom / currentZoom;
+          const raw = {
+            x: cursorX - (cursorX - currentPan.x) * ratio,
+            y: cursorY - (cursorY - currentPan.y) * ratio,
+          };
+          return clampPan(raw, rect.width, rect.height, nextZoom);
+        });
+        return nextZoom;
+      });
     };
-    stage.ownerDocument.addEventListener('fullscreenchange', syncFullscreen);
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onWheel);
+  }, [live]);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (event: MouseEvent): void => {
+      if (dragOrigin.current === null) return;
+      const stage = stageRef.current;
+      if (stage === null) return;
+      const rect = stage.getBoundingClientRect();
+      const dx = event.clientX - dragOrigin.current.x;
+      const dy = event.clientY - dragOrigin.current.y;
+      setPan((current) =>
+        clampPan(
+          { x: current.x + dx, y: current.y + dy },
+          rect.width,
+          rect.height,
+          zoom,
+        ),
+      );
+      // Re-anchor so subsequent move events use the latest position.
+      dragOrigin.current = { x: event.clientX, y: event.clientY };
+    };
+    const onUp = (): void => {
+      dragOrigin.current = null;
+      setDragging(false);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [dragging, zoom]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const doc = video?.ownerDocument ?? document;
+    const syncFullscreen = (): void => {
+      setFullscreen(isFullscreenElement(videoRef.current, doc));
+    };
+    doc.addEventListener('fullscreenchange', syncFullscreen);
     syncFullscreen();
     return () => {
-      stage.ownerDocument.removeEventListener(
-        'fullscreenchange',
-        syncFullscreen,
-      );
+      doc.removeEventListener('fullscreenchange', syncFullscreen);
     };
   }, [live]);
 
+  // Leaving the live state should exit fullscreen and reset the viewport.
   useEffect(() => {
     if (live) return;
-    setViewMode('fit');
+    reset();
     const stage = stageRef.current;
-    if (stage !== null && isFullscreenElement(stage)) {
-      void stage.ownerDocument.exitFullscreen().catch(() => undefined);
+    const doc = stage?.ownerDocument;
+    if (stage !== null && doc !== null && isFullscreenElement(stage, doc)) {
+      void doc.exitFullscreen().catch(() => undefined);
     }
-  }, [live]);
+  }, [live, reset]);
+
+  const onStagePointerDown = (event: React.MouseEvent): void => {
+    if (zoom === 1) return;
+    // Only react to clicks on the stage background / video, not on the
+    // floating controls (they stopPropagation implicitly via button clicks).
+    event.preventDefault();
+    dragOrigin.current = { x: event.clientX, y: event.clientY };
+    setDragging(true);
+  };
+
+  const onDoubleClick = (): void => {
+    reset();
+  };
 
   const toggleFullscreen = (): void => {
-    const stage = stageRef.current;
-    if (stage === null) return;
-    if (isFullscreenElement(stage)) {
-      void stage.ownerDocument.exitFullscreen().catch(() => undefined);
+    const video = videoRef.current;
+    if (video === null) return;
+    const doc = video.ownerDocument;
+    if (isFullscreenElement(video, doc)) {
+      void doc.exitFullscreen().catch(() => undefined);
       return;
     }
-    void stage.requestFullscreen().catch(() => undefined);
+    void video.requestFullscreen().catch(() => undefined);
   };
+
+  const cursor = zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'default';
 
   return (
     <section
       ref={stageRef}
       className={`screen-stage${live ? ' screen-stage--live' : ''}${fullscreen ? ' screen-stage--fullscreen' : ''}`}
       aria-label="共享屏幕"
-      data-view-mode={viewMode}
+      data-zoom={zoom.toFixed(2)}
     >
       {presentationTrack !== null && (
         <video
           ref={videoRef}
-          className={`remote-screen-video remote-screen-video--${viewMode}`}
+          className="remote-screen-video"
           aria-label={
             showRemoteTrack
               ? `${remoteOwnerName ?? '对方'}的共享屏幕`
@@ -126,6 +242,13 @@ export function ScreenStage({
           autoPlay
           muted={showLocalTrack}
           playsInline
+          style={{
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transformOrigin: 'center center',
+            cursor,
+          }}
+          onMouseDown={onStagePointerDown}
+          onDoubleClick={onDoubleClick}
         />
       )}
       {presentationTrack === null && (
@@ -146,28 +269,17 @@ export function ScreenStage({
       )}
       {viewerControls && (
         <div className="screen-view-controls" role="toolbar" aria-label="画面控制">
-          <button
-            type="button"
-            className={viewMode === 'fit' ? 'selected' : ''}
-            aria-pressed={viewMode === 'fit'}
-            title="适应窗口"
-            aria-label="适应窗口"
-            onClick={() => setViewMode('fit')}
-          >
-            <Minimize2 size={15} />
-            适应
-          </button>
-          <button
-            type="button"
-            className={viewMode === 'fill' ? 'selected' : ''}
-            aria-pressed={viewMode === 'fill'}
-            title="铺满放大"
-            aria-label="铺满放大"
-            onClick={() => setViewMode('fill')}
-          >
-            <Maximize2 size={15} />
-            放大
-          </button>
+          {zoom > 1 && (
+            <button
+              type="button"
+              title="还原"
+              aria-label="还原缩放"
+              onClick={reset}
+            >
+              <ZoomOut size={15} />
+              还原
+            </button>
+          )}
           <button
             type="button"
             className={fullscreen ? 'selected' : ''}

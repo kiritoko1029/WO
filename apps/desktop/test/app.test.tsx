@@ -767,6 +767,12 @@ describe('desktop account and room workflow', () => {
     await user.click(screen.getByRole('button', { name: '创建房间' }));
     await user.click(await screen.findByRole('button', { name: '分享房间' }));
 
+    const shareMenu = document.querySelector('.room-share-menu');
+    expect(shareMenu).toBeTruthy();
+    expect(document.querySelector('.room-header')).toBeTruthy();
+    expect(document.querySelector('.call-workspace')).toBeTruthy();
+    expect(document.querySelector('.room-share-error')).toBeNull();
+
     await user.click(screen.getByRole('button', { name: '复制网页链接' }));
     await user.click(screen.getByRole('button', { name: '复制客户端链接' }));
     expect(clipboard.writeText.mock.calls).toEqual([
@@ -781,6 +787,7 @@ describe('desktop account and room workflow', () => {
     expect(
       await screen.findByText('复制失败，请允许剪贴板权限后重试'),
     ).toBeTruthy();
+    expect(document.querySelector('.room-share-error')).toBeTruthy();
 
     Reflect.deleteProperty(navigator, 'clipboard');
     execCommand.mockReturnValueOnce(true);
@@ -994,6 +1001,7 @@ describe('desktop account and room workflow', () => {
       selectedOutputId: 'speaker-1',
       supportsOutputSelection: true,
       microphoneRetryAvailable: false,
+      noiseIntensity: 'off' as const,
       ...idleScreenSnapshot,
       screenError: '需要在系统设置中允许屏幕录制',
       screenPermission: {
@@ -1007,6 +1015,7 @@ describe('desktop account and room workflow', () => {
       start: vi.fn().mockResolvedValue(undefined),
       setMuted: vi.fn(),
       switchMicrophone: vi.fn().mockResolvedValue(undefined),
+      setNoiseIntensity: vi.fn().mockResolvedValue(undefined),
       setOutputMuted: vi.fn(),
       selectOutput: vi.fn().mockResolvedValue(undefined),
       prepareScreenShare: vi.fn().mockResolvedValue(undefined),
@@ -1093,6 +1102,7 @@ describe('desktop account and room workflow', () => {
       selectedOutputId: '',
       supportsOutputSelection: false,
       microphoneRetryAvailable: false,
+      noiseIntensity: 'off' as const,
       ...idleScreenSnapshot,
     };
     const call = {
@@ -1101,6 +1111,7 @@ describe('desktop account and room workflow', () => {
       start: vi.fn().mockResolvedValue(undefined),
       setMuted: vi.fn(),
       switchMicrophone: vi.fn(),
+      setNoiseIntensity: vi.fn(),
       setOutputMuted: vi.fn(),
       selectOutput: vi.fn(),
       prepareScreenShare: vi.fn(),

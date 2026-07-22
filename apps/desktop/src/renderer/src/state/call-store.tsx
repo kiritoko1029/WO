@@ -73,6 +73,11 @@ import {
   type VoiceController,
   type VoiceDevice,
 } from '../media/voice-controller.js';
+import {
+  readNoiseIntensity,
+  writeNoiseIntensity,
+  type NoiseIntensity,
+} from '../media/noise-suppressor.js';
 import type {
   RoomGateway,
   RoomGatewayEvent,
@@ -550,6 +555,7 @@ export interface CallSnapshot {
   readonly selectedOutputId: string;
   readonly supportsOutputSelection: boolean;
   readonly microphoneRetryAvailable: boolean;
+  readonly noiseIntensity: NoiseIntensity;
   readonly screenState: ScreenShareState;
   readonly screenSources: readonly CaptureSourceSummary[];
   readonly screenSelectedToken: string | null;
@@ -576,6 +582,7 @@ export interface CallController {
   start(): Promise<void>;
   setMuted(muted: boolean): void;
   switchMicrophone(deviceId: string): Promise<void>;
+  setNoiseIntensity(intensity: NoiseIntensity): Promise<void>;
   setOutputMuted(muted: boolean): void;
   selectOutput(deviceId: string): Promise<void>;
   prepareScreenShare(): Promise<void>;
@@ -699,6 +706,7 @@ export function createCallController(
     selectedOutputId: '',
     supportsOutputSelection: false,
     microphoneRetryAvailable: false,
+    noiseIntensity: readNoiseIntensity(),
     screenState: 'idle',
     screenSources: Object.freeze([]),
     screenSelectedToken: null,
@@ -1262,6 +1270,7 @@ export function createCallController(
     voice = createVoiceController({
       mediaDevices: options.mediaDevices,
       audioOutput,
+      initialNoiseIntensity: readNoiseIntensity(),
     });
     voice.setMuted(snapshot.muted);
     voice.setOutputMuted(snapshot.outputMuted);
@@ -1874,6 +1883,18 @@ export function createCallController(
       voice!.setOutputMuted(muted);
       update({ outputMuted: muted });
     },
+    setNoiseIntensity: async (intensity) => {
+      await voice!.setNoiseIntensity(intensity);
+      writeNoiseIntensity(intensity);
+      update({ noiseIntensity: intensity });
+      // When toggling RNNoise on/off, the getUserMedia constraints change
+      // (noiseSuppression flag). Re-acquire the microphone to apply them.
+      if (voice!.microphoneTrack !== null) {
+        const deviceId =
+          voice!.microphoneTrack.getSettings?.().deviceId ?? '';
+        await voice!.switchMicrophone(deviceId).catch(() => undefined);
+      }
+    },
     selectOutput: async (deviceId) => {
       if (await voice!.selectOutput(deviceId)) {
         update({ selectedOutputId: deviceId });
@@ -2010,6 +2031,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     selectedOutputId: '',
     supportsOutputSelection: false,
     microphoneRetryAvailable: false,
+    noiseIntensity: readNoiseIntensity(),
     screenState: 'idle',
     screenSources: Object.freeze([]),
     screenSelectedToken: null,
@@ -2032,6 +2054,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     start: async () => undefined,
     setMuted: () => undefined,
     switchMicrophone: async () => undefined,
+    setNoiseIntensity: async () => undefined,
     setOutputMuted: () => undefined,
     selectOutput: async () => undefined,
     prepareScreenShare: async () => {

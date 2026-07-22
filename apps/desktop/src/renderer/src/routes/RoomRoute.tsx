@@ -212,9 +212,11 @@ export function RoomRoute({
                       邀请包含访问密钥，仅发送给可信设备。
                     </p>
                   )}
-                  <div className="room-share-error" role="alert">
-                    {copyError}
-                  </div>
+                  {copyError !== null && (
+                    <div className="room-share-error" role="alert">
+                      {copyError}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -300,7 +302,11 @@ export function RoomRoute({
           void call.controller.selectOutput(deviceId).catch(() => undefined)
         }
         onOutputMutedChange={call.controller.setOutputMuted}
+        onNoiseIntensityChange={(intensity) =>
+          void call.controller.setNoiseIntensity(intensity).catch(() => undefined)
+        }
         retryAvailable={call.snapshot.microphoneRetryAvailable}
+        noiseIntensity={call.snapshot.noiseIntensity}
         screenState={screenState}
         screenDisabled={remoteOwnsScreen}
         screenOwnerName={remoteOwnerName}

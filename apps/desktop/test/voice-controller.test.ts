@@ -65,6 +65,7 @@ const defaultConstraints = {
     noiseSuppression: true,
     autoGainControl: true,
     channelCount: 1,
+    sampleRate: 48_000,
   },
   video: false,
 };

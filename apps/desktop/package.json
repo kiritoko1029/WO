@@ -24,6 +24,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
   },
   "dependencies": {
+    "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@wo/media-policy": "workspace:*",
     "@wo/protocol": "workspace:*",
     "@wo/server": "workspace:*",

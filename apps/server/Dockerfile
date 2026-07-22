@@ -45,11 +45,13 @@ RUN pnpm --filter @wo/config build \
 FROM node:24.18.0-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
+ENV DOWNLOADS_ROOT=/app/downloads
 WORKDIR /app
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /app/downloads
 
 COPY --from=workspace --chown=node:node /opt/wo-server/ ./
 COPY --from=workspace --chown=node:node /workspace/apps/web/dist /app/web

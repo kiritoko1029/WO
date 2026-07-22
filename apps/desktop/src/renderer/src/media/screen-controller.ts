@@ -443,12 +443,31 @@ export function createScreenController(
       }
       if (startPromise !== null) return startPromise;
       const expectedGeneration = generation;
+      if (
+        mediaDevices === null ||
+        mediaDevices === undefined ||
+        typeof mediaDevices.getDisplayMedia !== 'function'
+      ) {
+        console.error(
+          '[screen-controller] mediaDevices.getDisplayMedia is unavailable:',
+          mediaDevices,
+        );
+        return fail(
+          Object.assign(new Error('Screen capture is unavailable'), {
+            code: 'SCREEN_CAPTURE_UNAVAILABLE',
+          }),
+        );
+      }
       let capturePromise: Promise<MediaStream>;
       try {
-        capturePromise = mediaDevices.getDisplayMedia(
-          DISPLAY_CAPTURE_CONSTRAINTS,
+        capturePromise = Promise.resolve(
+          mediaDevices.getDisplayMedia(DISPLAY_CAPTURE_CONSTRAINTS),
         );
       } catch (error) {
+        console.error(
+          '[screen-controller] getDisplayMedia threw synchronously:',
+          error,
+        );
         return fail(error);
       }
       update({ state: 'capturing', error: null });
@@ -457,6 +476,10 @@ export function createScreenController(
         try {
           stream = await capturePromise;
         } catch (error) {
+          console.error(
+            '[screen-controller] getDisplayMedia was rejected:',
+            error,
+          );
           return failForGeneration(expectedGeneration, error);
         }
         if (generation !== expectedGeneration) {
