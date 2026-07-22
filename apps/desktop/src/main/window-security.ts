@@ -63,10 +63,10 @@ export function createWindowOptions(
   preloadPath: string,
 ): BrowserWindowConstructorOptions {
   return {
-    width: 920,
-    height: 640,
-    minWidth: 720,
-    minHeight: 560,
+    width: 1_280,
+    height: 800,
+    minWidth: 960,
+    minHeight: 640,
     title: 'WO',
     backgroundColor: '#f5f6f7',
     show: false,
@@ -131,10 +131,20 @@ export function installMediaPermissionPolicy(
       const displayCaptureFallback =
         permission === 'media' &&
         (details.mediaTypes === undefined || details.mediaTypes.length === 0);
+      // getDisplayMedia with system audio: mediaTypes has both 'audio' and
+      // 'video'. Allow this for trusted renderers so screen-share-with-audio
+      // works.
+      const displayCaptureWithAudio =
+        permission === 'media' &&
+        details.mediaTypes !== undefined &&
+        details.mediaTypes.length >= 2 &&
+        details.mediaTypes.includes('audio') &&
+        details.mediaTypes.includes('video');
       callback(
         trusted &&
           (audioOnly ||
             displayCaptureFallback ||
+            displayCaptureWithAudio ||
             permission === 'speaker-selection' ||
             permission === 'display-capture'),
       );

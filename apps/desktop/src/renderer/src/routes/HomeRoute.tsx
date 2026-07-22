@@ -3,6 +3,7 @@ import { AudioLines, LogOut, Plus, Users } from 'lucide-react';
 
 import { AccountSecurityPanel } from '../components/AccountSecurityPanel.js';
 import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
+import { DownloadClient } from '../components/DownloadClient.js';
 import { useAuth } from '../state/auth-store.js';
 import { useRoom } from '../state/room-store.js';
 
@@ -36,17 +37,19 @@ export function HomeRoute({
           <span>WO</span>
         </div>
         <div className="account-summary">
-          <span>{auth.session?.user.displayName}</span>
+          <span className="account-summary-name">
+            {auth.session?.user.displayName}
+          </span>
           <AccountSecurityPanel />
           <button
-            className="icon-button subtle"
+            className="glass-icon-button"
             type="button"
             title="退出登录"
             aria-label="退出登录"
             disabled={auth.busy}
             onClick={() => void auth.logout()}
           >
-            <LogOut size={18} />
+            <LogOut size={16} />
           </button>
         </div>
       </header>
@@ -113,6 +116,7 @@ export function HomeRoute({
             </form>
           </section>
         </div>
+        <DownloadClient />
         <div className="home-error" role="alert" aria-live="polite">
           {validationError ?? room.error ?? auth.error}
         </div>

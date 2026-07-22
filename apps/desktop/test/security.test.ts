@@ -17,10 +17,10 @@ describe('desktop window security', () => {
     const windowOptions = createWindowOptions('C:\\app\\preload.js');
 
     expect(windowOptions).toMatchObject({
-      width: 920,
-      height: 640,
-      minWidth: 720,
-      minHeight: 560,
+      width: 1_280,
+      height: 800,
+      minWidth: 960,
+      minHeight: 640,
       webPreferences: {
         preload: 'C:\\app\\preload.js',
         contextIsolation: true,

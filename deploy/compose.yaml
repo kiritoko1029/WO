@@ -97,6 +97,7 @@ services:
       - turn_shared_secret
     volumes:
       - ./server/entrypoint.sh:/opt/wo/server-entrypoint.sh:ro
+      - ./downloads:/app/downloads:ro
 
   postgres:
     image: postgres:17.10-alpine3.23

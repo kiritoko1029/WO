@@ -9,6 +9,11 @@ import {
   VolumeX,
 } from 'lucide-react';
 import type { VoiceDevice } from '../media/voice-controller.js';
+import {
+  NOISE_INTENSITY_LEVELS,
+  NOISE_INTENSITY_LABELS,
+  type NoiseIntensity,
+} from '../media/noise-suppressor.js';
 import type { ScreenShareState } from '../media/screen-controller.js';
 
 export function CallToolbar({
@@ -21,6 +26,8 @@ export function CallToolbar({
   selectedOutputId,
   supportsOutputSelection,
   retryAvailable,
+  noiseIntensity,
+  remoteVolume,
   screenState,
   screenDisabled,
   screenOwnerName,
@@ -29,6 +36,8 @@ export function CallToolbar({
   onInputChange,
   onOutputChange,
   onOutputMutedChange,
+  onRemoteVolumeChange,
+  onNoiseIntensityChange,
   onRetry,
   onScreenShare,
 }: {
@@ -41,6 +50,8 @@ export function CallToolbar({
   readonly selectedOutputId: string;
   readonly supportsOutputSelection: boolean;
   readonly retryAvailable: boolean;
+  readonly noiseIntensity: NoiseIntensity;
+  readonly remoteVolume: number;
   readonly screenState: ScreenShareState;
   readonly screenDisabled: boolean;
   readonly screenOwnerName: string | null;
@@ -49,6 +60,8 @@ export function CallToolbar({
   readonly onInputChange: (deviceId: string) => void;
   readonly onOutputChange: (deviceId: string) => void;
   readonly onOutputMutedChange: (muted: boolean) => void;
+  readonly onRemoteVolumeChange: (volume: number) => void;
+  readonly onNoiseIntensityChange: (intensity: NoiseIntensity) => void;
   readonly onRetry: () => void;
   readonly onScreenShare: () => void;
 }) {
@@ -108,6 +121,38 @@ export function CallToolbar({
                 </option>
               ))}
             </select>
+          </label>
+          <label>
+            <span>降噪</span>
+            <select
+              aria-label="麦克风降噪"
+              value={noiseIntensity}
+              onChange={(event) =>
+                onNoiseIntensityChange(
+                  event.target.value as NoiseIntensity,
+                )
+              }
+            >
+              {NOISE_INTENSITY_LEVELS.map((level) => (
+                <option key={level} value={level}>
+                  {NOISE_INTENSITY_LABELS[level]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="volume-slider-label">
+            <span>音量</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              aria-label="对方音量"
+              value={remoteVolume}
+              onChange={(event) =>
+                onRemoteVolumeChange(Number(event.target.value))
+              }
+            />
           </label>
           <button
             className="output-mute-button"

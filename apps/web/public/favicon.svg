@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="WO">
+  <defs>
+    <linearGradient id="tile" x1="176" y1="112" x2="848" y2="912" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2997ff"/>
+      <stop offset=".52" stop-color="#0071e3"/>
+      <stop offset="1" stop-color="#0066cc"/>
+    </linearGradient>
+    <radialGradient id="highlight" cx="0" cy="0" r="1" gradientTransform="translate(294 218) rotate(42) scale(676 574)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity=".24"/>
+      <stop offset=".58" stop-color="#ffffff" stop-opacity=".05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tile-clip">
+      <rect x="64" y="64" width="896" height="896" rx="224"/>
+    </clipPath>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#tile)"/>
+  <g clip-path="url(#tile-clip)">
+    <rect x="64" y="64" width="896" height="896" fill="url(#highlight)"/>
+    <path d="M64 760c202-112 390-141 560-89 126 39 238 31 336-25v314H64z" fill="#004f9f" opacity=".13"/>
+  </g>
+  <rect x="69" y="69" width="886" height="886" rx="219" fill="none" stroke="#ffffff" stroke-opacity=".14" stroke-width="10"/>
+  <g fill="#ffffff">
+    <rect x="266" y="438" width="72" height="148" rx="36"/>
+    <rect x="370" y="344" width="72" height="336" rx="36"/>
+    <rect x="476" y="280" width="72" height="464" rx="36"/>
+    <rect x="582" y="344" width="72" height="336" rx="36"/>
+    <rect x="686" y="438" width="72" height="148" rx="36"/>
+  </g>
+</svg>

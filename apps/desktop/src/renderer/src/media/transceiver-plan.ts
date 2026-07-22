@@ -6,6 +6,7 @@ export interface CodecCapabilities {
 export interface TransceiverPlan {
   readonly audio: RTCRtpTransceiver;
   readonly screen: RTCRtpTransceiver;
+  readonly screenAudio: RTCRtpTransceiver;
 }
 
 export function reorderPreferredCodecs(
@@ -68,6 +69,11 @@ export function createCreatorTransceiverPlan(
   capabilities: CodecCapabilities = browserCapabilities(),
 ): TransceiverPlan {
   const audio = pc.addTransceiver('audio', { direction: 'sendrecv' });
+  // Second audio transceiver for desktop/system audio shared alongside the
+  // screen video. Kept as sendrecv so either peer can share desktop audio.
+  const screenAudio = pc.addTransceiver('audio', {
+    direction: 'sendrecv',
+  });
   const screenEncoding = {
     rid: 'f',
     active: true,
@@ -80,8 +86,9 @@ export function createCreatorTransceiverPlan(
     sendEncodings: [screenEncoding],
   });
   applyCodecPreferences(audio, capabilities.audio, 'audio');
+  applyCodecPreferences(screenAudio, capabilities.audio, 'audio');
   applyCodecPreferences(screen, capabilities.video, 'video');
-  return Object.freeze({ audio, screen });
+  return Object.freeze({ audio, screen, screenAudio });
 }
 
 export async function configureJoinerTransceiverPlan(
@@ -99,27 +106,26 @@ export async function configureJoinerTransceiverPlan(
   const videoItems = transceivers.filter(
     (item) => item.receiver.track.kind === 'video',
   );
+  // Expect 3 transceivers: 2 audio (mic + desktop audio) + 1 video (screen).
+  // The order is determined by the creator's addTransceiver calls.
   if (
-    transceivers.length !== 2 ||
-    audioItems.length !== 1 ||
+    transceivers.length !== 3 ||
+    audioItems.length !== 2 ||
     videoItems.length !== 1
   ) {
     throw new Error(
-      'Remote offer must contain exactly one audio and one video',
+      'Remote offer must contain two audio and one video transceiver',
     );
   }
   const audio = audioItems[0]!;
+  const screenAudio = audioItems[1]!;
   const screen = videoItems[0]!;
-  if (audio.mid === null || screen.mid === null) {
-    throw new Error('Remote transceivers require a non-null MID');
-  }
-  if (audio.mid === screen.mid) {
-    throw new Error('Remote transceivers require a unique MID');
-  }
   audio.direction = 'sendrecv';
+  screenAudio.direction = 'sendrecv';
   screen.direction = 'sendrecv';
   if (microphone !== null) await audio.sender.replaceTrack(microphone);
   applyCodecPreferences(audio, capabilities.audio, 'audio');
+  applyCodecPreferences(screenAudio, capabilities.audio, 'audio');
   applyCodecPreferences(screen, capabilities.video, 'video');
-  return Object.freeze({ audio, screen });
+  return Object.freeze({ audio, screen, screenAudio });
 }

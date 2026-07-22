@@ -4,6 +4,7 @@ export interface AudioElementLike {
   autoplay: boolean;
   playsInline: boolean;
   muted: boolean;
+  volume: number;
   srcObject: MediaStream | null;
   play(): Promise<void>;
   pause(): void;
@@ -24,6 +25,7 @@ export interface AudioOutput {
   readonly supportsSinkSelection: boolean;
   attach(track: MediaStreamTrack): Promise<void>;
   setMuted(muted: boolean): void;
+  setVolume(volume: number): void;
   selectSink(sinkId: string): Promise<boolean>;
   cleanup(): Promise<void>;
 }
@@ -75,6 +77,10 @@ export function createAudioOutput(
     setMuted: (muted: boolean) => {
       if (cleaned) return;
       element.muted = muted;
+    },
+    setVolume: (volume: number) => {
+      if (cleaned) return;
+      element.volume = Math.min(1, Math.max(0, volume));
     },
     selectSink: async (sinkId: string) => {
       if (cleaned) return false;

@@ -8,13 +8,17 @@
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#0071e3" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32x32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
     <title>WO</title>
     <script>
       (function () {
         try {
           var key = 'wo-theme';
           var pref = localStorage.getItem(key) || 'system';
-          if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
+          if (pref !== 'light' && pref !== 'dark' && pref !== 'system')
+            pref = 'system';
           var dark =
             pref === 'dark' ||
             (pref === 'system' &&

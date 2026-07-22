@@ -55,6 +55,7 @@ export interface PeerConnectionController {
   readonly transceivers: TransceiverPlan | null;
   readonly audioSender: RTCRtpSender | null;
   readonly screenSender: RTCRtpSender | null;
+  readonly screenAudioSender: RTCRtpSender | null;
   readonly screenReceiver: RTCRtpReceiver | null;
   readonly connectionEpoch: number;
   readonly lastAcceptedRemoteConnectionEpoch: number | null;
@@ -168,6 +169,9 @@ export function createPeerConnectionController(
     },
     get screenSender() {
       return transceivers?.screen.sender ?? null;
+    },
+    get screenAudioSender() {
+      return transceivers?.screenAudio.sender ?? null;
     },
     get screenReceiver() {
       return transceivers?.screen.receiver ?? null;

@@ -1,4 +1,10 @@
 import { createIdempotentCleanup } from './media-cleanup.js';
+import {
+  createNoiseSuppressor,
+  type NoiseSuppressor,
+  type NoiseIntensity,
+  DEFAULT_NOISE_INTENSITY,
+} from './noise-suppressor.js';
 
 import type { AudioOutput } from './audio-output.js';
 
@@ -28,13 +34,16 @@ export interface VoiceDevices {
 export interface VoiceControllerOptions {
   readonly mediaDevices?: MediaDevices;
   readonly audioOutput: AudioOutput;
+  readonly initialNoiseIntensity?: NoiseIntensity;
 }
 
 export interface VoiceController {
   readonly microphoneTrack: MediaStreamTrack | null;
   readonly muted: boolean;
   readonly outputMuted: boolean;
+  readonly remoteVolume: number;
   readonly supportsOutputSelection: boolean;
+  readonly noiseIntensity: NoiseIntensity;
   start(sender?: RTCRtpSender): Promise<MediaStreamTrack>;
   bindSender(
     sender: RTCRtpSender,
@@ -42,19 +51,27 @@ export interface VoiceController {
   ): Promise<void>;
   setMuted(muted: boolean): void;
   switchMicrophone(deviceId: string): Promise<MediaStreamTrack>;
+  setNoiseIntensity(intensity: NoiseIntensity): Promise<void>;
   attachRemoteTrack(track: MediaStreamTrack): Promise<void>;
   setOutputMuted(muted: boolean): void;
+  setRemoteVolume(volume: number): void;
   selectOutput(deviceId: string): Promise<boolean>;
   listDevices(): Promise<VoiceDevices>;
   cleanup(): Promise<void>;
 }
 
-const voiceConstraints = (deviceId?: string): MediaStreamConstraints => ({
+const voiceConstraints = (
+  deviceId?: string,
+  noiseIntensity: NoiseIntensity = DEFAULT_NOISE_INTENSITY,
+): MediaStreamConstraints => ({
   audio: {
     echoCancellation: true,
-    noiseSuppression: true,
+    // When RNNoise is active, disable the browser's built-in noise suppression
+    // to avoid double processing. Fall back to the native filter when off.
+    noiseSuppression: noiseIntensity === 'off',
     autoGainControl: true,
     channelCount: 1,
+    sampleRate: 48_000,
     ...(deviceId === undefined ? {} : { deviceId: { exact: deviceId } }),
   },
   video: false,
@@ -85,6 +102,10 @@ export function createVoiceController(
   let audioSender: RTCRtpSender | null = null;
   let muted = false;
   let outputMuted = false;
+  let remoteVolume = 1;
+  let noiseIntensity: NoiseIntensity =
+    options.initialNoiseIntensity ?? DEFAULT_NOISE_INTENSITY;
+  let noiseSuppressor: NoiseSuppressor | null = null;
   let operationSequence = 0;
   let senderBindingSequence = 0;
   let cleaned = false;
@@ -118,7 +139,9 @@ export function createVoiceController(
   }> => {
     let stream: MediaStream;
     try {
-      stream = await mediaDevices.getUserMedia(voiceConstraints(deviceId));
+      stream = await mediaDevices.getUserMedia(
+        voiceConstraints(deviceId, noiseIntensity),
+      );
     } catch (error) {
       throw captureError(error);
     }
@@ -131,7 +154,20 @@ export function createVoiceController(
       stopTracks(stream);
       throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
     }
-    return { stream, track: audioTracks[0]! };
+    let track: MediaStreamTrack = audioTracks[0]!;
+    // Apply RNNoise processing when enabled. If the suppressor is not yet
+    // created, create it lazily. On failure, fall back to the raw track.
+    if (noiseIntensity !== 'off') {
+      try {
+        if (noiseSuppressor === null) {
+          noiseSuppressor = await createNoiseSuppressor(noiseIntensity);
+        }
+        track = await noiseSuppressor.process(track);
+      } catch {
+        // Graceful degradation: use the raw track with native noiseSuppression.
+      }
+    }
+    return { stream, track };
   };
 
   const runCleanup = createIdempotentCleanup([
@@ -148,6 +184,10 @@ export function createVoiceController(
       microphoneTrack = null;
       if (stream !== null) stopTracks(stream);
       stopUncommittedStreams();
+    },
+    () => {
+      noiseSuppressor?.dispose();
+      noiseSuppressor = null;
     },
     () => options.audioOutput.cleanup(),
   ]);
@@ -170,8 +210,14 @@ export function createVoiceController(
     get outputMuted() {
       return outputMuted;
     },
+    get remoteVolume() {
+      return remoteVolume;
+    },
     get supportsOutputSelection() {
       return options.audioOutput.supportsSinkSelection;
+    },
+    get noiseIntensity() {
+      return noiseIntensity;
     },
     start: async (sender) => {
       if (cleaned || microphoneTrack !== null || localStream !== null) {
@@ -278,7 +324,33 @@ export function createVoiceController(
       outputMuted = nextMuted;
       options.audioOutput.setMuted(nextMuted);
     },
+    setRemoteVolume: (volume) => {
+      remoteVolume = volume;
+      options.audioOutput.setVolume(volume);
+    },
     selectOutput: (deviceId) => options.audioOutput.selectSink(deviceId),
+    setNoiseIntensity: async (nextIntensity) => {
+      const previousIntensity = noiseIntensity;
+      noiseIntensity = nextIntensity;
+      // If no microphone is active yet, the next capture() will use the new
+      // intensity. If already capturing, we may need to rebuild the graph.
+      if (microphoneTrack === null) return;
+      // Same intensity or switching between RNNoise levels (both non-off):
+      // just update the suppressor parameter in place.
+      if (
+        previousIntensity !== 'off' &&
+        nextIntensity !== 'off' &&
+        noiseSuppressor !== null
+      ) {
+        noiseSuppressor.setIntensity(nextIntensity);
+        return;
+      }
+      // Switching on/off requires re-capturing with different constraints.
+      // Dispose the old suppressor; the caller (call-store) will re-acquire
+      // the microphone via switchMicrophone to apply the new constraints.
+      noiseSuppressor?.dispose();
+      noiseSuppressor = null;
+    },
     listDevices: async () => {
       const devices = await mediaDevices.enumerateDevices();
       const mapDevice = (device: MediaDeviceInfo): VoiceDevice => ({

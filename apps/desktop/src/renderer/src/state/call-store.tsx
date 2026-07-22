@@ -73,6 +73,11 @@ import {
   type VoiceController,
   type VoiceDevice,
 } from '../media/voice-controller.js';
+import {
+  readNoiseIntensity,
+  writeNoiseIntensity,
+  type NoiseIntensity,
+} from '../media/noise-suppressor.js';
 import type {
   RoomGateway,
   RoomGatewayEvent,
@@ -544,12 +549,14 @@ export interface CallSnapshot {
   readonly error: string | null;
   readonly muted: boolean;
   readonly outputMuted: boolean;
+  readonly remoteVolume: number;
   readonly inputs: readonly VoiceDevice[];
   readonly outputs: readonly VoiceDevice[];
   readonly selectedInputId: string;
   readonly selectedOutputId: string;
   readonly supportsOutputSelection: boolean;
   readonly microphoneRetryAvailable: boolean;
+  readonly noiseIntensity: NoiseIntensity;
   readonly screenState: ScreenShareState;
   readonly screenSources: readonly CaptureSourceSummary[];
   readonly screenSelectedToken: string | null;
@@ -576,7 +583,9 @@ export interface CallController {
   start(): Promise<void>;
   setMuted(muted: boolean): void;
   switchMicrophone(deviceId: string): Promise<void>;
+  setNoiseIntensity(intensity: NoiseIntensity): Promise<void>;
   setOutputMuted(muted: boolean): void;
+  setRemoteVolume(volume: number): void;
   selectOutput(deviceId: string): Promise<void>;
   prepareScreenShare(): Promise<void>;
   selectScreenSource(token: string): Promise<void>;
@@ -693,12 +702,14 @@ export function createCallController(
     error: null,
     muted: false,
     outputMuted: false,
+    remoteVolume: 1,
     inputs: [],
     outputs: [],
     selectedInputId: '',
     selectedOutputId: '',
     supportsOutputSelection: false,
     microphoneRetryAvailable: false,
+    noiseIntensity: readNoiseIntensity(),
     screenState: 'idle',
     screenSources: Object.freeze([]),
     screenSelectedToken: null,
@@ -930,10 +941,12 @@ export function createCallController(
     if (screenController !== null) return screenController;
     const sender = peer?.screenSender;
     if (sender === null || sender === undefined) return null;
+    const audioSender = peer?.screenAudioSender ?? undefined;
     screenController = createScreenController({
       roomId: options.room.roomId,
       userId: options.gateway.user.userId,
       sender,
+      ...(audioSender === undefined ? {} : { audioSender }),
       signaling: options.gateway.signaling,
       capture: options.gateway.desktop.capture,
       ...(options.mediaDevices === undefined
@@ -1262,6 +1275,7 @@ export function createCallController(
     voice = createVoiceController({
       mediaDevices: options.mediaDevices,
       audioOutput,
+      initialNoiseIntensity: readNoiseIntensity(),
     });
     voice.setMuted(snapshot.muted);
     voice.setOutputMuted(snapshot.outputMuted);
@@ -1874,6 +1888,22 @@ export function createCallController(
       voice!.setOutputMuted(muted);
       update({ outputMuted: muted });
     },
+    setRemoteVolume: (volume) => {
+      voice!.setRemoteVolume(volume);
+      update({ remoteVolume: volume });
+    },
+    setNoiseIntensity: async (intensity) => {
+      await voice!.setNoiseIntensity(intensity);
+      writeNoiseIntensity(intensity);
+      update({ noiseIntensity: intensity });
+      // When toggling RNNoise on/off, the getUserMedia constraints change
+      // (noiseSuppression flag). Re-acquire the microphone to apply them.
+      if (voice!.microphoneTrack !== null) {
+        const deviceId =
+          voice!.microphoneTrack.getSettings?.().deviceId ?? '';
+        await voice!.switchMicrophone(deviceId).catch(() => undefined);
+      }
+    },
     selectOutput: async (deviceId) => {
       if (await voice!.selectOutput(deviceId)) {
         update({ selectedOutputId: deviceId });
@@ -2004,12 +2034,14 @@ function passiveCallController(room: RoomSnapshot): CallController {
     error: null,
     muted: false,
     outputMuted: false,
+    remoteVolume: 1,
     inputs: [],
     outputs: [],
     selectedInputId: '',
     selectedOutputId: '',
     supportsOutputSelection: false,
     microphoneRetryAvailable: false,
+    noiseIntensity: readNoiseIntensity(),
     screenState: 'idle',
     screenSources: Object.freeze([]),
     screenSelectedToken: null,
@@ -2032,7 +2064,9 @@ function passiveCallController(room: RoomSnapshot): CallController {
     start: async () => undefined,
     setMuted: () => undefined,
     switchMicrophone: async () => undefined,
+    setNoiseIntensity: async () => undefined,
     setOutputMuted: () => undefined,
+    setRemoteVolume: () => undefined,
     selectOutput: async () => undefined,
     prepareScreenShare: async () => {
       throw Object.assign(new Error('Screen sharing is unavailable'), {

@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -118,6 +118,7 @@ export async function startServer(
         },
       },
       webRoot: existsSync(BUNDLED_WEB_ROOT) ? BUNDLED_WEB_ROOT : undefined,
+      downloadsRoot: normalizeDownloadsRoot(environment.DOWNLOADS_ROOT),
     });
     await app.listen({ host: config.server.host, port: config.server.port });
   } catch (startupError) {
@@ -137,6 +138,25 @@ export async function startServer(
 
 function safeErrorName(error: unknown): string {
   return error instanceof Error ? error.name : 'UnknownError';
+}
+
+/**
+ * Resolve the downloads root directory from the environment. When unset, the
+ * feature is disabled (route not registered). When set, the directory must
+ * exist; otherwise the server refuses to start so operators notice a broken
+ * mount instead of getting silent 404s in production.
+ */
+function normalizeDownloadsRoot(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
+  const root = resolve(value.trim());
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    throw new Error(
+      `DOWNLOADS_ROOT is set to ${value} but the path is not an existing directory`,
+    );
+  }
+  return root;
 }
 
 async function runMain(): Promise<void> {

@@ -21,6 +21,10 @@ import {
   type AuthRateLimit,
 } from './modules/auth/auth-routes.ts';
 import type { AuthService } from './modules/auth/auth-service.ts';
+import {
+  registerDownloadRoutes,
+  type DownloadRouteDependencies,
+} from './modules/downloads/download-routes.ts';
 import { registerHealthRoutes } from './modules/health/health-routes.ts';
 import {
   createJoinAttemptLimiter,
@@ -91,6 +95,7 @@ export interface AppDependencies {
   readonly bodyLimit?: number;
   readonly realtime?: RealtimeAppDependencies;
   readonly webRoot?: string;
+  readonly downloadsRoot?: string;
   readonly admin?: AdminRouteDependencies;
 }
 
@@ -238,6 +243,12 @@ export async function createApp(
     app.get('/join/*', sendWebApp);
     app.get('/admin', sendAdminApp);
     app.get('/admin/*', sendAdminApp);
+  }
+  if (dependencies.downloadsRoot !== undefined) {
+    const downloadDeps: DownloadRouteDependencies = {
+      root: dependencies.downloadsRoot,
+    };
+    registerDownloadRoutes(app, downloadDeps);
   }
   return app;
 }
