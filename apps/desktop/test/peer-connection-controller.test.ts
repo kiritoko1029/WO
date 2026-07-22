@@ -37,13 +37,15 @@ function createTransceiver(kind: 'audio' | 'video', mid: string) {
 function createPeer() {
   const listeners = new Map<string, Set<(event: unknown) => void>>();
   const audio = createTransceiver('audio', '0');
-  const screen = createTransceiver('video', '1');
+  const screenAudio = createTransceiver('audio', '1');
+  const screen = createTransceiver('video', '2');
   const pc = {
     addTransceiver: vi
       .fn()
       .mockReturnValueOnce(audio)
+      .mockReturnValueOnce(screenAudio)
       .mockReturnValueOnce(screen),
-    getTransceivers: vi.fn(() => [audio, screen]),
+    getTransceivers: vi.fn(() => [audio, screenAudio, screen]),
     addEventListener: vi.fn(
       (type: string, listener: (event: unknown) => void) => {
         const values = listeners.get(type) ?? new Set();
@@ -67,7 +69,7 @@ function createPeer() {
       for (const listener of listeners.get(type) ?? []) listener(event);
     },
   };
-  return { pc, audio, screen, listeners };
+  return { pc, audio, screenAudio, screen, listeners };
 }
 
 describe('PeerConnection ownership', () => {
@@ -100,10 +102,12 @@ describe('PeerConnection ownership', () => {
     ]);
     expect(controller.transceivers).toEqual({
       audio: peer.audio,
+      screenAudio: peer.screenAudio,
       screen: peer.screen,
     });
     expect(controller.audioSender).toBe(peer.audio.sender);
     expect(controller.screenSender).toBe(peer.screen.sender);
+    expect(controller.screenAudioSender).toBe(peer.screenAudio.sender);
     expect(controller.screenReceiver).toBe(peer.screen.receiver);
     peer.pc.emit('icecandidate', { candidate: null });
     expect(onLocalCandidate).toHaveBeenCalledWith(null, 0);
@@ -145,6 +149,7 @@ describe('PeerConnection ownership', () => {
     expect(peer.pc.addTransceiver).not.toHaveBeenCalled();
     expect(controller.transceivers).toEqual({
       audio: peer.audio,
+      screenAudio: peer.screenAudio,
       screen: peer.screen,
     });
   });

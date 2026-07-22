@@ -41,6 +41,7 @@ export interface VoiceController {
   readonly microphoneTrack: MediaStreamTrack | null;
   readonly muted: boolean;
   readonly outputMuted: boolean;
+  readonly remoteVolume: number;
   readonly supportsOutputSelection: boolean;
   readonly noiseIntensity: NoiseIntensity;
   start(sender?: RTCRtpSender): Promise<MediaStreamTrack>;
@@ -53,6 +54,7 @@ export interface VoiceController {
   setNoiseIntensity(intensity: NoiseIntensity): Promise<void>;
   attachRemoteTrack(track: MediaStreamTrack): Promise<void>;
   setOutputMuted(muted: boolean): void;
+  setRemoteVolume(volume: number): void;
   selectOutput(deviceId: string): Promise<boolean>;
   listDevices(): Promise<VoiceDevices>;
   cleanup(): Promise<void>;
@@ -100,6 +102,7 @@ export function createVoiceController(
   let audioSender: RTCRtpSender | null = null;
   let muted = false;
   let outputMuted = false;
+  let remoteVolume = 1;
   let noiseIntensity: NoiseIntensity =
     options.initialNoiseIntensity ?? DEFAULT_NOISE_INTENSITY;
   let noiseSuppressor: NoiseSuppressor | null = null;
@@ -206,6 +209,9 @@ export function createVoiceController(
     },
     get outputMuted() {
       return outputMuted;
+    },
+    get remoteVolume() {
+      return remoteVolume;
     },
     get supportsOutputSelection() {
       return options.audioOutput.supportsSinkSelection;
@@ -317,6 +323,10 @@ export function createVoiceController(
     setOutputMuted: (nextMuted) => {
       outputMuted = nextMuted;
       options.audioOutput.setMuted(nextMuted);
+    },
+    setRemoteVolume: (volume) => {
+      remoteVolume = volume;
+      options.audioOutput.setVolume(volume);
     },
     selectOutput: (deviceId) => options.audioOutput.selectSink(deviceId),
     setNoiseIntensity: async (nextIntensity) => {

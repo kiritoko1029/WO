@@ -368,7 +368,7 @@ describe('single screen controller', () => {
     await harness.controller.startSelectedCapture();
 
     expect(DISPLAY_CAPTURE_CONSTRAINTS).toEqual({
-      audio: false,
+      audio: true,
       video: {
         frameRate: { ideal: 60 },
       },

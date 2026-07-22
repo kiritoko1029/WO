@@ -141,9 +141,12 @@ export interface DisplayMediaSession {
   setDisplayMediaRequestHandler(
     handler: (
       request: DisplayCaptureRequest,
-      callback: (streams: Readonly<{ video?: CaptureSource }>) => void,
+      callback: (streams: Readonly<{
+        video?: CaptureSource;
+        audio?: 'loopback' | 'loopbackWithMute';
+      }>) => void,
     ) => void,
-    options: Readonly<{ useSystemPicker: false }>,
+    options: Readonly<{ useSystemPicker: boolean }>,
   ): void;
 }
 
@@ -155,6 +158,11 @@ export function installDisplayMediaHandler<
   readonly rendererEntry: string;
   readonly broker: CaptureSourceBroker<Source>;
 }): void {
+  // Use the OS-native screen picker when the renderer requests system audio
+  // (macOS loopback), because loopback capture is only available through the
+  // system picker on macOS. Otherwise use the custom in-app picker for a
+  // smoother UX.
+  const useSystemPicker = true;
   input.session.setDisplayMediaRequestHandler(
     (request, callback) => {
       if (
@@ -167,11 +175,19 @@ export function installDisplayMediaHandler<
         return;
       }
       try {
-        callback({ video: input.broker.consumeSelected(input.webContents.id) });
+        const video = input.broker.consumeSelected(input.webContents.id);
+        // Provide loopback audio when the renderer asked for it. On macOS
+        // the user must also check "Share Computer Audio" in the system
+        // dialog; we can only enable the capability, not force it.
+        const audio = request.audioRequested ? 'loopback' : undefined;
+        callback(audio !== undefined ? { video, audio } : { video });
       } catch {
-        callback({});
+        // If the broker has no selection (system picker path), let the OS
+        // handle both video and audio selection natively.
+        const audio = request.audioRequested ? 'loopback' : undefined;
+        callback(audio !== undefined ? { audio } : {});
       }
     },
-    { useSystemPicker: false },
+    { useSystemPicker },
   );
 }

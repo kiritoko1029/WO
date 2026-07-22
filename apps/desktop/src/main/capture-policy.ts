@@ -221,7 +221,6 @@ export function isDisplayCaptureRequestAllowed(
     canonicalDisplaySecurityOrigin(request.securityOrigin) ===
       captureSecurityOrigin(policy.rendererEntry) &&
     request.videoRequested &&
-    !request.audioRequested &&
     request.userGesture
   );
 }

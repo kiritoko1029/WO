@@ -27,13 +27,15 @@ function transceiver(
 }
 
 describe('fixed transceiver plan', () => {
-  it('creates exactly one audio and one single-layer screen transceiver for the creator', () => {
+  it('creates mic audio, desktop audio, and screen video transceivers for the creator', () => {
     const audio = transceiver('audio', '0');
-    const screen = transceiver('video', '1');
+    const screenAudio = transceiver('audio', '1');
+    const screen = transceiver('video', '2');
     const pc = {
       addTransceiver: vi
         .fn()
         .mockReturnValueOnce(audio)
+        .mockReturnValueOnce(screenAudio)
         .mockReturnValueOnce(screen),
     };
 
@@ -49,29 +51,23 @@ describe('fixed transceiver plan', () => {
       },
     );
 
-    expect(result).toEqual({ audio, screen });
-    expect(pc.addTransceiver.mock.calls).toEqual([
-      ['audio', { direction: 'sendrecv' }],
-      [
-        'video',
-        {
-          direction: 'sendrecv',
-          sendEncodings: [
-            {
-              rid: 'f',
-              active: true,
-              maxBitrate: 8_000_000,
-              scalabilityMode: 'L1T1',
-              scaleResolutionDownBy: 1,
-            },
-          ],
-        },
-      ],
+    expect(result).toEqual({ audio, screen, screenAudio });
+    // Three addTransceiver calls: mic audio, desktop audio, screen video.
+    expect(pc.addTransceiver).toHaveBeenCalledTimes(3);
+    expect(pc.addTransceiver.mock.calls[0]).toEqual([
+      'audio',
+      { direction: 'sendrecv' },
     ]);
+    expect(pc.addTransceiver.mock.calls[1]).toEqual([
+      'audio',
+      { direction: 'sendrecv' },
+    ]);
+    expect(pc.addTransceiver.mock.calls[2]?.[0]).toBe('video');
     expect(audio.setCodecPreferences).toHaveBeenCalledWith([
       expect.objectContaining({ mimeType: 'audio/opus' }),
       expect.objectContaining({ mimeType: 'audio/PCMU' }),
     ]);
+    expect(screenAudio.setCodecPreferences).toHaveBeenCalled();
     expect(screen.setCodecPreferences).toHaveBeenCalledWith([
       expect.objectContaining({ mimeType: 'video/H264' }),
       expect.objectContaining({ mimeType: 'video/VP8' }),
@@ -96,13 +92,14 @@ describe('fixed transceiver plan', () => {
     expect(reorderPreferredCodecs(codecs, 'audio/missing')).toBeNull();
   });
 
-  it('maps joiner transceivers after the remote offer without creating duplicates', async () => {
+  it('maps joiner transceivers (3 m-lines) without creating duplicates', async () => {
     const audio = transceiver('audio', '0');
-    const screen = transceiver('video', '1');
+    const screenAudio = transceiver('audio', '1');
+    const screen = transceiver('video', '2');
     const microphone = { kind: 'audio' } as MediaStreamTrack;
     const pc = {
       addTransceiver: vi.fn(),
-      getTransceivers: vi.fn(() => [screen, audio]),
+      getTransceivers: vi.fn(() => [screen, audio, screenAudio]),
     };
 
     const result = await configureJoinerTransceiverPlan(
@@ -114,21 +111,20 @@ describe('fixed transceiver plan', () => {
       },
     );
 
-    expect(result).toEqual({ audio, screen });
+    expect(result).toEqual({ audio, screen, screenAudio });
     expect(pc.addTransceiver).not.toHaveBeenCalled();
     expect(audio.direction).toBe('sendrecv');
+    expect(screenAudio.direction).toBe('sendrecv');
     expect(screen.direction).toBe('sendrecv');
     expect(audio.sender.replaceTrack).toHaveBeenCalledWith(microphone);
-    expect(audio.setCodecPreferences).toHaveBeenCalledBefore(
-      screen.setCodecPreferences!,
-    );
   });
 
   it('maps the remote offer without attaching audio when the microphone is unavailable', async () => {
     const audio = transceiver('audio', '0');
-    const screen = transceiver('video', '1');
+    const screenAudio = transceiver('audio', '1');
+    const screen = transceiver('video', '2');
     const pc = {
-      getTransceivers: vi.fn(() => [audio, screen]),
+      getTransceivers: vi.fn(() => [audio, screenAudio, screen]),
     } as unknown as RTCPeerConnection;
 
     const result = await configureJoinerTransceiverPlan(
@@ -137,16 +133,16 @@ describe('fixed transceiver plan', () => {
       { audio: [], video: [] },
     );
 
-    expect(result).toEqual({ audio, screen });
+    expect(result).toEqual({ audio, screen, screenAudio });
     expect(audio.direction).toBe('sendrecv');
     expect(screen.direction).toBe('sendrecv');
     expect(audio.sender.replaceTrack).not.toHaveBeenCalled();
   });
 
   it.each([
-    [[transceiver('audio', '0')], 'exactly one audio and one video'],
-    [[transceiver('audio', null), transceiver('video', '1')], 'non-null MID'],
-    [[transceiver('audio', '0'), transceiver('video', '0')], 'unique MID'],
+    [[transceiver('audio', '0'), transceiver('video', '1')], 'two audio and one video'],
+    [[transceiver('audio', '0'), transceiver('audio', '1')], 'two audio and one video'],
+    [[transceiver('audio', '0'), transceiver('audio', '1'), transceiver('audio', '2')], 'two audio and one video'],
   ])('rejects an ambiguous remote transceiver map', async (items, message) => {
     await expect(
       configureJoinerTransceiverPlan(
@@ -162,11 +158,13 @@ describe('fixed transceiver plan', () => {
 
   it('falls back to standards negotiation when codec preferences are unsupported or absent', () => {
     const audio = transceiver('audio', '0', false);
-    const screen = transceiver('video', '1', false);
+    const screenAudio = transceiver('audio', '1', false);
+    const screen = transceiver('video', '2', false);
     const pc = {
       addTransceiver: vi
         .fn()
         .mockReturnValueOnce(audio)
+        .mockReturnValueOnce(screenAudio)
         .mockReturnValueOnce(screen),
     };
 

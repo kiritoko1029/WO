@@ -549,6 +549,7 @@ export interface CallSnapshot {
   readonly error: string | null;
   readonly muted: boolean;
   readonly outputMuted: boolean;
+  readonly remoteVolume: number;
   readonly inputs: readonly VoiceDevice[];
   readonly outputs: readonly VoiceDevice[];
   readonly selectedInputId: string;
@@ -584,6 +585,7 @@ export interface CallController {
   switchMicrophone(deviceId: string): Promise<void>;
   setNoiseIntensity(intensity: NoiseIntensity): Promise<void>;
   setOutputMuted(muted: boolean): void;
+  setRemoteVolume(volume: number): void;
   selectOutput(deviceId: string): Promise<void>;
   prepareScreenShare(): Promise<void>;
   selectScreenSource(token: string): Promise<void>;
@@ -700,6 +702,7 @@ export function createCallController(
     error: null,
     muted: false,
     outputMuted: false,
+    remoteVolume: 1,
     inputs: [],
     outputs: [],
     selectedInputId: '',
@@ -938,10 +941,12 @@ export function createCallController(
     if (screenController !== null) return screenController;
     const sender = peer?.screenSender;
     if (sender === null || sender === undefined) return null;
+    const audioSender = peer?.screenAudioSender ?? undefined;
     screenController = createScreenController({
       roomId: options.room.roomId,
       userId: options.gateway.user.userId,
       sender,
+      ...(audioSender === undefined ? {} : { audioSender }),
       signaling: options.gateway.signaling,
       capture: options.gateway.desktop.capture,
       ...(options.mediaDevices === undefined
@@ -1883,6 +1888,10 @@ export function createCallController(
       voice!.setOutputMuted(muted);
       update({ outputMuted: muted });
     },
+    setRemoteVolume: (volume) => {
+      voice!.setRemoteVolume(volume);
+      update({ remoteVolume: volume });
+    },
     setNoiseIntensity: async (intensity) => {
       await voice!.setNoiseIntensity(intensity);
       writeNoiseIntensity(intensity);
@@ -2025,6 +2034,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     error: null,
     muted: false,
     outputMuted: false,
+    remoteVolume: 1,
     inputs: [],
     outputs: [],
     selectedInputId: '',
@@ -2056,6 +2066,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     switchMicrophone: async () => undefined,
     setNoiseIntensity: async () => undefined,
     setOutputMuted: () => undefined,
+    setRemoteVolume: () => undefined,
     selectOutput: async () => undefined,
     prepareScreenShare: async () => {
       throw Object.assign(new Error('Screen sharing is unavailable'), {

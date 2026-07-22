@@ -2209,6 +2209,30 @@ button:disabled {
     background-color var(--wo-dur) var(--wo-ease);
 }
 
+.volume-slider-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.volume-slider-label span {
+  flex: 0 0 auto;
+  color: var(--wo-text-subtle);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.volume-slider-label input[type='range'] {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 4px;
+  accent-color: var(--wo-brand-500);
+  background: var(--wo-surface-3);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
 .output-mute-button:hover {
   color: var(--wo-text);
   background: var(--wo-surface-3);

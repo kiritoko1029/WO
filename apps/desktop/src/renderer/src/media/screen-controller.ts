@@ -18,8 +18,10 @@ const RELEASE_PENDING_MESSAGE = '屏幕已在本机停止，服务端将在租�
 
 export const DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
   Object.freeze({
-    audio: false,
-    // Prefer high frame rate without forcing a capture resolution downscale.
+    // Request system audio (loopback) alongside the video so the sharer can
+    // broadcast desktop sound. On macOS the user must additionally check
+    // "Share Computer Audio" in the system picker dialog.
+    audio: true,
     video: Object.freeze({
       frameRate: Object.freeze({ ideal: 60 }),
     }),
@@ -79,6 +81,12 @@ export interface ScreenControllerOptions {
   readonly roomId: string;
   readonly userId: string;
   readonly sender: Pick<RTCRtpSender, 'replaceTrack'>;
+  /**
+   * Optional sender for the desktop audio track captured alongside the screen
+   * video. When provided and the capture yields an audio track, it is
+   * attached here so the remote peer receives system audio.
+   */
+  readonly audioSender?: Pick<RTCRtpSender, 'replaceTrack'>;
   readonly signaling: ScreenSignaling;
   readonly capture: Pick<DesktopApi['capture'], 'list' | 'select'>;
   readonly mediaDevices?: Pick<MediaDevices, 'getDisplayMedia'>;
@@ -488,16 +496,20 @@ export function createScreenController(
         }
         const tracks = stream.getTracks();
         const videoTracks = stream.getVideoTracks();
+        const audioTracks = stream.getAudioTracks();
+        // Allow exactly 1 video track plus 0 or 1 audio track (desktop audio
+        // is optional — the user may not check "Share Computer Audio").
         if (
-          tracks.length !== 1 ||
           videoTracks.length !== 1 ||
-          stream.getAudioTracks().length !== 0 ||
-          videoTracks[0]!.kind !== 'video'
+          videoTracks[0]!.kind !== 'video' ||
+          audioTracks.length > 1 ||
+          tracks.length !== videoTracks.length + audioTracks.length
         ) {
           stopStream(stream);
           return fail(new ScreenControllerError('INVALID_STATE'));
         }
         const track = videoTracks[0]!;
+        const audioTrack = audioTracks[0] ?? null;
         currentTrack = track;
         track.addEventListener('ended', handleTrackEnded, { once: true });
         const settings = captureSettings(track);
@@ -514,6 +526,11 @@ export function createScreenController(
           assertCurrent(expectedGeneration);
           if (trackEnded(track)) {
             throw new ScreenControllerError('INVALID_STATE');
+          }
+          // Attach desktop audio if present and a sender is available.
+          if (audioTrack !== null && options.audioSender !== undefined) {
+            await options.audioSender.replaceTrack(audioTrack);
+            assertCurrent(expectedGeneration);
           }
           update({ state: 'sharing', captureSettings: settings, error: null });
         } catch (error) {

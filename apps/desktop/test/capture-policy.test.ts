@@ -289,14 +289,17 @@ describe('desktop capture source policy', () => {
     };
 
     handler?.({ ...request, audioRequested: true }, callback);
-    expect(callback).toHaveBeenLastCalledWith({});
-    handler?.(request, callback);
-    expect(callback).toHaveBeenLastCalledWith({ video: sources[0] });
+    // Audio is now allowed — handler provides loopback audio alongside video.
+    expect(callback).toHaveBeenLastCalledWith({
+      video: sources[0],
+      audio: 'loopback',
+    });
+    // Second call: source already consumed, callback falls back gracefully.
     handler?.(request, callback);
     expect(callback).toHaveBeenLastCalledWith({});
     expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
       expect.any(Function),
-      { useSystemPicker: false },
+      { useSystemPicker: true },
     );
   });
 
@@ -330,9 +333,10 @@ describe('desktop capture source policy', () => {
     expect(
       isDisplayCaptureRequestAllowed({ ...base, userGesture: false }, policy),
     ).toBe(false);
+    // Audio alongside video is now allowed (desktop audio sharing).
     expect(
       isDisplayCaptureRequestAllowed({ ...base, audioRequested: true }, policy),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isDisplayCaptureRequestAllowed(
         { ...base, videoRequested: false },

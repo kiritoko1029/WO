@@ -441,6 +441,24 @@ function peerConnectionFactory(
         track: null as MediaStreamTrack | null,
         replaceTrack: vi.fn().mockResolvedValue(undefined),
         getParameters: vi.fn(() => ({
+          transactionId: 'screen-audio-transaction',
+          encodings: [{ rid: 'a' }],
+          codecs: [],
+          headerExtensions: [],
+          rtcp: {},
+        })),
+        setParameters: vi.fn().mockResolvedValue(undefined),
+      },
+      receiver: { track: { kind: 'audio' } },
+      setCodecPreferences: vi.fn(),
+    },
+    {
+      mid: '2',
+      direction: 'sendrecv',
+      sender: {
+        track: null as MediaStreamTrack | null,
+        replaceTrack: vi.fn().mockResolvedValue(undefined),
+        getParameters: vi.fn(() => ({
           transactionId: 'screen-transaction',
           encodings: [{ rid: 'f', scaleResolutionDownBy: 1 }],
           codecs: [],
@@ -467,7 +485,8 @@ function peerConnectionFactory(
     addTransceiver: vi
       .fn()
       .mockReturnValueOnce(transceivers[0])
-      .mockReturnValueOnce(transceivers[1]),
+      .mockReturnValueOnce(transceivers[1])
+      .mockReturnValueOnce(transceivers[2]),
     getTransceivers: vi.fn(() => transceivers),
     addEventListener: vi.fn(
       (type: string, listener: (event: unknown) => void) => {
@@ -1305,7 +1324,7 @@ describe('realtime room gateway', () => {
     );
     await vi.waitFor(() =>
       expect(call.getSnapshot().remoteScreenTrack).toBe(
-        peer.transceivers[1]!.receiver.track,
+        peer.transceivers[2]!.receiver.track,
       ),
     );
   });
@@ -1350,7 +1369,7 @@ describe('realtime room gateway', () => {
     expect(call.getSnapshot().remoteScreenTrack).toBeNull();
 
     const remoteTrack = videoTrack();
-    peer.transceivers[1]!.receiver.track = remoteTrack;
+    peer.transceivers[2]!.receiver.track = remoteTrack;
     client.emit({
       version: PROTOCOL_VERSION,
       eventId: 'remote-screen-owner-after-negotiation' as never,
@@ -1573,7 +1592,7 @@ describe('realtime room gateway', () => {
       ).toHaveLength(1),
     );
     expect(creatorCall.getSnapshot().remoteScreenTrack).toBe(
-      creatorPeer.transceivers[1]!.receiver.track,
+      creatorPeer.transceivers[2]!.receiver.track,
     );
     expect(
       joinerPeer.transceivers[0]!.sender.replaceTrack,
@@ -1624,7 +1643,7 @@ describe('realtime room gateway', () => {
     expect(client.connect).toHaveBeenLastCalledWith('access-token');
     expect(peer.pc.setConfiguration).toHaveBeenCalledWith(rtcConfiguration);
     expect(screenTrack.stop).toHaveBeenCalledOnce();
-    expect(peer.transceivers[1]!.sender.replaceTrack).toHaveBeenLastCalledWith(
+    expect(peer.transceivers[2]!.sender.replaceTrack).toHaveBeenLastCalledWith(
       null,
     );
     expect(microphone.stop).not.toHaveBeenCalled();
@@ -2674,7 +2693,7 @@ describe('realtime room gateway', () => {
     await call.selectScreenSource('00000000-0000-4000-8000-000000000001');
     await call.startScreenShare();
 
-    expect(peer.transceivers[1]!.sender.replaceTrack).toHaveBeenCalledWith(
+    expect(peer.transceivers[2]!.sender.replaceTrack).toHaveBeenCalledWith(
       screenTrack,
     );
     expect(peer.pc.createOffer).toHaveBeenCalledTimes(offerCount);
@@ -2685,7 +2704,7 @@ describe('realtime room gateway', () => {
       localScreenTrack: screenTrack,
     });
     await call.setScreenBitrate({ mode: 'fixed', bitrateBps: 4_000_000 });
-    expect(peer.transceivers[1]!.sender.setParameters).toHaveBeenCalledWith(
+    expect(peer.transceivers[2]!.sender.setParameters).toHaveBeenCalledWith(
       expect.objectContaining({
         transactionId: 'screen-transaction',
         encodings: [
@@ -2704,7 +2723,7 @@ describe('realtime room gateway', () => {
 
     await call.stopScreenShare();
 
-    expect(peer.transceivers[1]!.sender.replaceTrack.mock.calls.at(-1)).toEqual(
+    expect(peer.transceivers[2]!.sender.replaceTrack.mock.calls.at(-1)).toEqual(
       [null],
     );
     expect(call.getSnapshot()).toMatchObject({
@@ -2803,7 +2822,7 @@ describe('realtime room gateway', () => {
     const room = await gateway.createRoom('access-token');
     const peer = peerConnectionFactory();
     const parametersApplied = deferred<void>();
-    peer.transceivers[1]!.sender.setParameters.mockImplementationOnce(
+    peer.transceivers[2]!.sender.setParameters.mockImplementationOnce(
       () => parametersApplied.promise,
     );
     const call = createCallController({
@@ -2823,7 +2842,7 @@ describe('realtime room gateway', () => {
       bitrateBps: 6_000_000,
     });
     await vi.waitFor(() =>
-      expect(peer.transceivers[1]!.sender.setParameters).toHaveBeenCalledOnce(),
+      expect(peer.transceivers[2]!.sender.setParameters).toHaveBeenCalledOnce(),
     );
     const cleaning = call.cleanup();
     parametersApplied.resolve();
@@ -2878,7 +2897,7 @@ describe('realtime room gateway', () => {
         screenOwnerLeaseId: 'lease-2',
       }),
     );
-    expect(peer.transceivers[1]!.sender.replaceTrack.mock.calls.at(-1)).toEqual(
+    expect(peer.transceivers[2]!.sender.replaceTrack.mock.calls.at(-1)).toEqual(
       [null],
     );
   });
@@ -2902,7 +2921,7 @@ describe('realtime room gateway', () => {
       createPeerConnection: peer.factory,
     });
     await call.start();
-    const remoteTrack = peer.transceivers[1]!.receiver
+    const remoteTrack = peer.transceivers[2]!.receiver
       .track as MediaStreamTrack;
     peer.pc.emit('track', { track: remoteTrack });
     client.emit({

@@ -32,6 +32,7 @@ function audioElement(sink = true) {
     autoplay: false,
     playsInline: false,
     muted: false,
+    volume: 1,
     srcObject: null as MediaStream | null,
     play: vi.fn().mockResolvedValue(undefined),
     pause: vi.fn(),

@@ -302,11 +302,13 @@ export function RoomRoute({
           void call.controller.selectOutput(deviceId).catch(() => undefined)
         }
         onOutputMutedChange={call.controller.setOutputMuted}
+        onRemoteVolumeChange={call.controller.setRemoteVolume}
         onNoiseIntensityChange={(intensity) =>
           void call.controller.setNoiseIntensity(intensity).catch(() => undefined)
         }
         retryAvailable={call.snapshot.microphoneRetryAvailable}
         noiseIntensity={call.snapshot.noiseIntensity}
+        remoteVolume={call.snapshot.remoteVolume}
         screenState={screenState}
         screenDisabled={remoteOwnsScreen}
         screenOwnerName={remoteOwnerName}

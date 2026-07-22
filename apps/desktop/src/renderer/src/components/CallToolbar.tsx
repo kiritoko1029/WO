@@ -27,6 +27,7 @@ export function CallToolbar({
   supportsOutputSelection,
   retryAvailable,
   noiseIntensity,
+  remoteVolume,
   screenState,
   screenDisabled,
   screenOwnerName,
@@ -35,6 +36,7 @@ export function CallToolbar({
   onInputChange,
   onOutputChange,
   onOutputMutedChange,
+  onRemoteVolumeChange,
   onNoiseIntensityChange,
   onRetry,
   onScreenShare,
@@ -49,6 +51,7 @@ export function CallToolbar({
   readonly supportsOutputSelection: boolean;
   readonly retryAvailable: boolean;
   readonly noiseIntensity: NoiseIntensity;
+  readonly remoteVolume: number;
   readonly screenState: ScreenShareState;
   readonly screenDisabled: boolean;
   readonly screenOwnerName: string | null;
@@ -57,6 +60,7 @@ export function CallToolbar({
   readonly onInputChange: (deviceId: string) => void;
   readonly onOutputChange: (deviceId: string) => void;
   readonly onOutputMutedChange: (muted: boolean) => void;
+  readonly onRemoteVolumeChange: (volume: number) => void;
   readonly onNoiseIntensityChange: (intensity: NoiseIntensity) => void;
   readonly onRetry: () => void;
   readonly onScreenShare: () => void;
@@ -135,6 +139,20 @@ export function CallToolbar({
                 </option>
               ))}
             </select>
+          </label>
+          <label className="volume-slider-label">
+            <span>音量</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              aria-label="对方音量"
+              value={remoteVolume}
+              onChange={(event) =>
+                onRemoteVolumeChange(Number(event.target.value))
+              }
+            />
           </label>
           <button
             className="output-mute-button"
