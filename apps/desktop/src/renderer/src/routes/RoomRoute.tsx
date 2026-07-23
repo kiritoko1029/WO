@@ -229,6 +229,8 @@ export function RoomRoute({
         <ParticipantSlots
           participants={room.participants}
           muted={call.snapshot.muted}
+          localAudioLevel={call.snapshot.localAudioLevel}
+          remoteAudioLevel={call.snapshot.remoteAudioLevel}
         />
         <div className="room-error" role="alert" aria-live="polite">
           {visibleError !== null && <span>{visibleError}</span>}
@@ -283,6 +285,9 @@ export function RoomRoute({
           onCancel={() =>
             void call.controller.stopScreenShare().catch(() => undefined)
           }
+          onRefresh={() =>
+            void call.controller.refreshScreenSources().catch(() => undefined)
+          }
         />
       )}
       <CallToolbar
@@ -303,12 +308,17 @@ export function RoomRoute({
         }
         onOutputMutedChange={call.controller.setOutputMuted}
         onRemoteVolumeChange={call.controller.setRemoteVolume}
+        onMicrophoneVolumeChange={call.controller.setMicrophoneVolume}
         onNoiseIntensityChange={(intensity) =>
           void call.controller.setNoiseIntensity(intensity).catch(() => undefined)
+        }
+        onRefreshDevices={() =>
+          void call.controller.refreshDevices().catch(() => undefined)
         }
         retryAvailable={call.snapshot.microphoneRetryAvailable}
         noiseIntensity={call.snapshot.noiseIntensity}
         remoteVolume={call.snapshot.remoteVolume}
+        microphoneVolume={call.snapshot.microphoneVolume}
         screenState={screenState}
         screenDisabled={remoteOwnsScreen}
         screenOwnerName={remoteOwnerName}

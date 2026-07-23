@@ -76,6 +76,12 @@ export interface ReconnectController {
   handleIceConnectionState(state: RTCIceConnectionState): Promise<void>;
   handleAuthoritativeReset(): Promise<boolean>;
   handleRoomClosed(): Promise<void>;
+  /**
+   * Peer left the room intentionally (or long enough to be dropped). Cancel
+   * in-flight ICE recovery so a collapsing PeerConnection cannot mark the
+   * session terminal while the remaining member waits for a rejoin.
+   */
+  clearMediaRecovery(): void;
   stop(): void;
 }
 
@@ -621,6 +627,22 @@ export function createReconnectController(
     },
     handleAuthoritativeReset: startAuthoritativeReset,
     handleRoomClosed: startTerminalCleanup,
+    clearMediaRecovery() {
+      if (
+        snapshot.state === 'closed' ||
+        snapshot.state === 'stopped' ||
+        snapshot.state === 'closing'
+      ) {
+        return;
+      }
+      clearDisconnectedTimer();
+      clearOperationTimers();
+      queuedIceIntent = null;
+      // Bump generation so any in-flight ICE / rebuild recovery sees isCurrent
+      // as false and cannot transition the controller to failed.
+      iceFlight = null;
+      begin('connected');
+    },
     stop() {
       if (snapshot.state === 'stopped') return;
       clearDisconnectedTimer();

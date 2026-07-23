@@ -110,7 +110,7 @@ describe('desktop capture source policy', () => {
     expect(getSources).toHaveBeenCalledWith({
       types: ['screen', 'window'],
       fetchWindowIcons: false,
-      thumbnailSize: { width: 320, height: 180 },
+      thumbnailSize: { width: 200, height: 112 },
     });
     expect(listed).toEqual([
       {
@@ -252,7 +252,18 @@ describe('desktop capture source policy', () => {
         ],
       },
     });
-    await expect(protectedService.list(1)).resolves.toEqual([]);
+    // Sources with a 0×0 thumbnail (protected/minimized windows) are no
+    // longer dropped — they get a placeholder so they still appear in the
+    // picker and the user can select them via the system dialog.
+    const protectedResult = await protectedService.list(1);
+    expect(protectedResult).toHaveLength(1);
+    expect(protectedResult[0]).toMatchObject({
+      name: 'Protected window',
+      kind: 'window',
+    });
+    expect(protectedResult[0]!.thumbnailDataUrl).toMatch(
+      /^data:image\/png;base64,/,
+    );
   });
 
   test('grants a selected source once through the independently checked handler', () => {

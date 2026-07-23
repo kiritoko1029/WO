@@ -699,6 +699,57 @@ export function createRoomRegistry(
     return reset;
   };
 
+  /**
+   * Drop media negotiation when the 1:1 pair dissolves (primary joiner left and
+   * no replacement). Completed negotiations must not linger — otherwise the
+   * next join's beginNegotiation is rejected as STALE_NEGOTIATION and voice
+   * rejoin never recovers.
+   */
+  const clearMediaNegotiationForWaitingRoom = (room: TemporaryRoom): void => {
+    room.activeNegotiation = null;
+    room.pendingNegotiationReset = null;
+  };
+
+  /**
+   * Force renegotiation for a remaining media pair after a peer departure
+   * (including completed sessions). Unlike invalidateIncompleteNegotiation,
+   * this also abandons a completed negotiation so the survivors rebuild.
+   */
+  const forceMediaRenegotiation = (
+    room: TemporaryRoom,
+    reason: NegotiationResetReason,
+  ): PendingNegotiationResetState | null => {
+    if (
+      room.activeNegotiation === null &&
+      (room.pendingNegotiationReset === null ||
+        room.pendingNegotiationReset.consumed)
+    ) {
+      return null;
+    }
+    if (room.activeNegotiation !== null) {
+      if (room.activeNegotiation.status === 'active') {
+        room.activeNegotiation.status = 'abandoned';
+      } else if (room.activeNegotiation.status === 'completed') {
+        // Keep the completed snapshot abandoned so ICE restart cannot reuse
+        // epochs belonging to the departed peer.
+        room.activeNegotiation.status = 'abandoned';
+      }
+    }
+    let reset: PendingNegotiationResetState;
+    if (
+      room.pendingNegotiationReset !== null &&
+      !room.pendingNegotiationReset.consumed
+    ) {
+      reset = room.pendingNegotiationReset;
+    } else {
+      reset = createPendingReset(room, reason);
+    }
+    for (const connection of room.connectionsByUserId.values()) {
+      connection.ready = false;
+    }
+    return reset;
+  };
+
   const releaseLeaseForConnection = (
     room: TemporaryRoom,
     userId: string,
@@ -1405,15 +1456,30 @@ export function createRoomRegistry(
           room.codeExpiresAtMs = null;
         }
       }
-      invalidateIncompleteNegotiation(room, 'signaling_reset');
-      room.state =
-        room.joinerUserId === null
-          ? 'waiting'
-          : allMembersOnlineAndReady(room)
-            ? room.hasConnected
-              ? 'connected'
-              : 'negotiating'
-            : 'reconnecting';
+      if (room.joinerUserId === null) {
+        // Solo creator waiting for the next guest — prior 1:1 negotiation
+        // (completed or incomplete) cannot resume with a new PeerConnection.
+        clearMediaNegotiationForWaitingRoom(room);
+        room.state = 'waiting';
+      } else {
+        // Another primary joiner remains (or was reassigned). Force a media
+        // renegotiation so survivors do not keep the departed peer's session.
+        const reset = forceMediaRenegotiation(room, 'signaling_reset');
+        room.state = allMembersOnlineAndReady(room)
+          ? room.hasConnected
+            ? 'connected'
+            : 'negotiating'
+          : 'reconnecting';
+        if (reset !== null && allMembersOnline(room)) {
+          intents.push({
+            type: 'webrtc.negotiationReset',
+            roomId: room.id,
+            negotiationId: reset.negotiationId,
+            generation: reset.generation,
+            reason: reset.reason,
+          });
+        }
+      }
       intents.push({
         type: 'peer.left',
         roomId: room.id,

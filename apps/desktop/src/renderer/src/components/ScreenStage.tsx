@@ -192,7 +192,12 @@ export function ScreenStage({
     reset();
     const stage = stageRef.current;
     const doc = stage?.ownerDocument;
-    if (stage !== null && doc !== null && isFullscreenElement(stage, doc)) {
+    if (
+      stage !== null &&
+      stage !== undefined &&
+      doc !== undefined &&
+      isFullscreenElement(stage, doc)
+    ) {
       void doc.exitFullscreen().catch(() => undefined);
     }
   }, [live, reset]);

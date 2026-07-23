@@ -56,11 +56,26 @@ export interface ScreenController {
   getSnapshot(): ScreenControllerSnapshot;
   subscribe(listener: () => void): () => void;
   prepare(): Promise<void>;
+  /**
+   * Re-list OS capture sources while the picker is open so newly opened /
+   * closed windows show up without re-acquiring the lease.
+   */
+  refreshSources(): Promise<void>;
   selectSource(token: string): Promise<void>;
   startSelectedCapture(): Promise<void>;
   stop(): Promise<void>;
   handleLeaseLost(): Promise<void>;
   handleSignalingClosed(): Promise<void>;
+  /**
+   * Swap the underlying RTP senders to a new RTCPeerConnection without
+   * stopping capture or releasing the lease. Called when the transport is
+   * rebuilt (e.g. negotiation reset triggered by a participant change).
+   * Re-attaches the current video/audio tracks to the new senders.
+   */
+  reattachTransport(
+    newSender: Pick<RTCRtpSender, 'replaceTrack'>,
+    newAudioSender?: Pick<RTCRtpSender, 'replaceTrack'>,
+  ): Promise<void>;
   cleanup(): Promise<void>;
 }
 
@@ -85,6 +100,9 @@ export interface ScreenControllerOptions {
    * Optional sender for the desktop audio track captured alongside the screen
    * video. When provided and the capture yields an audio track, it is
    * attached here so the remote peer receives system audio.
+   *
+   * Desktop/system audio is never run through the microphone RNNoise path —
+   * only the voice-controller mic track is denoised.
    */
   readonly audioSender?: Pick<RTCRtpSender, 'replaceTrack'>;
   readonly signaling: ScreenSignaling;
@@ -170,6 +188,12 @@ export function createScreenController(
   const setTimer = options.setTimer ?? setTimeout;
   const clearTimer = options.clearTimer ?? clearTimeout;
   const listeners = new Set<() => void>();
+  // Sender references are mutable so they can be swapped when the underlying
+  // RTCPeerConnection is rebuilt (e.g. on negotiation reset). The capture
+  // track and lease survive the swap.
+  let sender: Pick<RTCRtpSender, 'replaceTrack'> = options.sender;
+  let audioSender: Pick<RTCRtpSender, 'replaceTrack'> | undefined =
+    options.audioSender;
   let snapshot: ScreenControllerSnapshot = Object.freeze({
     state: 'idle',
     sources: Object.freeze([]),
@@ -182,6 +206,7 @@ export function createScreenController(
   let generation = 0;
   let currentLease: P2pScreenLease | null = null;
   let currentTrack: MediaStreamTrack | null = null;
+  let currentAudioTrack: MediaStreamTrack | null = null;
   let renewalTimer: ReturnType<typeof setTimeout> | null = null;
   let stopPromise: Promise<void> | null = null;
   let startPromise: Promise<void> | null = null;
@@ -197,7 +222,7 @@ export function createScreenController(
   const queueSenderTrack = (track: MediaStreamTrack | null): Promise<void> => {
     const operation = senderQueue
       .catch(() => undefined)
-      .then(() => options.sender.replaceTrack(track));
+      .then(() => sender.replaceTrack(track));
     senderQueue = operation;
     return operation;
   };
@@ -310,14 +335,20 @@ export function createScreenController(
     clearRenewalTimer();
     const lease = currentLease;
     const track = currentTrack;
+    const audioTrack = currentAudioTrack;
     currentLease = null;
     currentTrack = null;
+    currentAudioTrack = null;
     startPromise = null;
     update({ state: 'stopping' });
     stopPromise = (async () => {
       await queueSenderTrack(null).catch(() => undefined);
+      if (audioTrack !== null && audioSender !== undefined) {
+        await audioSender.replaceTrack(null).catch(() => undefined);
+      }
       track?.removeEventListener('ended', handleTrackEnded);
       track?.stop();
+      audioTrack?.stop();
       const released = lease === null ? true : await releaseLease(lease);
       update({
         state: finalState,
@@ -432,6 +463,35 @@ export function createScreenController(
         await failForGeneration(expectedGeneration, error);
       }
     },
+    async refreshSources() {
+      if (snapshot.state !== 'picking') {
+        return;
+      }
+      const expectedGeneration = generation;
+      try {
+        const sources = await options.capture.list();
+        assertCurrent(expectedGeneration);
+        const frozen = Object.freeze([...sources]);
+        const selectedStillPresent =
+          snapshot.selectedToken !== null &&
+          frozen.some((source) => source.token === snapshot.selectedToken);
+        update({
+          sources: frozen,
+          selectedToken: selectedStillPresent ? snapshot.selectedToken : null,
+          error: null,
+        });
+      } catch (error) {
+        // Keep the picker open with the previous list; surface a soft error.
+        if (generation === expectedGeneration) {
+          update({
+            error:
+              error instanceof Error
+                ? error.message
+                : '无法刷新可共享内容列表',
+          });
+        }
+      }
+    },
     async selectSource(token) {
       if (snapshot.state !== 'picking') {
         throw new ScreenControllerError('INVALID_STATE');
@@ -511,6 +571,7 @@ export function createScreenController(
         const track = videoTracks[0]!;
         const audioTrack = audioTracks[0] ?? null;
         currentTrack = track;
+        currentAudioTrack = audioTrack;
         track.addEventListener('ended', handleTrackEnded, { once: true });
         const settings = captureSettings(track);
         try {
@@ -528,8 +589,8 @@ export function createScreenController(
             throw new ScreenControllerError('INVALID_STATE');
           }
           // Attach desktop audio if present and a sender is available.
-          if (audioTrack !== null && options.audioSender !== undefined) {
-            await options.audioSender.replaceTrack(audioTrack);
+          if (audioTrack !== null && audioSender !== undefined) {
+            await audioSender.replaceTrack(audioTrack);
             assertCurrent(expectedGeneration);
           }
           update({ state: 'sharing', captureSettings: settings, error: null });
@@ -549,6 +610,31 @@ export function createScreenController(
           code: 'SIGNALING_CLOSED',
         }),
       ),
+    reattachTransport: async (newSender, newAudioSender) => {
+      // Only re-attach if we're actively sharing. If idle/picking/etc.
+      // there's nothing to preserve.
+      if (snapshot.state !== 'sharing' && snapshot.state !== 'capturing') {
+        sender = newSender;
+        audioSender = newAudioSender;
+        return;
+      }
+      const expectedGeneration = generation;
+      sender = newSender;
+      audioSender = newAudioSender;
+      // Reset the sender queue so replaceTrack calls go to the new sender.
+      senderQueue = Promise.resolve();
+      const video = currentTrack;
+      const audio = currentAudioTrack;
+      if (video !== null) {
+        await sender.replaceTrack(video).catch(() => undefined);
+      }
+      if (audio !== null && audioSender !== undefined) {
+        await audioSender.replaceTrack(audio).catch(() => undefined);
+      }
+      if (generation === expectedGeneration) {
+        update({ state: 'sharing', error: null });
+      }
+    },
     cleanup: () => cleanupSession('idle'),
   };
   return Object.freeze(controller);

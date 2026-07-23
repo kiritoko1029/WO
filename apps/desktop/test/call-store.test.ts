@@ -715,12 +715,20 @@ describe('realtime room gateway', () => {
     );
     expect(snapshots.at(-1)).toMatchObject({
       roomId: 'room-2',
-      connectionStatus: 'reconnecting',
+      connectionStatus: 'waiting',
       participants: [
         expect.objectContaining({ isSelf: true, online: true }),
-        expect.objectContaining({ userId: 'user-2', online: false }),
       ],
     });
+    // Departed peer is removed (not kept offline) so the UI shows "等待加入".
+    expect(
+      (snapshots.at(-1) as { participants: readonly { userId: string }[] })
+        .participants,
+    ).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'user-2' }),
+      ]),
+    );
   });
 
   it('initializes remote screen ownership from the authoritative join snapshot', async () => {
@@ -1158,6 +1166,12 @@ describe('realtime room gateway', () => {
       signaling: client,
     });
     const room = await gateway.createRoom('access-token');
+    const firstPeer = peerConnectionFactory();
+    const secondPeer = peerConnectionFactory();
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
     const call = createCallController({
       room,
       gateway,
@@ -1165,7 +1179,7 @@ describe('realtime room gateway', () => {
         getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
         enumerateDevices: vi.fn().mockResolvedValue([]),
       } as unknown as MediaDevices,
-      createPeerConnection: peerConnectionFactory().factory,
+      createPeerConnection: factory,
     });
     await call.start();
     client.emit({
@@ -1193,6 +1207,97 @@ describe('realtime room gateway', () => {
     });
 
     expect(call.getSnapshot().status).toBe('waiting');
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+    expect(firstPeer.pc.close).toHaveBeenCalledOnce();
+    await call.cleanup();
+  });
+
+  it('rebuilds transport after peer leave and offers again when the peer rejoins', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const microphone = audioTrack();
+    const firstPeer = peerConnectionFactory();
+    const secondPeer = peerConnectionFactory();
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(microphone)),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+    });
+    await call.start();
+
+    // First offer cycle (peer present)
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'peer-ready-first' as never,
+      type: 'peer.ready',
+      payload: {
+        roomId: room.roomId as never,
+        peer: { userId: 'user-2' as never, displayName: 'Peer', ready: true },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(firstPeer.pc.createOffer).toHaveBeenCalledOnce(),
+    );
+
+    // Simulate the media path having been live, then collapsing as the peer leaves
+    firstPeer.pc.connectionState = 'connected';
+    firstPeer.pc.iceConnectionState = 'connected';
+    firstPeer.pc.emit('connectionstatechange', {});
+    firstPeer.pc.connectionState = 'failed';
+    firstPeer.pc.iceConnectionState = 'failed';
+    firstPeer.pc.emit('connectionstatechange', {});
+    firstPeer.pc.emit('iceconnectionstatechange', {});
+
+    // Peer leaves — host must wait (not "语音连接异常") and rebuild a fresh PC
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'peer-left-after-connect' as never,
+      type: 'peer.left',
+      payload: {
+        roomId: room.roomId as never,
+        userId: 'user-2' as never,
+        reason: 'left',
+      },
+    });
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'waiting',
+      error: null,
+    });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+    expect(firstPeer.pc.close).toHaveBeenCalledOnce();
+    expect(call.getSnapshot().status).toBe('waiting');
+    expect(call.getSnapshot().error).toBeNull();
+
+    // Peer rejoins — host must offer on the rebuilt PC and never go to error
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'peer-ready-rejoin' as never,
+      type: 'peer.ready',
+      payload: {
+        roomId: room.roomId as never,
+        peer: { userId: 'user-2' as never, displayName: 'Peer', ready: true },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(secondPeer.pc.createOffer).toHaveBeenCalledOnce(),
+    );
+    expect(call.getSnapshot().status).not.toBe('error');
+    expect(call.getSnapshot().error).toBeNull();
+    expect(call.getSnapshot().status).toBe('connecting');
+
     await call.cleanup();
   });
 
@@ -1642,9 +1747,12 @@ describe('realtime room gateway', () => {
 
     expect(client.connect).toHaveBeenLastCalledWith('access-token');
     expect(peer.pc.setConfiguration).toHaveBeenCalledWith(rtcConfiguration);
-    expect(screenTrack.stop).toHaveBeenCalledOnce();
+    // Screen sharing survives a signal-level resume because the underlying
+    // RTCPeerConnection is not rebuilt — only the signaling socket reconnects.
+    // The screen track is NOT stopped and the sender still holds it.
+    expect(screenTrack.stop).not.toHaveBeenCalled();
     expect(peer.transceivers[2]!.sender.replaceTrack).toHaveBeenLastCalledWith(
-      null,
+      screenTrack,
     );
     expect(microphone.stop).not.toHaveBeenCalled();
     expect(peer.pc.close).not.toHaveBeenCalled();

@@ -70,6 +70,8 @@ import {
 } from '../media/stats-monitor.js';
 import {
   createVoiceController,
+  readMicrophoneVolume,
+  writeMicrophoneVolume,
   type VoiceController,
   type VoiceDevice,
 } from '../media/voice-controller.js';
@@ -340,11 +342,14 @@ export function createRealtimeRoomGateway(
         if (callSession !== null && remainingRemotes.length === 0) {
           callSession = Object.freeze({ ...callSession, peerReady: false });
         }
+        // Room is waiting for someone to join again — not "reconnecting" the
+        // departed peer. That label was driving a false recovery path and
+        // eventually "语音连接异常" for the remaining member.
         emitSnapshot({
           ...current,
           connectionStatus:
             remainingRemotes.length === 0
-              ? 'reconnecting'
+              ? 'waiting'
               : current.connectionStatus,
           participants: current.participants.filter(
             (item) => item.userId !== event.payload.userId,
@@ -550,6 +555,7 @@ export interface CallSnapshot {
   readonly muted: boolean;
   readonly outputMuted: boolean;
   readonly remoteVolume: number;
+  readonly microphoneVolume: number;
   readonly inputs: readonly VoiceDevice[];
   readonly outputs: readonly VoiceDevice[];
   readonly selectedInputId: string;
@@ -575,6 +581,8 @@ export interface CallSnapshot {
   readonly remoteScreenBitrateBps: number | null;
   readonly screenPermission: ScreenPermissionSnapshot | null;
   readonly quality: QualityDiagnosticSample | null;
+  readonly localAudioLevel: number;
+  readonly remoteAudioLevel: number;
 }
 
 export interface CallController {
@@ -586,9 +594,14 @@ export interface CallController {
   setNoiseIntensity(intensity: NoiseIntensity): Promise<void>;
   setOutputMuted(muted: boolean): void;
   setRemoteVolume(volume: number): void;
+  setMicrophoneVolume(volume: number): void;
   selectOutput(deviceId: string): Promise<void>;
+  /** Re-enumerate microphones / speakers (devicechange or settings open). */
+  refreshDevices(): Promise<void>;
   prepareScreenShare(): Promise<void>;
   selectScreenSource(token: string): Promise<void>;
+  /** Re-list OS windows/screens while the picker is open. */
+  refreshScreenSources(): Promise<void>;
   startScreenShare(): Promise<void>;
   stopScreenShare(): Promise<void>;
   setScreenBitrate(target: ScreenBitrateTarget): Promise<void>;
@@ -703,6 +716,7 @@ export function createCallController(
     muted: false,
     outputMuted: false,
     remoteVolume: 1,
+    microphoneVolume: readMicrophoneVolume(),
     inputs: [],
     outputs: [],
     selectedInputId: '',
@@ -725,6 +739,8 @@ export function createCallController(
     remoteScreenBitrateBps: null,
     screenPermission: null,
     quality: null,
+    localAudioLevel: 0,
+    remoteAudioLevel: 0,
   });
   let closed = false;
   let lifecycleGeneration = 0;
@@ -777,8 +793,18 @@ export function createCallController(
   let localReady = false;
   let remoteReady = false;
   let everConnected = false;
+  /**
+   * True after the remote peer left until a new peer.ready arrives. While set,
+   * ICE disconnect/failed must not enter recovery or mark the call as failed —
+   * the room is simply waiting for someone to rejoin.
+   */
+  let waitingForPeer = !options.room.participants.some(
+    (participant) => !participant.isSelf && participant.online,
+  );
   const subscriptions: Array<() => void> = [];
   let cleanupCall: () => Promise<void> = async () => undefined;
+  let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
+  let deviceChangeHandler: (() => void) | null = null;
 
   const resolveNegotiationReadyWaiters = (all = false): void => {
     for (const waiter of negotiationReadyWaiters) {
@@ -874,7 +900,7 @@ export function createCallController(
     });
   };
 
-  const fail = (error: unknown): void => {
+  const failTerminal = (error: unknown): void => {
     dispatchCall(
       { type: 'fail' },
       {
@@ -882,6 +908,63 @@ export function createCallController(
         microphoneRetryAvailable: isMicrophoneError(error),
       },
     );
+  };
+
+  const fail = (error: unknown): void => {
+    // Microphone errors are always terminal — the user must take action.
+    if (isMicrophoneError(error)) {
+      failTerminal(error);
+      return;
+    }
+    // Peer already left: ICE/negotiation noise after departure is expected.
+    // Stay in waiting rather than flashing "语音连接异常".
+    if (waitingForPeer && !closed) {
+      dispatchCall({ type: 'peer-left', wasConnected: false }, { error: null });
+      return;
+    }
+    // During initial connection (before everConnected), transient errors
+    // (signaling PROTOCOL_ERROR, ICE blips, recovery timeouts) should not
+    // permanently mark the call as failed. Instead, keep showing "正在建立语音
+    // 连接" (negotiating) and let the reconnect controller retry. If the
+    // reconnect controller exhausts all options and enters 'failed', the
+    // reconnect subscription calls failTerminal() directly for a genuine
+    // terminal condition.
+    if (!everConnected && !closed) {
+      dispatchCall({ type: 'negotiate' });
+      return;
+    }
+    failTerminal(error);
+  };
+
+  const refreshDeviceList = async (): Promise<void> => {
+    if (closed || voice === null) return;
+    try {
+      const devices = await voice.listDevices();
+      if (closed) return;
+      const selectedInputStillPresent =
+        snapshot.selectedInputId === '' ||
+        devices.inputs.some(
+          (device) => device.deviceId === snapshot.selectedInputId,
+        );
+      const selectedOutputStillPresent =
+        snapshot.selectedOutputId === '' ||
+        devices.outputs.some(
+          (device) => device.deviceId === snapshot.selectedOutputId,
+        );
+      update({
+        inputs: devices.inputs,
+        outputs: devices.outputs,
+        supportsOutputSelection: voice.supportsOutputSelection,
+        selectedInputId: selectedInputStillPresent
+          ? snapshot.selectedInputId
+          : '',
+        selectedOutputId: selectedOutputStillPresent
+          ? snapshot.selectedOutputId
+          : '',
+      });
+    } catch {
+      // Enumeration can fail if permissions were revoked; keep prior list.
+    }
   };
 
   const syncScreenSnapshot = (): void => {
@@ -1022,11 +1105,24 @@ export function createCallController(
       onConnectionStateChange: ({ connectionState, iceConnectionState }) => {
         if (peer !== createdPeer) return;
         resolveNegotiationReadyWaiters();
-        void reconnect
-          ?.handleIceConnectionState(iceConnectionState)
-          .catch(fail);
+        // Only feed ICE state to the reconnect controller after the
+        // connection has been established at least once. During initial
+        // connection, ICE states like 'disconnected' are transient and
+        // should not trigger recovery operations that could cascade into
+        // a premature failure.
+        // When the peer left the room, ICE will collapse — that is expected
+        // and must not drive reconnect / fail into "语音连接异常".
+        if (
+          !waitingForPeer &&
+          (everConnected || iceConnectionState === 'failed')
+        ) {
+          void reconnect
+            ?.handleIceConnectionState(iceConnectionState)
+            .catch(fail);
+        }
         if (connectionState === 'connected') {
           everConnected = true;
+          waitingForPeer = false;
           settleCallPhase(selectedConnectionPath);
           void createdPeer
             .getStats()
@@ -1051,9 +1147,14 @@ export function createCallController(
               }
             });
         } else if (
-          connectionState === 'failed' ||
-          connectionState === 'disconnected'
+          !waitingForPeer &&
+          (connectionState === 'failed' ||
+            (connectionState === 'disconnected' && everConnected))
         ) {
+          // Only enter recovery if we were previously connected. During
+          // initial connection, ICE can transiently report 'disconnected'
+          // while gathering candidates — that's normal and should keep
+          // showing "正在建立语音连接" (negotiating).
           dispatchCall({ type: 'recover', reason: 'ice' });
         }
       },
@@ -1108,9 +1209,28 @@ export function createCallController(
     }
     let nextPeer: ReturnType<typeof createPeerConnectionController> | null =
       null;
+    // Hoisted so the .catch() path can release a preserved screen controller
+    // if the rebuild fails before re-attach.
+    let preservedScreenController = screenController;
+    const preservedScreenState = screenController?.getSnapshot().state;
+    let screenWasActive =
+      preservedScreenState === 'sharing' ||
+      preservedScreenState === 'capturing';
     const operation = (async () => {
       statsMonitor?.resetBaselines();
-      await disposeScreenController();
+      // If screen sharing is active, preserve the controller (tracks + lease)
+      // across the transport rebuild. We temporarily null screenController so
+      // createTransport → ensureScreenController won't see it, then swap it
+      // back and re-attach to the new peer's senders after transport rebuild.
+      // If screen sharing is NOT active, dispose normally.
+      if (screenWasActive) {
+        // Keep the preserved controller alive but detached from the store
+        // so ensureScreenController can create a new one for the new peer.
+        // We'll discard the new one and keep the preserved controller.
+        screenController = null;
+      } else {
+        await disposeScreenController();
+      }
       assertCurrentLifecycle(lifecycle);
       const oldNegotiation = negotiation;
       const oldPeer = peer;
@@ -1128,6 +1248,26 @@ export function createCallController(
       });
       negotiationEstablished = false;
       nextPeer = createTransport();
+      // If screen sharing was active, migrate the preserved controller to
+      // the new peer. ensureScreenController (inside createTransport) created
+      // a throwaway controller — discard it and restore the preserved one,
+      // then re-attach the surviving capture tracks to the new senders.
+      if (screenWasActive && preservedScreenController !== null) {
+        screenSubscription?.();
+        screenSubscription = null;
+        const throwawayController = screenController;
+        screenController = preservedScreenController;
+        screenSubscription = screenController.subscribe(syncScreenSnapshot);
+        const newSender = nextPeer.screenSender;
+        const newAudioSender = nextPeer.screenAudioSender ?? undefined;
+        if (newSender !== null) {
+          await screenController.reattachTransport(newSender, newAudioSender);
+          assertCurrentLifecycle(lifecycle);
+        }
+        // Dispose the throwaway controller (it has no tracks/lease).
+        await throwawayController?.cleanup().catch(() => undefined);
+        syncScreenSnapshot();
+      }
       const sender = nextPeer.audioSender;
       if (
         callSession.role === 'creator' &&
@@ -1139,7 +1279,10 @@ export function createCallController(
         assertCurrentLifecycle(lifecycle);
       }
       localReady = false;
-      remoteReady = false;
+      // Do not clear remoteReady here — a concurrent peer.ready during rebuild
+      // (e.g. guest rejoin while host rebuilds after peer.left) must survive.
+      // Callers that need both sides to re-ready already set remoteReady=false
+      // before invoking rebuild (negotiationReset / recoverFailedRestart).
       await options.gateway.markReady(options.room.roomId);
       assertCurrentLifecycle(lifecycle);
       if (peer !== nextPeer) {
@@ -1152,6 +1295,13 @@ export function createCallController(
       }
       maybeOffer();
     })().catch(async (error: unknown) => {
+      // If the rebuild failed and we preserved the screen controller, we
+      // must release its tracks and lease now since there's no new peer.
+      if (screenWasActive) {
+        await preservedScreenController?.handleSignalingClosed().catch(
+          () => undefined,
+        );
+      }
       if (nextPeer !== null && peer === nextPeer) {
         negotiationSubscription?.();
         negotiationSubscription = null;
@@ -1268,6 +1418,31 @@ export function createCallController(
     return result;
   };
 
+  const pollAudioLevels = async (): Promise<void> => {
+    if (closed || peer === null) return;
+    try {
+      const report = await peer.getStats();
+      if (closed || peer === null) return;
+      let localLevel = 0;
+      let remoteLevel = 0;
+      for (const stats of report.values()) {
+        const record = stats as Record<string, unknown>;
+        if (record.kind !== 'audio') continue;
+        const level = typeof record.audioLevel === 'number'
+          ? record.audioLevel
+          : 0;
+        if (record.type === 'media-source') {
+          localLevel = Math.max(localLevel, level);
+        } else if (record.type === 'inbound-rtp') {
+          remoteLevel = Math.max(remoteLevel, level);
+        }
+      }
+      update({ localAudioLevel: localLevel, remoteAudioLevel: remoteLevel });
+    } catch {
+      // Stats polling can transiently fail during renegotiation; ignore.
+    }
+  };
+
   const initialize = (): void => {
     if (initialized) return;
     initialized = true;
@@ -1276,6 +1451,7 @@ export function createCallController(
       mediaDevices: options.mediaDevices,
       audioOutput,
       initialNoiseIntensity: readNoiseIntensity(),
+      initialMicrophoneVolume: readMicrophoneVolume(),
     });
     voice.setMuted(snapshot.muted);
     voice.setOutputMuted(snapshot.outputMuted);
@@ -1319,12 +1495,30 @@ export function createCallController(
       onSample: (sample) => update({ quality: sample }),
     });
     statsMonitor.start();
+    // Poll audio levels from WebRTC stats at 5 Hz for the speaking
+    // indicator in the participant chips.
+    audioLevelTimer = setInterval(() => {
+      void pollAudioLevels();
+    }, 200);
+    // Keep device dropdowns in sync when the OS adds/removes audio gear.
+    const mediaDevices = options.mediaDevices ?? navigator.mediaDevices;
+    if (
+      mediaDevices !== undefined &&
+      typeof mediaDevices.addEventListener === 'function'
+    ) {
+      deviceChangeHandler = () => {
+        void refreshDeviceList();
+      };
+      mediaDevices.addEventListener('devicechange', deviceChangeHandler);
+    }
     reconnect = createReconnectController({
       role: callSession.role,
       cleanupShare: async () => {
+        // During transport rebuild (negotiation reset / recovery), do NOT
+        // tear down screen sharing. The screen controller's capture track
+        // and lease are preserved and re-attached to the new peer connection
+        // inside rebuildTransportForReset. Only reset stats baselines here.
         statsMonitor?.resetBaselines();
-        await screenController?.handleSignalingClosed();
-        syncScreenSnapshot();
       },
       resume: resumeSignaling,
       fullCleanup: async () => {
@@ -1392,7 +1586,14 @@ export function createCallController(
         const recovery = reconnect?.getSnapshot();
         if (recovery === undefined) return;
         if (recovery.state === 'failed') {
-          fail(recovery.error ?? new Error('Recovery failed'));
+          if (waitingForPeer) {
+            dispatchCall(
+              { type: 'peer-left', wasConnected: false },
+              { error: null },
+            );
+            return;
+          }
+          failTerminal(recovery.error ?? new Error('Recovery failed'));
         } else if (recovery.state === 'reconnecting-signal') {
           dispatchCall({ type: 'recover', reason: 'signal' });
         } else if (
@@ -1411,6 +1612,7 @@ export function createCallController(
         switch (event.type) {
           case 'peer.ready':
             remoteReady = true;
+            waitingForPeer = false;
             if (negotiationEstablished) settleCallPhase();
             else dispatchCall({ type: 'negotiate' });
             maybeOffer();
@@ -1605,10 +1807,63 @@ export function createCallController(
             void delivery.catch(fail);
             break;
           }
-          case 'peer.left':
+          case 'peer.left': {
+            const wasConnected = everConnected;
             remoteReady = false;
-            dispatchCall({ type: 'peer-left', wasConnected: everConnected });
+            waitingForPeer = true;
+            negotiationEstablished = false;
+            // Re-establish after rejoin is a fresh connect attempt: transient
+            // offer/ICE errors must not permanently fail the host UI.
+            everConnected = false;
+            invalidateRecoveryQueue();
+            // Cancel ICE recovery so the dying PeerConnection cannot flip
+            // reconnect → failed after the peer has already left.
+            reconnect?.clearMediaRecovery();
+            // Drop remote media immediately so stale tracks stop playing.
+            voice?.clearRemoteTracks();
+            update({
+              remoteScreenTrack: null,
+              remoteScreenBitrateBps: null,
+              error: null,
+              localAudioLevel: 0,
+              remoteAudioLevel: 0,
+            });
+            dispatchCall(
+              { type: 'peer-left', wasConnected },
+              { error: null },
+            );
+            // Terminal failures (e.g. mic permission) must stay failed — a
+            // late peer.left must not attempt recovery.
+            const phase = callMachine.getSnapshot().phase;
+            if (phase === 'failed' || phase === 'closing' || phase === 'closed') {
+              break;
+            }
+            // Rebuild a live PeerConnection while waiting. After a completed
+            // call the old PC is failed/closed; offering on it (or leaving it
+            // in place until peer.ready) is what produces "语音连接异常" on
+            // rejoin with no self-recovery.
+            const departureGeneration =
+              Math.max(
+                acceptedResetGeneration,
+                rebuiltResetGeneration,
+                pendingReset?.resetGeneration ?? 0,
+              ) + 1;
+            void rebuildTransportForReset(departureGeneration).catch(
+              (error: unknown) => {
+                if (!closed && waitingForPeer) {
+                  // Stay waiting; a later peer.ready / negotiationReset will
+                  // rebuild again. Never surface ICE teardown noise.
+                  dispatchCall(
+                    { type: 'peer-left', wasConnected: false },
+                    { error: null },
+                  );
+                  return;
+                }
+                fail(error);
+              },
+            );
             break;
+          }
           case 'screen.ownerChanged': {
             const previousOwner = snapshot.screenOwner;
             const owner =
@@ -1664,7 +1919,13 @@ export function createCallController(
             break;
         }
       }),
-      options.gateway.signaling.subscribeErrors(fail),
+      options.gateway.signaling.subscribeErrors((error) => {
+        // During initial connection, signaling PROTOCOL_ERROR (malformed
+        // frames, validation failures) are transient and should not kill
+        // the call. Only fail once the connection has been established.
+        if (!everConnected) return;
+        fail(error);
+      }),
       options.gateway.signaling.subscribeConnection((event) => {
         if (event.state === 'closed') {
           peer?.handleSignalingClose();
@@ -1695,6 +1956,15 @@ export function createCallController(
       negotiation?.dispose();
       statsMonitor?.stop();
       statsMonitor = null;
+      if (audioLevelTimer !== null) {
+        clearInterval(audioLevelTimer);
+        audioLevelTimer = null;
+      }
+      if (deviceChangeHandler !== null) {
+        const mediaDevices = options.mediaDevices ?? navigator.mediaDevices;
+        mediaDevices?.removeEventListener?.('devicechange', deviceChangeHandler);
+        deviceChangeHandler = null;
+      }
       presentationSampler = null;
       statsBuffer.reset();
       for (const unsubscribe of subscriptions.splice(0)) unsubscribe();
@@ -1892,22 +2162,23 @@ export function createCallController(
       voice!.setRemoteVolume(volume);
       update({ remoteVolume: volume });
     },
+    setMicrophoneVolume: (volume) => {
+      voice!.setMicrophoneVolume(volume);
+      writeMicrophoneVolume(voice!.microphoneVolume);
+      update({ microphoneVolume: voice!.microphoneVolume });
+    },
     setNoiseIntensity: async (intensity) => {
       await voice!.setNoiseIntensity(intensity);
       writeNoiseIntensity(intensity);
       update({ noiseIntensity: intensity });
-      // When toggling RNNoise on/off, the getUserMedia constraints change
-      // (noiseSuppression flag). Re-acquire the microphone to apply them.
-      if (voice!.microphoneTrack !== null) {
-        const deviceId =
-          voice!.microphoneTrack.getSettings?.().deviceId ?? '';
-        await voice!.switchMicrophone(deviceId).catch(() => undefined);
-      }
     },
     selectOutput: async (deviceId) => {
       if (await voice!.selectOutput(deviceId)) {
         update({ selectedOutputId: deviceId });
       }
+    },
+    refreshDevices: async () => {
+      await refreshDeviceList();
     },
     prepareScreenShare: async () => {
       const generation = currentLifecycle();
@@ -1968,6 +2239,12 @@ export function createCallController(
         });
       }
       await screen.selectSource(token);
+    },
+    refreshScreenSources: async () => {
+      currentLifecycle();
+      const screen = ensureScreenController();
+      if (screen === null) return;
+      await screen.refreshSources();
     },
     startScreenShare: async () => {
       const generation = currentLifecycle();
@@ -2035,6 +2312,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     muted: false,
     outputMuted: false,
     remoteVolume: 1,
+    microphoneVolume: readMicrophoneVolume(),
     inputs: [],
     outputs: [],
     selectedInputId: '',
@@ -2057,6 +2335,8 @@ function passiveCallController(room: RoomSnapshot): CallController {
     remoteScreenBitrateBps: null,
     screenPermission: null,
     quality: null,
+    localAudioLevel: 0,
+    remoteAudioLevel: 0,
   });
   return Object.freeze({
     getSnapshot: () => snapshot,
@@ -2067,7 +2347,9 @@ function passiveCallController(room: RoomSnapshot): CallController {
     setNoiseIntensity: async () => undefined,
     setOutputMuted: () => undefined,
     setRemoteVolume: () => undefined,
+    setMicrophoneVolume: () => undefined,
     selectOutput: async () => undefined,
+    refreshDevices: async () => undefined,
     prepareScreenShare: async () => {
       throw Object.assign(new Error('Screen sharing is unavailable'), {
         code: 'INVALID_STATE',
@@ -2078,6 +2360,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
         code: 'INVALID_STATE',
       });
     },
+    refreshScreenSources: async () => undefined,
     startScreenShare: async () => {
       throw Object.assign(new Error('Screen sharing is unavailable'), {
         code: 'INVALID_STATE',

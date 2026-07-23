@@ -91,6 +91,35 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('reconnect controller', () => {
+  test('clearMediaRecovery cancels in-flight ICE recovery so peer leave cannot fail the session', async () => {
+    const harness = createHarness({
+      role: 'creator',
+      restartIce: vi.fn(async () => {
+        await new Promise(() => undefined);
+      }),
+    });
+
+    const recovery = harness.controller.handleIceConnectionState('failed');
+    await vi.waitFor(() =>
+      expect(harness.controller.getSnapshot().state).toBe('restarting-ice'),
+    );
+
+    harness.controller.clearMediaRecovery();
+    expect(harness.controller.getSnapshot().state).toBe('connected');
+    expect(harness.controller.getSnapshot().error).toBeNull();
+
+    // In-flight recovery must not force the controller into failed after leave.
+    await Promise.race([
+      recovery.then(
+        () => undefined,
+        () => undefined,
+      ),
+      vi.advanceTimersByTimeAsync(10_000),
+    ]);
+    expect(harness.controller.getSnapshot().state).toBe('connected');
+    expect(harness.controller.getSnapshot().error).toBeNull();
+  });
+
   test('cleans share immediately and single-flights a normal WSS resume while reusing healthy transport', async () => {
     const shareCleanup = deferred<void>();
     const harness = createHarness({

@@ -28,6 +28,8 @@ function adminDevRewrite(): Plugin {
   };
 }
 
+const rnnoiseStub = resolve(webRoot, 'src/rnnoise-stub.ts');
+
 export default defineConfig({
   appType: 'mpa',
   plugins: [react(), adminDevRewrite()],
@@ -35,6 +37,8 @@ export default defineConfig({
     alias: {
       '@wo/media-policy': mediaPolicySource,
       '@wo/protocol': protocolSource,
+      // Desktop-only WASM; browsers use Chromium noiseSuppression instead.
+      '@shiguredo/rnnoise-wasm': rnnoiseStub,
     },
     dedupe: ['lucide-react', 'react', 'react-dom'],
   },

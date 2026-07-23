@@ -11,9 +11,13 @@ function initialFor(name: string): string {
 export function ParticipantSlots({
   participants,
   muted,
+  localAudioLevel,
+  remoteAudioLevel,
 }: {
   readonly participants: readonly RoomParticipant[];
   readonly muted: boolean;
+  readonly localAudioLevel: number;
+  readonly remoteAudioLevel: number;
 }) {
   const ordered = [...participants].sort((left, right) => {
     if (left.isSelf !== right.isSelf) return left.isSelf ? -1 : 1;
@@ -24,6 +28,11 @@ export function ParticipantSlots({
     <div className="participant-float-bar" aria-label="参与者">
       {ordered.map((participant) => {
         const label = `${participant.displayName}${participant.isSelf ? '（我）' : ''}`;
+        const level = participant.isSelf ? localAudioLevel : remoteAudioLevel;
+        const isMuted = participant.isSelf && muted;
+        // Map audioLevel (0–1) to opacity/scale for the mic icon pulse.
+        // Squared for a more dramatic visual response.
+        const pulse = isMuted ? 0 : Math.min(1, level * level);
         return (
           <div
             className={`participant-chip${participant.online ? '' : ' offline'}${participant.isSelf ? ' self' : ''}`}
@@ -38,12 +47,12 @@ export function ParticipantSlots({
             <span
               className={`participant-chip-state${participant.online ? '' : ' offline'}`}
               title={participant.online ? '在线' : '离线'}
+              style={{
+                opacity: 0.35 + pulse * 0.65,
+                transform: `scale(${1 + pulse * 0.2})`,
+              }}
             >
-              {participant.isSelf && muted ? (
-                <MicOff size={13} />
-              ) : (
-                <Mic size={13} />
-              )}
+              {isMuted ? <MicOff size={13} /> : <Mic size={13} />}
             </span>
           </div>
         );

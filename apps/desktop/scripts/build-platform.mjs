@@ -199,6 +199,9 @@ function createPlan(options, releaseIdentity) {
       );
     } else {
       builderArguments.push(
+        // Cross-compiling Windows on macOS cannot rebuild native modules from
+        // source (argon2). Skip rebuild; prebuilt deps already ship for win32.
+        '--config.npmRebuild=false',
         '--config.win.signExecutable=false',
         '--config.nsis.artifactName=WO-${version}-UNSIGNED-DEVELOPMENT-setup-${arch}.${ext}',
         '--config.portable.artifactName=WO-${version}-UNSIGNED-DEVELOPMENT-portable-${arch}.${ext}',
@@ -206,13 +209,18 @@ function createPlan(options, releaseIdentity) {
     }
   }
 
+  // Executable smoke requires a native host (mac package on darwin, win on
+  // win32). Cross-host packaging still verifies asar/payloads, just skips smoke.
+  const canSmoke =
+    (options.platform === 'mac' && process.platform === 'darwin') ||
+    (options.platform === 'win' && process.platform === 'win32');
   const verifyArguments = [
     verifyPackageScript,
     `--package-dir=${absoluteOutputDirectory}`,
     `--platform=${options.platform}`,
     `--artifact-class=${artifactClass}`,
     `--target-set=${options.directoryOnly ? 'dir' : 'artifacts'}`,
-    '--smoke',
+    ...(canSmoke ? ['--smoke'] : []),
   ];
   if (releaseIdentity !== null) {
     if (options.platform === 'win') {

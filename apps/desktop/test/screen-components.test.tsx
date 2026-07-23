@@ -86,6 +86,7 @@ describe('desktop share controls', () => {
     const onSelect = vi.fn();
     const onStart = vi.fn();
     const onCancel = vi.fn();
+    const onRefresh = vi.fn();
     const { rerender } = render(
       <SourcePicker
         sources={sources}
@@ -94,12 +95,16 @@ describe('desktop share controls', () => {
         onSelect={onSelect}
         onStart={onStart}
         onCancel={onCancel}
+        onRefresh={onRefresh}
       />,
     );
 
     await user.click(screen.getByRole('button', { name: /主显示器/ }));
     expect(onSelect).toHaveBeenCalledWith(sources[0]!.token);
     expect(onStart).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '刷新可共享内容列表' }));
+    expect(onRefresh).toHaveBeenCalledOnce();
 
     rerender(
       <SourcePicker
@@ -109,6 +114,7 @@ describe('desktop share controls', () => {
         onSelect={onSelect}
         onStart={onStart}
         onCancel={onCancel}
+        onRefresh={onRefresh}
       />,
     );
     await user.click(screen.getByRole('button', { name: '开始共享' }));

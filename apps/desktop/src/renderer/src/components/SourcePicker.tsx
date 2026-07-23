@@ -1,4 +1,13 @@
-import { AppWindow, LoaderCircle, Monitor, X } from 'lucide-react';
+import { useEffect, useRef } from 'react';
+import { AppWindow, LoaderCircle, Monitor, RefreshCw, X } from 'lucide-react';
+
+// Matches the placeholder data URL emitted by the main process for sources
+// whose thumbnail could not be rendered (minimized/off-screen windows).
+const PLACEHOLDER_THUMBNAIL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+
+/** How often to re-list OS windows/screens while the picker is open. */
+const SOURCE_REFRESH_MS = 2_000;
 
 import type { CaptureSourceSummary } from '../../../preload/types.js';
 import type { ScreenShareState } from '../media/screen-controller.js';
@@ -10,6 +19,7 @@ export function SourcePicker({
   onSelect,
   onStart,
   onCancel,
+  onRefresh,
 }: {
   readonly sources: readonly CaptureSourceSummary[];
   readonly selectedToken: string | null;
@@ -17,9 +27,30 @@ export function SourcePicker({
   readonly onSelect: (token: string) => void;
   readonly onStart: () => void;
   readonly onCancel: () => void;
+  readonly onRefresh: () => void;
 }) {
   const loading = state === 'acquiring';
   const starting = state === 'capturing';
+  const picking = state === 'picking';
+  const onRefreshRef = useRef(onRefresh);
+  onRefreshRef.current = onRefresh;
+
+  // While the user is browsing sources, re-list periodically so newly opened
+  // or closed windows appear without re-opening the picker.
+  useEffect(() => {
+    if (!picking) return;
+    const timer = window.setInterval(() => {
+      onRefreshRef.current();
+    }, SOURCE_REFRESH_MS);
+    const onFocus = (): void => {
+      onRefreshRef.current();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [picking]);
 
   return (
     <div className="source-picker-backdrop">
@@ -35,15 +66,27 @@ export function SourcePicker({
             <h2 id="source-picker-title">选择共享内容</h2>
             <p>屏幕或应用窗口</p>
           </div>
-          <button
-            className="source-picker-close"
-            type="button"
-            title="取消共享"
-            aria-label="取消共享"
-            onClick={onCancel}
-          >
-            <X size={19} />
-          </button>
+          <div className="source-picker-header-actions">
+            <button
+              className="source-picker-refresh"
+              type="button"
+              title="刷新列表"
+              aria-label="刷新可共享内容列表"
+              disabled={loading || starting}
+              onClick={onRefresh}
+            >
+              <RefreshCw size={17} />
+            </button>
+            <button
+              className="source-picker-close"
+              type="button"
+              title="取消共享"
+              aria-label="取消共享"
+              onClick={onCancel}
+            >
+              <X size={19} />
+            </button>
+          </div>
         </header>
 
         <div className="source-picker-body">
@@ -56,6 +99,13 @@ export function SourcePicker({
             <div className="source-picker-status" role="status">
               <Monitor size={30} />
               <span>没有可共享的屏幕或窗口</span>
+              <button
+                className="source-refresh-empty"
+                type="button"
+                onClick={onRefresh}
+              >
+                刷新列表
+              </button>
             </div>
           ) : (
             <div className="source-grid" aria-label="可共享内容">
@@ -63,6 +113,8 @@ export function SourcePicker({
                 const selected = source.token === selectedToken;
                 const kindLabel = source.kind === 'screen' ? '屏幕' : '窗口';
                 const KindIcon = source.kind === 'screen' ? Monitor : AppWindow;
+                const hasPlaceholder =
+                  source.thumbnailDataUrl === PLACEHOLDER_THUMBNAIL;
                 return (
                   <button
                     className={`source-tile${selected ? ' selected' : ''}`}
@@ -74,11 +126,17 @@ export function SourcePicker({
                     onClick={() => onSelect(source.token)}
                   >
                     <span className="source-thumbnail">
-                      <img
-                        src={source.thumbnailDataUrl}
-                        alt=""
-                        draggable={false}
-                      />
+                      {hasPlaceholder ? (
+                        <span className="source-thumbnail-placeholder">
+                          <KindIcon size={32} />
+                        </span>
+                      ) : (
+                        <img
+                          src={source.thumbnailDataUrl}
+                          alt=""
+                          draggable={false}
+                        />
+                      )}
                     </span>
                     <span className="source-meta">
                       <KindIcon size={15} />

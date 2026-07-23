@@ -30,8 +30,9 @@ export class ErrorBoundary extends Component<
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('[ErrorBoundary] Uncaught render error:', error);
-    if (info.componentStack !== null && info.componentStack.length > 0) {
-      console.error('[ErrorBoundary] Component stack:', info.componentStack);
+    const stack = info.componentStack;
+    if (stack !== undefined && stack !== null && stack.length > 0) {
+      console.error('[ErrorBoundary] Component stack:', stack);
     }
   }
 
@@ -42,12 +43,13 @@ export class ErrorBoundary extends Component<
   render(): ReactNode {
     const { error } = this.state;
     if (error === null) return this.props.children;
+    const stack = error.stack;
     return (
       <div className="renderer-error-panel" role="alert">
         <h1>应用遇到错误</h1>
         <p className="renderer-error-message">{error.message}</p>
-        {error.stack !== null && error.stack.length > 0 && (
-          <pre className="renderer-error-stack">{error.stack}</pre>
+        {stack !== undefined && stack !== null && stack.length > 0 && (
+          <pre className="renderer-error-stack">{stack}</pre>
         )}
         <button type="button" onClick={this.handleReset}>
           重试

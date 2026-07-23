@@ -976,6 +976,68 @@ describe('connection epochs, replacement, and room lifetime', () => {
     ).toBe(true);
   });
 
+  test('joiner leave after a completed call clears negotiation so rejoin can offer again', () => {
+    const { registry } = createHarness();
+    const fixture = createJoinedRoom(registry);
+    connectRoom(registry, fixture);
+
+    const beforeLeave = registry.getMemberSnapshotForBroadcast({
+      roomId: fixture.roomId,
+      userId: 'creator',
+    });
+    expect(beforeLeave.activeNegotiation?.status).toBe('completed');
+    expect(beforeLeave.state).toBe('connected');
+
+    const leaveResult = registry.leave({
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: fixture.joined.connection.connectionId,
+      connectionEpoch: fixture.joined.connection.connectionEpoch,
+    });
+
+    expect(leaveResult.data.room).toMatchObject({
+      state: 'waiting',
+      joinerUserId: null,
+      activeNegotiation: null,
+      pendingNegotiationReset: null,
+    });
+
+    const rejoined = joinRoom(registry, fixture.created.roomCode, {
+      userId: 'joiner',
+      displayName: 'Joiner',
+      connectionId: 'joiner-connection-rejoin',
+      requestId: 'join-rejoin-1',
+    }).data;
+
+    registry.bindReady({
+      roomId: fixture.roomId,
+      userId: 'creator',
+      connectionId: fixture.created.connection.connectionId,
+      connectionEpoch: fixture.created.connection.connectionEpoch,
+      requestId: 'creator-ready-after-rejoin',
+    });
+    registry.bindReady({
+      roomId: fixture.roomId,
+      userId: 'joiner',
+      connectionId: rejoined.connection.connectionId,
+      connectionEpoch: rejoined.connection.connectionEpoch,
+      requestId: 'joiner-ready-after-rejoin',
+    });
+
+    // Fresh beginNegotiation must succeed — this is the server-side root cause
+    // of host "语音连接异常" after guest leave + rejoin.
+    expect(() =>
+      registry.beginNegotiation({
+        roomId: fixture.roomId,
+        userId: 'creator',
+        connectionId: fixture.created.connection.connectionId,
+        connectionEpoch: fixture.created.connection.connectionEpoch,
+        negotiationId: 'negotiation-after-rejoin',
+        requestId: 'begin-after-rejoin',
+      }),
+    ).not.toThrow();
+  });
+
   test('legacy leave tombstone check for closed room', () => {
     const { registry } = createHarness();
     const fixture = createJoinedRoom(registry);

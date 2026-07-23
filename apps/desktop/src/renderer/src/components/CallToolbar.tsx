@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Mic,
   MicOff,
@@ -28,6 +28,7 @@ export function CallToolbar({
   retryAvailable,
   noiseIntensity,
   remoteVolume,
+  microphoneVolume,
   screenState,
   screenDisabled,
   screenOwnerName,
@@ -37,7 +38,9 @@ export function CallToolbar({
   onOutputChange,
   onOutputMutedChange,
   onRemoteVolumeChange,
+  onMicrophoneVolumeChange,
   onNoiseIntensityChange,
+  onRefreshDevices,
   onRetry,
   onScreenShare,
 }: {
@@ -52,6 +55,7 @@ export function CallToolbar({
   readonly retryAvailable: boolean;
   readonly noiseIntensity: NoiseIntensity;
   readonly remoteVolume: number;
+  readonly microphoneVolume: number;
   readonly screenState: ScreenShareState;
   readonly screenDisabled: boolean;
   readonly screenOwnerName: string | null;
@@ -61,11 +65,20 @@ export function CallToolbar({
   readonly onOutputChange: (deviceId: string) => void;
   readonly onOutputMutedChange: (muted: boolean) => void;
   readonly onRemoteVolumeChange: (volume: number) => void;
+  readonly onMicrophoneVolumeChange: (volume: number) => void;
   readonly onNoiseIntensityChange: (intensity: NoiseIntensity) => void;
+  readonly onRefreshDevices: () => void;
   readonly onRetry: () => void;
   readonly onScreenShare: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Re-enumerate devices whenever the settings panel opens so hot-plugged
+  // microphones / speakers appear without restarting the call.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    onRefreshDevices();
+  }, [settingsOpen, onRefreshDevices]);
 
   const toggleMuted = () => {
     if (retryAvailable) {
@@ -123,14 +136,12 @@ export function CallToolbar({
             </select>
           </label>
           <label>
-            <span>降噪</span>
+            <span>麦克风降噪</span>
             <select
               aria-label="麦克风降噪"
               value={noiseIntensity}
               onChange={(event) =>
-                onNoiseIntensityChange(
-                  event.target.value as NoiseIntensity,
-                )
+                onNoiseIntensityChange(event.target.value as NoiseIntensity)
               }
             >
               {NOISE_INTENSITY_LEVELS.map((level) => (
@@ -141,7 +152,24 @@ export function CallToolbar({
             </select>
           </label>
           <label className="volume-slider-label">
-            <span>音量</span>
+            <span>麦克风音量</span>
+            <input
+              type="range"
+              min="0"
+              max="2"
+              step="0.05"
+              aria-label="麦克风音量"
+              value={microphoneVolume}
+              onChange={(event) =>
+                onMicrophoneVolumeChange(Number(event.target.value))
+              }
+            />
+            <span className="volume-slider-value" aria-hidden="true">
+              {Math.round(microphoneVolume * 100)}%
+            </span>
+          </label>
+          <label className="volume-slider-label">
+            <span>对方音量</span>
             <input
               type="range"
               min="0"
@@ -153,6 +181,9 @@ export function CallToolbar({
                 onRemoteVolumeChange(Number(event.target.value))
               }
             />
+            <span className="volume-slider-value" aria-hidden="true">
+              {Math.round(remoteVolume * 100)}%
+            </span>
           </label>
           <button
             className="output-mute-button"
@@ -193,7 +224,13 @@ export function CallToolbar({
           title="设置"
           aria-label="设置"
           aria-expanded={settingsOpen}
-          onClick={() => setSettingsOpen((open) => !open)}
+          onClick={() => {
+            setSettingsOpen((open) => {
+              const next = !open;
+              if (next) onRefreshDevices();
+              return next;
+            });
+          }}
         >
           <Settings size={21} />
         </button>

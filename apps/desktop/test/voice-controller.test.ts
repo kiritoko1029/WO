@@ -1,14 +1,46 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { createAudioOutput } from '../src/renderer/src/media/audio-output.js';
-import { createVoiceController } from '../src/renderer/src/media/voice-controller.js';
+import {
+  createVoiceController as createVoiceControllerImpl,
+  clampMicrophoneVolume,
+  readMicrophoneVolume,
+  writeMicrophoneVolume,
+} from '../src/renderer/src/media/voice-controller.js';
+
+/**
+ * Force RNNoise + Web Audio to fall back so tests keep using the raw mock
+ * getUserMedia track identity (replaceTrack assertions).
+ */
+function createVoiceController(
+  options: Parameters<typeof createVoiceControllerImpl>[0],
+) {
+  return createVoiceControllerImpl({
+    createAudioContext: () => {
+      throw new Error('AudioContext unavailable in unit tests');
+    },
+    loadRnnoise: async () => {
+      throw new Error('RNNoise unavailable in unit tests');
+    },
+    // Default intensity `light` would re-capture for native NS after RNNoise
+    // fails; pin to `off` so tests exercise a single getUserMedia call unless
+    // they override initialNoiseIntensity.
+    initialNoiseIntensity: 'off',
+    ...options,
+  });
+}
 
 function track(kind: 'audio' | 'video' = 'audio') {
   return {
     kind,
     enabled: true,
+    readyState: 'live',
     stop: vi.fn(),
     id: `${kind}-${Math.random()}`,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
   } as unknown as MediaStreamTrack;
 }
 
@@ -60,10 +92,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+// Test helper pins intensity to `off` → native noiseSuppression stays false.
 const defaultConstraints = {
   audio: {
     echoCancellation: true,
-    noiseSuppression: true,
+    noiseSuppression: false,
     autoGainControl: true,
     channelCount: 1,
     sampleRate: 48_000,
@@ -212,6 +245,40 @@ describe('voice capture and playback', () => {
     expect(element.play).toHaveBeenCalledOnce();
     expect(element.muted).toBe(true);
     expect(element.setSinkId).toHaveBeenCalledWith('speaker-2');
+  });
+
+  it('mixes microphone and desktop-audio remote tracks instead of replacing', async () => {
+    // Two audio transceivers (mic + screen system audio) each fire ontrack.
+    // Replacing the first with the second silenced voice whenever desktop
+    // audio was negotiated — even when that second track was silent.
+    const element = audioElement();
+    const playback = createAudioOutput({
+      createElement: () => element,
+      createMediaStream: (tracks) => stream([...tracks]),
+    });
+    const mic = track();
+    const desktop = track();
+    Object.defineProperty(mic, 'id', { value: 'remote-mic' });
+    Object.defineProperty(desktop, 'id', { value: 'remote-desktop' });
+    Object.defineProperty(mic, 'readyState', { value: 'live' });
+    Object.defineProperty(desktop, 'readyState', { value: 'live' });
+    // Mock addEventListener used by multi-track attach.
+    (mic as unknown as { addEventListener: ReturnType<typeof vi.fn> }).addEventListener =
+      vi.fn();
+    (desktop as unknown as { addEventListener: ReturnType<typeof vi.fn> }).addEventListener =
+      vi.fn();
+    (mic as unknown as { removeEventListener: ReturnType<typeof vi.fn> }).removeEventListener =
+      vi.fn();
+    (desktop as unknown as { removeEventListener: ReturnType<typeof vi.fn> }).removeEventListener =
+      vi.fn();
+
+    await playback.attach(mic);
+    await playback.attach(desktop);
+
+    const attached = element.srcObject?.getAudioTracks() ?? [];
+    expect(attached).toEqual(expect.arrayContaining([mic, desktop]));
+    expect(attached).toHaveLength(2);
+    expect(element.play).toHaveBeenCalledTimes(2);
   });
 
   it('degrades output selection without interrupting playback when setSinkId is unavailable', async () => {
@@ -498,5 +565,68 @@ describe('voice capture and playback', () => {
     });
     expect(getUserMedia).toHaveBeenCalledOnce();
     expect(microphone.stop).not.toHaveBeenCalled();
+  });
+});
+
+describe('microphone volume', () => {
+  it('clamps volume into the supported range', () => {
+    expect(clampMicrophoneVolume(Number.NaN)).toBe(1);
+    expect(clampMicrophoneVolume(-1)).toBe(0);
+    expect(clampMicrophoneVolume(3)).toBe(2);
+    expect(clampMicrophoneVolume(0.5)).toBe(0.5);
+  });
+
+  it('persists microphone volume through localStorage', () => {
+    window.localStorage.clear();
+    writeMicrophoneVolume(1.5);
+    expect(readMicrophoneVolume()).toBe(1.5);
+    window.localStorage.clear();
+    expect(readMicrophoneVolume()).toBe(1);
+  });
+
+  it('stores microphone volume without rebuilding capture when the gain pipeline is unavailable', async () => {
+    const microphone = track();
+    const getUserMedia = vi.fn().mockResolvedValue(stream([microphone]));
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      initialMicrophoneVolume: 0.8,
+    });
+    await voice.start(sender());
+    expect(voice.microphoneVolume).toBe(0.8);
+    voice.setMicrophoneVolume(1.25);
+    expect(voice.microphoneVolume).toBe(1.25);
+    // Without a gain pipeline the raw track is still sent.
+    expect(voice.microphoneTrack).toBe(microphone);
+  });
+
+  it('falls back to native noiseSuppression via applyConstraints when RNNoise fails', async () => {
+    const microphone = track();
+    const applyConstraints = vi.fn().mockResolvedValue(undefined);
+    Object.assign(microphone, { applyConstraints });
+    const getUserMedia = vi.fn().mockResolvedValue(stream([microphone]));
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      initialNoiseIntensity: 'medium',
+      loadRnnoise: async () => {
+        throw new Error('wasm missing');
+      },
+    });
+    await voice.start(sender());
+    // Prefer a single capture; enable Chromium NS on the same track.
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(getUserMedia.mock.calls[0]?.[0]).toMatchObject({
+      audio: expect.objectContaining({ noiseSuppression: false }),
+    });
+    expect(applyConstraints).toHaveBeenCalledWith({ noiseSuppression: true });
+    expect(voice.rnnoiseActive).toBe(false);
+    expect(voice.microphoneTrack).toBe(microphone);
   });
 });

@@ -145,6 +145,10 @@ const windowsNativeTools = Object.freeze({
 const trustedSevenZipSha256 = Object.freeze({
   'win32:x64':
     '223b873c50380fe9a39f1a22b6abf8d46db506e1c08d08312902f6f3cd1f7ac3',
+  // electron-builder 7zip@1.0.0 darwin-arm64 (used when verifying Windows
+  // setup/portable payloads on an Apple Silicon packaging host).
+  'darwin:arm64':
+    'bd5765978a541323758d82ad1d30df76a2e3c86341f12d6b0524d837411e9b4a',
 });
 const macBundleIdentifier = 'cn.wo.desktop';
 const macUsageDescriptions = Object.freeze({
@@ -802,11 +806,13 @@ export async function resolveTrustedSevenZip(dependencies = {}) {
   }
   const candidate = await (dependencies.getPath7za ?? getPath7za)();
   if (!isAbsolute(candidate)) fail('7-Zip executable path is not absolute');
-  await requireRegularFile(candidate, 'trusted 7-Zip executable');
+  // electron-builder may expose 7za as a symlink (e.g. 7za -> 7zz). Hash and
+  // execute the canonical target so the pin stays stable across packaging hosts.
   const canonicalPath = await realpath(candidate);
-  if (canonicalPath !== resolve(candidate)) {
-    fail('7-Zip executable path is not canonical');
+  if (!isAbsolute(canonicalPath)) {
+    fail('7-Zip executable realpath is not absolute');
   }
+  await requireRegularFile(canonicalPath, 'trusted 7-Zip executable');
   const actualHash = await (dependencies.hashFile ?? fileSha256)(canonicalPath);
   if (actualHash !== expectedHash) {
     fail('7-Zip executable hash does not match the pinned release tool');
@@ -818,6 +824,8 @@ async function extractWindowsArtifactPayload(artifactPath, environment) {
   const directory = await mkdtemp(join(tmpdir(), 'wo-win-artifact-'));
   try {
     const sevenZip = await resolveTrustedSevenZip();
+    // electron-builder NSIS/portable wraps the app as $PLUGINSDIR/app-64.7z.
+    // Extract that archive first, then pull WO.exe + app.asar from it.
     await runNativeCommand(
       sevenZip,
       [
@@ -826,13 +834,29 @@ async function extractWindowsArtifactPayload(artifactPath, environment) {
         '-y',
         `-o${directory}`,
         artifactPath,
+        '$PLUGINSDIR/app-64.7z',
+      ],
+      environment,
+    );
+    const nestedArchive = join(directory, '$PLUGINSDIR', 'app-64.7z');
+    await requireRegularFile(nestedArchive, 'Windows artifact app-64.7z');
+    const payloadDirectory = join(directory, 'payload');
+    await mkdir(payloadDirectory, { recursive: true });
+    await runNativeCommand(
+      sevenZip,
+      [
+        'x',
+        '-bd',
+        '-y',
+        `-o${payloadDirectory}`,
+        nestedArchive,
         'WO.exe',
         'resources/app.asar',
       ],
       environment,
     );
-    const executablePath = join(directory, 'WO.exe');
-    const asarPath = join(directory, 'resources', 'app.asar');
+    const executablePath = join(payloadDirectory, 'WO.exe');
+    const asarPath = join(payloadDirectory, 'resources', 'app.asar');
     await requireRegularFile(
       executablePath,
       'Windows artifact Electron executable',

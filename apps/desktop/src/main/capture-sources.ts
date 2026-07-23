@@ -33,7 +33,7 @@ export interface CaptureSourceServiceDependencies<
     getSources(options: {
       readonly types: readonly ['screen', 'window'];
       readonly fetchWindowIcons: false;
-      readonly thumbnailSize: Readonly<{ width: 320; height: 180 }>;
+      readonly thumbnailSize: Readonly<{ width: 200; height: 112 }>;
     }): Promise<readonly Source[]>;
   };
 }
@@ -41,8 +41,14 @@ export interface CaptureSourceServiceDependencies<
 const MAX_CAPTURE_SOURCES = 100;
 const MAX_THUMBNAIL_BYTES = 512 * 1_024;
 const MAX_TOTAL_THUMBNAIL_BYTES = 8 * 1_024 * 1_024;
-const MAX_THUMBNAIL_WIDTH = 640;
-const MAX_THUMBNAIL_HEIGHT = 360;
+const MAX_THUMBNAIL_WIDTH = 400;
+const MAX_THUMBNAIL_HEIGHT = 224;
+
+// 1×1 transparent PNG used as a placeholder for sources whose thumbnail
+// failed to render (minimized windows, off-screen windows, protected
+// surfaces). The source still appears in the picker so the user can select it.
+const PLACEHOLDER_THUMBNAIL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
 
 function sourceKind(id: string): 'screen' | 'window' {
   if (id.startsWith('screen:')) return 'screen';
@@ -53,9 +59,14 @@ function sourceKind(id: string): 'screen' | 'window' {
 function thumbnailData(source: DesktopCaptureSource): {
   readonly value: string;
   readonly bytes: number;
-} | null {
+} {
   const size = source.thumbnail.getSize();
-  if (size.width === 0 && size.height === 0) return null;
+  // Sources with a 0×0 thumbnail (minimized/off-screen windows, or windows
+  // not yet rendered) get a lightweight placeholder instead of being dropped.
+  // The source still appears in the picker so the user can select it.
+  if (size.width === 0 && size.height === 0) {
+    return { value: PLACEHOLDER_THUMBNAIL, bytes: PLACEHOLDER_THUMBNAIL.length };
+  }
   if (
     !Number.isSafeInteger(size.width) ||
     !Number.isSafeInteger(size.height) ||
@@ -85,7 +96,7 @@ export function createCaptureSourceService<Source extends DesktopCaptureSource>(
       const sources = await dependencies.desktopCapturer.getSources({
         types: ['screen', 'window'],
         fetchWindowIcons: false,
-        thumbnailSize: { width: 320, height: 180 },
+        thumbnailSize: { width: 200, height: 112 },
       });
       if (sources.length > MAX_CAPTURE_SOURCES) {
         dependencies.broker.clear(webContentsId);
@@ -100,7 +111,6 @@ export function createCaptureSourceService<Source extends DesktopCaptureSource>(
         }> = [];
         for (const source of sources) {
           const thumbnail = thumbnailData(source);
-          if (thumbnail === null) continue;
           totalBytes += thumbnail.bytes;
           if (totalBytes > MAX_TOTAL_THUMBNAIL_BYTES) {
             throw new RangeError(

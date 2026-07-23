@@ -72,7 +72,9 @@ describe('call phase projector', () => {
     },
   );
 
-  test('keeps an established call in peer recovery and an initial call waiting when the peer leaves', () => {
+  test('returns to waiting when the peer leaves whether or not media was connected', () => {
+    // Peer.left means the other member is gone. Recovering / failing ICE after
+    // that produced a false "语音连接异常" for the remaining participant.
     const established = createCallMachine({ peerReady: true });
     established.dispatch({
       type: 'settle',
@@ -83,7 +85,7 @@ describe('call phase projector', () => {
     });
     expect(
       established.dispatch({ type: 'peer-left', wasConnected: true }),
-    ).toMatchObject({ phase: 'recovering', recoveryReason: 'peer' });
+    ).toMatchObject({ phase: 'waiting', recoveryReason: null });
 
     const initial = createCallMachine({ peerReady: true });
     expect(

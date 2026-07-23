@@ -59,5 +59,23 @@ export default defineConfig({
         '@wo/protocol': protocolSource,
       },
     },
+    optimizeDeps: {
+      // Pre-bundle the ~4.8 MB wasm-in-js RNNoise module for dev.
+      include: ['@shiguredo/rnnoise-wasm'],
+    },
+    build: {
+      // Keep RNNoise in its own chunk so the main renderer bundle stays leaner
+      // and the large wasm payload loads only when the user enables denoise.
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('@shiguredo/rnnoise-wasm')) {
+              return 'rnnoise';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
   },
 });

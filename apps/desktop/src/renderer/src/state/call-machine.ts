@@ -119,11 +119,14 @@ export function createCallMachine(options: CallMachineOptions): CallMachine {
           ? current
           : replace('recovering', event.reason, current.connectionPath);
       case 'peer-left':
+        // Peer departed the room intentionally (or disconnected long enough
+        // that the server emitted peer.left). Always return to waiting so the
+        // remaining member does not enter ICE recovery / "语音连接异常".
+        // wasConnected is retained on the event for analytics/tests only.
+        void event.wasConnected;
         return current.phase === 'failed'
           ? current
-          : event.wasConnected
-            ? replace('recovering', 'peer', null)
-            : replace('waiting', null, null);
+          : replace('waiting', null, null);
       case 'retry':
         return replace(event.peerReady ? 'negotiating' : 'waiting', null, null);
       case 'fail':
