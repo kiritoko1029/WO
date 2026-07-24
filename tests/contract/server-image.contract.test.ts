@@ -48,6 +48,13 @@ describe('production server image contract', () => {
     expect(entrypoint).toContain('/usr/local/bin/node /app/dist/index.js');
     expect(dockerfile).toContain("-name '*.map'");
     expect(dockerfile).toContain("-name '*.d.ts'");
+    expect(dockerfile).toContain(
+      'rm -f /opt/wo-server/node_modules/.modules.yaml',
+    );
+    expect(dockerfile).toContain('rm -rf /var/log/apt/*');
+    expect(dockerfile).toContain('/var/cache/ldconfig/aux-cache');
+    expect(dockerfile).toContain('/var/log/alternatives.log');
+    expect(dockerfile).toContain('/var/log/dpkg.log');
     expect(dockerfile).not.toMatch(
       /NODE_TLS_REJECT_UNAUTHORIZED|ignore-certificate/u,
     );

@@ -421,6 +421,9 @@ describe('production Compose contract', () => {
     expect(read('deploy/coturn/Dockerfile')).toContain(
       'setcap -r /usr/bin/turnserver',
     );
+    expect(read('deploy/coturn/Dockerfile')).toContain(
+      'rm -f /var/log/apk.log',
+    );
   });
 
   test('blocks local and special-use TURN peer destinations', () => {

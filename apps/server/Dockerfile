@@ -40,7 +40,8 @@ RUN pnpm --filter @wo/config build \
   && pnpm --filter @wo/server --prod deploy /opt/wo-server --legacy \
   && find /opt/wo-server -type f \( \
     -name '*.map' -o -name '*.d.ts' -o -name '*.d.cts' \
-  \) -delete
+  \) -delete \
+  && rm -f /opt/wo-server/node_modules/.modules.yaml
 
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS runtime
 
@@ -60,6 +61,8 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
+  && rm -rf /var/log/apt/* \
+  && rm -f /var/cache/ldconfig/aux-cache /var/log/alternatives.log /var/log/dpkg.log \
   && mkdir -p /app/downloads
 
 COPY --from=workspace --chown=node:node /opt/wo-server/ ./

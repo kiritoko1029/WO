@@ -19,7 +19,8 @@ LABEL org.opencontainers.image.created="${BUILD_CREATED}" \
 USER root
 RUN apk add --no-cache setpriv libcap \
   && setcap -r /usr/bin/turnserver \
-  && apk del libcap
+  && apk del libcap \
+  && rm -f /var/log/apk.log
 
 COPY --from=probe-build /tmp/turn-healthcheck /usr/local/bin/turn-healthcheck
 COPY --chmod=0755 deploy/coturn/entrypoint.sh /opt/wo/turn-entrypoint.sh
