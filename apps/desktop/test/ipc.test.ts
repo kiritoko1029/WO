@@ -61,11 +61,11 @@ function createHarness() {
     login: vi.fn().mockResolvedValue({ kind: 'login' }),
     refresh: vi.fn().mockResolvedValue({ kind: 'refresh' }),
     logout: vi.fn().mockResolvedValue(undefined),
-      verifyEmail: vi.fn(),
-      resendVerification: vi.fn(),
-      changePassword: vi.fn(),
-      requestEmailChange: vi.fn(),
-      confirmEmailChange: vi.fn(),
+    verifyEmail: vi.fn(),
+    resendVerification: vi.fn(),
+    changePassword: vi.fn(),
+    requestEmailChange: vi.fn(),
+    confirmEmailChange: vi.fn(),
   };
   const realtime = {
     issueTicket: vi
@@ -91,6 +91,7 @@ function createHarness() {
     status: vi.fn(() => ({
       status: 'granted' as const,
       canOpenSettings: false,
+      systemAudioMode: 'loopback' as const,
     })),
     openSettings: vi.fn(async () => undefined),
   };
@@ -124,6 +125,11 @@ describe('desktop IPC boundary', () => {
     expect(DESKTOP_IPC_CHANNELS).toEqual([
       'desktop:auth:register',
       'desktop:auth:login',
+      'desktop:auth:verify-email',
+      'desktop:auth:resend-verification',
+      'desktop:auth:change-password',
+      'desktop:auth:request-email-change',
+      'desktop:auth:confirm-email-change',
       'desktop:auth:refresh',
       'desktop:auth:logout',
       'desktop:realtime:issue-ticket',
@@ -199,7 +205,11 @@ describe('desktop IPC boundary', () => {
       handlers.get('desktop:capture:permission')?.(event),
     ).resolves.toEqual({
       ok: true,
-      value: { status: 'granted', canOpenSettings: false },
+      value: {
+        status: 'granted',
+        canOpenSettings: false,
+        systemAudioMode: 'loopback',
+      },
     });
     expect(permissions.status).toHaveBeenCalledOnce();
     await expect(
@@ -207,9 +217,10 @@ describe('desktop IPC boundary', () => {
     ).resolves.toEqual({ ok: true, value: null });
     expect(permissions.openSettings).toHaveBeenCalledOnce();
     await expect(
-      handlers
-        .get('desktop:clipboard:write-text')
-        ?.(event, 'https://wo.example.cn/join/482731'),
+      handlers.get('desktop:clipboard:write-text')?.(
+        event,
+        'https://wo.example.cn/join/482731',
+      ),
     ).resolves.toEqual({ ok: true, value: null });
     expect(clipboard.writeText).toHaveBeenCalledWith(
       'https://wo.example.cn/join/482731',
@@ -241,14 +252,10 @@ describe('desktop IPC boundary', () => {
       handlers.get('desktop:clipboard:write-text')?.(event, undefined),
     ).resolves.toEqual(invalidArguments);
     await expect(
-      handlers
-        .get('desktop:clipboard:write-text')
-        ?.(event, 'x'.repeat(16_385)),
+      handlers.get('desktop:clipboard:write-text')?.(event, 'x'.repeat(16_385)),
     ).resolves.toEqual(invalidArguments);
     await expect(
-      handlers
-        .get('desktop:clipboard:write-text')
-        ?.(event, 'value', 'extra'),
+      handlers.get('desktop:clipboard:write-text')?.(event, 'value', 'extra'),
     ).resolves.toEqual(invalidArguments);
     expect(clipboard.writeText).toHaveBeenCalledTimes(1);
   });
@@ -343,9 +350,10 @@ describe('desktop IPC boundary', () => {
       },
     });
     await expect(
-      harness.handlers
-        .get('desktop:clipboard:write-text')
-        ?.(event, 'https://wo.example.cn/join/482731'),
+      harness.handlers.get('desktop:clipboard:write-text')?.(
+        event,
+        'https://wo.example.cn/join/482731',
+      ),
     ).resolves.toEqual({
       ok: false,
       error: {

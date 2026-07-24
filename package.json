@@ -8,7 +8,10 @@
     "pnpm": "10.32.1"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["bufferutil", "utf-8-validate"]
+    "onlyBuiltDependencies": [
+      "bufferutil",
+      "utf-8-validate"
+    ]
   },
   "scripts": {
     "build": "pnpm -r --if-present build",

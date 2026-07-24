@@ -164,7 +164,11 @@ describe('createNoiseSuppressor', () => {
   });
 
   function mockTrack(): MediaStreamTrack {
-    return { kind: 'audio', enabled: true, stop: vi.fn() } as unknown as MediaStreamTrack;
+    return {
+      kind: 'audio',
+      enabled: true,
+      stop: vi.fn(),
+    } as unknown as MediaStreamTrack;
   }
 
   function mockRnnoise(frameSize = 4): RnnoiseInstance {

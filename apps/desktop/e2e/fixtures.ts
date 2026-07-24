@@ -217,6 +217,20 @@ function peer(application: ElectronApplication, page: Page): AcceptancePeer {
 }
 
 async function launchPair(policy: AcceptancePolicy): Promise<AcceptancePair> {
+  const apiEndpoint = new URL(
+    process.env.WO_E2E_BASE_URL ?? 'https://rtc.localhost',
+  );
+  if (
+    apiEndpoint.protocol !== 'https:' ||
+    apiEndpoint.hostname !== 'rtc.localhost' ||
+    apiEndpoint.username !== '' ||
+    apiEndpoint.password !== ''
+  ) {
+    throw new Error(
+      'WO_E2E_BASE_URL must use trusted https://rtc.localhost[:port]',
+    );
+  }
+  const apiOrigin = apiEndpoint.origin;
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'wo-desktop-e2e-'));
   const audioFile = join(temporaryRoot, 'deterministic-nonsilent.wav');
   await writeFile(audioFile, deterministicWav(), { mode: 0o600 });
@@ -257,13 +271,13 @@ async function launchPair(policy: AcceptancePolicy): Promise<AcceptancePair> {
     const launchPeer = async (name: string) => {
       const application = await electron.launch({
         executablePath: electronPath,
-        args: [mainEntry],
+        args: ['--host-resolver-rules=MAP rtc.localhost 127.0.0.1', mainEntry],
         cwd: desktopDirectory,
         env: {
           ...baseEnvironment,
           ELECTRON_RENDERER_URL: renderer.url,
           NODE_EXTRA_CA_CERTS: caddyAuthority,
-          WO_API_ORIGIN: 'https://rtc.localhost',
+          WO_API_ORIGIN: apiOrigin,
           WO_ACCEPTANCE_AUDIO_FILE: audioFile,
           WO_ACCEPTANCE_ICE_POLICY: policy,
           WO_ACCEPTANCE_USER_DATA_DIR: join(temporaryRoot, `${name}-profile`),
@@ -277,8 +291,24 @@ async function launchPair(policy: AcceptancePolicy): Promise<AcceptancePair> {
         }
       });
       const page = await application.firstWindow();
+      page.on('console', (message) => {
+        const text = message.text();
+        if (
+          !text.startsWith('failed to asynchronously prepare wasm:') &&
+          !text.startsWith('Aborted(')
+        ) {
+          return;
+        }
+        const details = text
+          .replaceAll(renderer.url, 'renderer:///')
+          .slice(0, 1_024);
+        process.stderr.write(`[${name}-renderer] ${details}\n`);
+      });
       page.on('pageerror', (error) => {
-        process.stderr.write(`[${name}] ${error.message}\n`);
+        const details = (error.stack ?? error.message)
+          .replaceAll(renderer.url, 'renderer:///')
+          .slice(0, 4_096);
+        process.stderr.write(`[${name}] ${details}\n`);
       });
       await page.getByRole('heading', { name: '登录 WO' }).waitFor({
         timeout: 30_000,

@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { release, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -10,13 +10,18 @@ import {
   desktopCapturer,
   ipcMain,
   net,
+  protocol,
   safeStorage,
+  session,
   shell,
   systemPreferences,
 } from 'electron';
 import type { JoinIntent } from '@wo/protocol';
 
-import { acceptsPinnedAcceptanceCertificate } from './acceptance-certificate.js';
+import {
+  acceptanceCertificateVerificationResult,
+  acceptsPinnedAcceptanceCertificate,
+} from './acceptance-certificate.js';
 import { createAuthSessionBroker } from './auth-session-broker.js';
 import { createBackendTargetStore } from './backend-target.js';
 import { createCaptureSourceBroker } from './capture-policy.js';
@@ -32,7 +37,13 @@ import {
 } from './join-intent.js';
 import { establishDesktopLifecycle } from './lifecycle.js';
 import {
+  installPackagedRendererProtocol,
+  registerPackagedRendererScheme,
+} from './packaged-renderer-protocol.js';
+import {
+  createPackageSmokeSessionStore,
   resolvePackageSmokeRequest,
+  verifyPackageSmokeRendererSecurity,
   waitForPackageSmokeRendererReady,
   writePackageSmokeReady,
 } from './package-smoke.js';
@@ -58,6 +69,27 @@ declare const __WO_ACCEPTANCE_CA_CERTIFICATE__: string;
 const applicationId = 'cn.wo.desktop.acceptance';
 const audioFile = process.env.WO_ACCEPTANCE_AUDIO_FILE;
 const userDataDirectory = process.env.WO_ACCEPTANCE_USER_DATA_DIR;
+const acceptancePlatformRelease =
+  process.env.WO_ACCEPTANCE_USE_SYSTEM_PICKER === '1' ? release() : '0';
+let apiEndpoint: URL;
+try {
+  apiEndpoint = new URL(process.env.WO_API_ORIGIN ?? '');
+} catch {
+  throw new Error('WO_API_ORIGIN must be a valid acceptance HTTPS origin');
+}
+if (
+  apiEndpoint.protocol !== 'https:' ||
+  apiEndpoint.hostname !== 'rtc.localhost' ||
+  apiEndpoint.username !== '' ||
+  apiEndpoint.password !== '' ||
+  apiEndpoint.pathname !== '/' ||
+  apiEndpoint.search !== '' ||
+  apiEndpoint.hash !== ''
+) {
+  throw new Error(
+    'WO_API_ORIGIN must use trusted https://rtc.localhost[:port]',
+  );
+}
 
 if (
   audioFile === undefined ||
@@ -178,6 +210,7 @@ const directory = fileURLToPath(new URL('.', import.meta.url));
 const packagedRendererEntry = pathToFileURL(
   join(directory, '../renderer/index.html'),
 ).href;
+registerPackagedRendererScheme(protocol);
 const backendTarget = createBackendTargetStore({
   userDataPath: app.getPath('userData'),
   environment: process.env,
@@ -232,6 +265,7 @@ const capture = createCaptureSourceService({
 });
 const permissions = createScreenPermissionService({
   platform: process.platform,
+  platformRelease: acceptancePlatformRelease,
   systemPreferences,
   shell,
 });
@@ -256,6 +290,7 @@ function createMainWindow(): BrowserWindow {
     webContents: window.webContents,
     rendererEntry: runtime.rendererEntry,
     broker: captureBroker,
+    platformRelease: acceptancePlatformRelease,
   });
   const clearCaptureSources = (): void => capture.clear(window.webContents.id);
   window.webContents.on('did-start-navigation', clearCaptureSources);
@@ -270,11 +305,14 @@ function createMainWindow(): BrowserWindow {
 }
 
 if (ownsSingleInstance) {
-  const sessionStore = createSecureSessionStore({
-    userDataPath: app.getPath('userData'),
-    apiOrigin: runtime.apiOrigin,
-    encryption: safeStorage,
-  });
+  const sessionStore =
+    packageSmokeRequest === null
+      ? createSecureSessionStore({
+          userDataPath: app.getPath('userData'),
+          apiOrigin: runtime.apiOrigin,
+          encryption: safeStorage,
+        })
+      : createPackageSmokeSessionStore();
   const http = createMainHttpClient({
     apiOrigin: runtime.apiOrigin,
     fetch: net.fetch.bind(net),
@@ -303,10 +341,31 @@ if (ownsSingleInstance) {
   const appReady = app.whenReady();
   void appReady
     .then(async () => {
+      if (app.isPackaged) {
+        installPackagedRendererProtocol(protocol, {
+          bundleRoot: join(directory, '../renderer'),
+          contentSecurityPolicy: buildContentSecurityPolicy(
+            runtime.realtimeOrigin,
+          ),
+          fetchFile: (url) => net.fetch(url),
+        });
+      }
+      session.defaultSession.setCertificateVerifyProc((request, callback) => {
+        callback(
+          acceptanceCertificateVerificationResult({
+            hostname: request.hostname,
+            verificationResult: request.verificationResult,
+            certificate: request.certificate,
+            pinnedRootSpki: __WO_ACCEPTANCE_CA_SPKI__,
+            trustedRoot: __WO_ACCEPTANCE_CA_CERTIFICATE__,
+          }),
+        );
+      });
       mainWindow = createMainWindow();
       await mainWindow.loadURL(runtime.rendererEntry);
       if (packageSmokeRequest !== null) {
         await waitForPackageSmokeRendererReady(mainWindow.webContents);
+        await verifyPackageSmokeRendererSecurity(mainWindow.webContents);
         await writePackageSmokeReady(packageSmokeRequest);
         app.quit();
       }

@@ -1,4 +1,4 @@
-import { tmpdir } from 'node:os';
+import { release, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -10,7 +10,9 @@ import {
   ipcMain,
   net,
   powerMonitor,
+  protocol,
   safeStorage,
+  session,
   shell,
   systemPreferences,
 } from 'electron';
@@ -23,7 +25,10 @@ import {
   createCaptureSourceService,
   installDisplayMediaHandler,
 } from './capture-sources.js';
-import { installExtraCaFromEnvironment } from './extra-ca.js';
+import {
+  installExtraCaCertificateVerifier,
+  installExtraCaFromEnvironment,
+} from './extra-ca.js';
 import { createMainHttpClient } from './http-client.js';
 import { registerDesktopIpc } from './ipc.js';
 import {
@@ -35,7 +40,13 @@ import { createLanSessionController } from './lan-session.js';
 import { createLanSocketController } from './lan-socket.js';
 import { establishDesktopLifecycle } from './lifecycle.js';
 import {
+  installPackagedRendererProtocol,
+  registerPackagedRendererScheme,
+} from './packaged-renderer-protocol.js';
+import {
+  createPackageSmokeSessionStore,
   resolvePackageSmokeRequest,
+  verifyPackageSmokeRendererSecurity,
   waitForPackageSmokeRendererReady,
   writePackageSmokeReady,
 } from './package-smoke.js';
@@ -64,6 +75,7 @@ const directory = fileURLToPath(new URL('.', import.meta.url));
 const packagedRendererEntry = pathToFileURL(
   join(directory, '../renderer/index.html'),
 ).href;
+registerPackagedRendererScheme(protocol);
 
 // Dev-only: allow CDP clients (chrome-devtools MCP, chrome-remote-interface)
 // to connect when REMOTE_DEBUGGING_PORT is set. Production builds ignore this
@@ -137,6 +149,7 @@ const capture = createCaptureSourceService({
 });
 const permissions = createScreenPermissionService({
   platform: process.platform,
+  platformRelease: release(),
   systemPreferences,
   shell,
 });
@@ -170,6 +183,7 @@ function createMainWindow(): BrowserWindow {
     webContents: window.webContents,
     rendererEntry: runtime.rendererEntry,
     broker: captureBroker,
+    platformRelease: release(),
   });
   const clearCaptureSources = (): void => capture.clear(window.webContents.id);
   window.webContents.on('did-start-navigation', clearCaptureSources);
@@ -205,11 +219,14 @@ function createMainWindow(): BrowserWindow {
 }
 
 if (ownsSingleInstance) {
-  const sessionStore = createSecureSessionStore({
-    userDataPath: app.getPath('userData'),
-    apiOrigin: runtime.apiOrigin,
-    encryption: safeStorage,
-  });
+  const sessionStore =
+    packageSmokeRequest === null
+      ? createSecureSessionStore({
+          userDataPath: app.getPath('userData'),
+          apiOrigin: runtime.apiOrigin,
+          encryption: safeStorage,
+        })
+      : createPackageSmokeSessionStore();
   // Use Chromium-backed net.fetch so system HTTP proxies (Clash/V2Ray) work.
   // Node/globalThis.fetch often fails with ECONNRESET through local proxies.
   const http = createMainHttpClient({
@@ -251,7 +268,25 @@ if (ownsSingleInstance) {
   const appReady = app.whenReady();
   void appReady
     .then(async () => {
-      installExtraCaFromEnvironment(process.env);
+      const extraCaCertificates = installExtraCaFromEnvironment(process.env);
+      if (extraCaCertificates.length > 0) {
+        installExtraCaCertificateVerifier(session.defaultSession, {
+          certificates: extraCaCertificates,
+          hostnames: [
+            new URL(runtime.apiOrigin).hostname,
+            new URL(runtime.realtimeOrigin).hostname,
+          ],
+        });
+      }
+      if (app.isPackaged) {
+        installPackagedRendererProtocol(protocol, {
+          bundleRoot: join(directory, '../renderer'),
+          contentSecurityPolicy: buildContentSecurityPolicy(
+            runtime.realtimeOrigin,
+          ),
+          fetchFile: (url) => net.fetch(url),
+        });
+      }
       if (packageSmokeRequest === null) {
         powerMonitor.on('suspend', () => {
           void stopLanSession();
@@ -261,6 +296,7 @@ if (ownsSingleInstance) {
       await mainWindow.loadURL(runtime.rendererEntry);
       if (packageSmokeRequest !== null) {
         await waitForPackageSmokeRendererReady(mainWindow.webContents);
+        await verifyPackageSmokeRendererSecurity(mainWindow.webContents);
         await writePackageSmokeReady(packageSmokeRequest);
         app.quit();
       }

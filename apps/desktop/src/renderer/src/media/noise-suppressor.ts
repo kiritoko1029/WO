@@ -366,10 +366,7 @@ export async function createNoiseSuppressor(
     },
     get active() {
       return (
-        intensity !== 'off' &&
-        denoiseState !== null &&
-        !loadFailed &&
-        graphLive
+        intensity !== 'off' && denoiseState !== null && !loadFailed && graphLive
       );
     },
     get frameSize() {
@@ -501,9 +498,7 @@ export async function createNoiseSuppressor(
 async function buildGainOnlyTrack(
   inputTrack: MediaStreamTrack,
   gainValue: number,
-  createAudioContext:
-    | ((sampleRate: number) => AudioContext)
-    | undefined,
+  createAudioContext: ((sampleRate: number) => AudioContext) | undefined,
   register: (graph: {
     context: AudioContext;
     source: MediaStreamAudioSourceNode;

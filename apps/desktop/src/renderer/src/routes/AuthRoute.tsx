@@ -32,9 +32,9 @@ export function AuthRoute({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const normalizedEmail = (
-      auth.pendingVerificationEmail ?? email
-    ).trim().toLowerCase();
+    const normalizedEmail = (auth.pendingVerificationEmail ?? email)
+      .trim()
+      .toLowerCase();
     if (mode === 'verify') {
       if (!/^\d{6}$/u.test(code.trim())) {
         setValidationError('请输入 6 位数字验证码');
@@ -118,7 +118,11 @@ export function AuthRoute({
             </button>
           </div>
         )}
-        <form className="auth-form" onSubmit={(event) => void submit(event)} noValidate>
+        <form
+          className="auth-form"
+          onSubmit={(event) => void submit(event)}
+          noValidate
+        >
           {mode === 'register' && (
             <label>
               <span>显示名称</span>

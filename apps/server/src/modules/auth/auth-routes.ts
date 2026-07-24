@@ -87,18 +87,14 @@ export function registerAuthRoutes(
     return dependencies.authService.resendVerification(body);
   });
 
-  app.post(
-    '/v1/auth/password',
-    authenticatedRouteOptions,
-    async (request) => {
-      const identity = request.authIdentity;
-      if (identity === null) {
-        throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
-      }
-      const body = authChangePasswordBodySchema.parse(request.body);
-      return dependencies.authService.changePassword(identity.userId, body);
-    },
-  );
+  app.post('/v1/auth/password', authenticatedRouteOptions, async (request) => {
+    const identity = request.authIdentity;
+    if (identity === null) {
+      throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
+    }
+    const body = authChangePasswordBodySchema.parse(request.body);
+    return dependencies.authService.changePassword(identity.userId, body);
+  });
 
   app.post(
     '/v1/auth/email/change/request',

@@ -127,11 +127,10 @@ describe('fixed transceiver plan', () => {
       getTransceivers: vi.fn(() => [audio, screenAudio, screen]),
     } as unknown as RTCPeerConnection;
 
-    const result = await configureJoinerTransceiverPlan(
-      pc,
-      null,
-      { audio: [], video: [] },
-    );
+    const result = await configureJoinerTransceiverPlan(pc, null, {
+      audio: [],
+      video: [],
+    });
 
     expect(result).toEqual({ audio, screen, screenAudio });
     expect(audio.direction).toBe('sendrecv');
@@ -140,9 +139,22 @@ describe('fixed transceiver plan', () => {
   });
 
   it.each([
-    [[transceiver('audio', '0'), transceiver('video', '1')], 'two audio and one video'],
-    [[transceiver('audio', '0'), transceiver('audio', '1')], 'two audio and one video'],
-    [[transceiver('audio', '0'), transceiver('audio', '1'), transceiver('audio', '2')], 'two audio and one video'],
+    [
+      [transceiver('audio', '0'), transceiver('video', '1')],
+      'two audio and one video',
+    ],
+    [
+      [transceiver('audio', '0'), transceiver('audio', '1')],
+      'two audio and one video',
+    ],
+    [
+      [
+        transceiver('audio', '0'),
+        transceiver('audio', '1'),
+        transceiver('audio', '2'),
+      ],
+      'two audio and one video',
+    ],
   ])('rejects an ambiguous remote transceiver map', async (items, message) => {
     await expect(
       configureJoinerTransceiverPlan(

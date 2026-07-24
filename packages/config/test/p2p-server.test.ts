@@ -171,7 +171,8 @@ describe('parseP2pServerConfig', () => {
   test('parses SUPER_ADMIN_EMAILS as a normalized unique list', () => {
     const config = parseP2pServerConfig({
       ...validP2pEnv(),
-      SUPER_ADMIN_EMAILS: ' Admin@Example.com ,ops@example.com,admin@example.com ',
+      SUPER_ADMIN_EMAILS:
+        ' Admin@Example.com ,ops@example.com,admin@example.com ',
     });
 
     expect(config.email.superAdminEmails).toEqual([

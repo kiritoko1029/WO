@@ -66,6 +66,7 @@ describe('desktop production package configuration', () => {
     );
     expect(config).toContain('NSMicrophoneUsageDescription:');
     expect(config).toContain('NSScreenCaptureUsageDescription:');
+    expect(config).toContain('NSAudioCaptureUsageDescription:');
 
     for (const plist of [appEntitlements, inheritedEntitlements]) {
       expect(plist).toContain('com.apple.security.cs.allow-jit');

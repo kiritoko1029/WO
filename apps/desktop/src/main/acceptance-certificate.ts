@@ -14,6 +14,23 @@ export interface AcceptanceCertificateRequest {
   readonly now?: number;
 }
 
+export interface AcceptanceCertificateVerificationRequest {
+  readonly hostname: string;
+  readonly verificationResult: string;
+  readonly certificate: AcceptanceCertificate;
+  readonly pinnedRootSpki: string;
+  readonly trustedRoot?: string;
+  readonly now?: number;
+}
+
+const pinEligibleVerificationResults = new Set([
+  'OK',
+  'net::OK',
+  'CERT_AUTHORITY_INVALID',
+  'ERR_CERT_AUTHORITY_INVALID',
+  'net::ERR_CERT_AUTHORITY_INVALID',
+]);
+
 function spkiSha256(certificate: X509Certificate): Buffer {
   return createHash('sha256')
     .update(certificate.publicKey.export({ type: 'spki', format: 'der' }))
@@ -70,7 +87,6 @@ export function acceptsPinnedAcceptanceCertificate(
     request.error !== 'net::ERR_CERT_AUTHORITY_INVALID' ||
     (endpoint.protocol !== 'https:' && endpoint.protocol !== 'wss:') ||
     endpoint.hostname !== 'rtc.localhost' ||
-    (endpoint.port !== '' && endpoint.port !== '443') ||
     endpoint.username !== '' ||
     endpoint.password !== ''
   ) {
@@ -115,4 +131,23 @@ export function acceptsPinnedAcceptanceCertificate(
   } catch {
     return false;
   }
+}
+
+export function acceptanceCertificateVerificationResult(
+  request: AcceptanceCertificateVerificationRequest,
+): number {
+  if (request.hostname !== 'rtc.localhost') return -3;
+  if (!pinEligibleVerificationResults.has(request.verificationResult)) {
+    return -2;
+  }
+  return acceptsPinnedAcceptanceCertificate({
+    url: 'https://rtc.localhost/',
+    error: 'net::ERR_CERT_AUTHORITY_INVALID',
+    certificate: request.certificate,
+    pinnedRootSpki: request.pinnedRootSpki,
+    trustedRoot: request.trustedRoot,
+    now: request.now,
+  })
+    ? 0
+    : -2;
 }

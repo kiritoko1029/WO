@@ -11,6 +11,7 @@ import { _electron as electron, expect, test } from '@playwright/test';
 import electronPath from 'electron';
 
 import {
+  acceptanceCertificateVerificationResult,
   acceptsPinnedAcceptanceCertificate,
   type AcceptanceCertificate,
 } from '../src/main/acceptance-certificate.js';
@@ -27,6 +28,7 @@ const acceptanceMarkers = [
   'acceptance:audio:wav',
   'certificate-error',
   'acceptance:diagnostics:snapshot',
+  'acceptanceCertificateVerificationResult',
 ] as const;
 
 async function textFiles(directory: string): Promise<string> {
@@ -177,10 +179,23 @@ function withoutReportedRoot(
 }
 
 async function caddyPeer(ca: string): Promise<DetailedPeerCertificate> {
+  const endpoint = new URL(
+    process.env.WO_E2E_BASE_URL ?? 'https://rtc.localhost',
+  );
+  if (
+    endpoint.protocol !== 'https:' ||
+    endpoint.hostname !== 'rtc.localhost' ||
+    endpoint.username !== '' ||
+    endpoint.password !== ''
+  ) {
+    throw new Error(
+      'WO_E2E_BASE_URL must use trusted https://rtc.localhost[:port]',
+    );
+  }
   return new Promise((resolvePeer, reject) => {
     const socket = connect({
-      host: 'rtc.localhost',
-      port: 443,
+      host: '127.0.0.1',
+      port: endpoint.port === '' ? 443 : Number(endpoint.port),
       servername: 'rtc.localhost',
       ca,
     });
@@ -235,6 +250,14 @@ test('keeps acceptance hooks in a separately pinned build', async () => {
   for (const marker of acceptanceMarkers)
     expect(production).not.toContain(marker);
   expect(production).not.toContain(spki);
+  for (const marker of [
+    'WO_EXTRA_CA_CERTS',
+    'fixed extra CA hostname',
+    'ERR_CERT_AUTHORITY_INVALID',
+    'checkIssued',
+    'setCertificateVerifyProc',
+  ])
+    expect(production).toContain(marker);
 });
 
 test('accepts only the current rtc.localhost chain and pinned root SPKI', async () => {
@@ -264,6 +287,12 @@ test('accepts only the current rtc.localhost chain and pinned root SPKI', async 
   expect(
     acceptsPinnedAcceptanceCertificate({
       ...request,
+      url: 'https://rtc.localhost:18443/v1/realtime',
+    }),
+  ).toBe(true);
+  expect(
+    acceptsPinnedAcceptanceCertificate({
+      ...request,
       certificate: withoutReportedRoot(certificate),
       trustedRoot: caPem,
     }),
@@ -283,7 +312,57 @@ test('accepts only the current rtc.localhost chain and pinned root SPKI', async 
   expect(
     acceptsPinnedAcceptanceCertificate({
       ...request,
+      url: 'https://127.0.0.1:18443/',
+    }),
+  ).toBe(false);
+  expect(
+    acceptsPinnedAcceptanceCertificate({
+      ...request,
       error: 'net::ERR_CERT_DATE_INVALID',
     }),
   ).toBe(false);
+  for (const verificationResult of [
+    'OK',
+    'net::OK',
+    'CERT_AUTHORITY_INVALID',
+    'ERR_CERT_AUTHORITY_INVALID',
+    'net::ERR_CERT_AUTHORITY_INVALID',
+  ]) {
+    expect(
+      acceptanceCertificateVerificationResult({
+        hostname: 'rtc.localhost',
+        verificationResult,
+        certificate,
+        pinnedRootSpki: spki,
+        trustedRoot: caPem,
+      }),
+    ).toBe(0);
+  }
+  expect(
+    acceptanceCertificateVerificationResult({
+      hostname: 'rtc.localhost',
+      verificationResult: 'OK',
+      certificate,
+      pinnedRootSpki: Buffer.alloc(32, 0xa5).toString('base64'),
+      trustedRoot: caPem,
+    }),
+  ).toBe(-2);
+  expect(
+    acceptanceCertificateVerificationResult({
+      hostname: 'rtc.localhost',
+      verificationResult: 'CERT_DATE_INVALID',
+      certificate,
+      pinnedRootSpki: spki,
+      trustedRoot: caPem,
+    }),
+  ).toBe(-2);
+  expect(
+    acceptanceCertificateVerificationResult({
+      hostname: 'example.test',
+      verificationResult: 'OK',
+      certificate,
+      pinnedRootSpki: spki,
+      trustedRoot: caPem,
+    }),
+  ).toBe(-3);
 });

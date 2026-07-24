@@ -1,16 +1,20 @@
 export type ScreenPermissionStatus =
   'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 
+export type SystemAudioMode = 'loopback' | 'native-picker' | 'unsupported';
+
 export interface ScreenPermissionService {
   status(): Readonly<{
     status: ScreenPermissionStatus;
     canOpenSettings: boolean;
+    systemAudioMode: SystemAudioMode;
   }>;
   openSettings(): Promise<void>;
 }
 
 export interface ScreenPermissionServiceDependencies {
   readonly platform: NodeJS.Platform;
+  readonly platformRelease: string;
   readonly systemPreferences: {
     getMediaAccessStatus(mediaType: 'screen'): ScreenPermissionStatus;
   };
@@ -21,6 +25,20 @@ export interface ScreenPermissionServiceDependencies {
 
 const MACOS_SCREEN_SETTINGS =
   'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+
+export function systemAudioModeForPlatform(
+  platform: NodeJS.Platform,
+  platformRelease: string,
+): SystemAudioMode {
+  if (platform === 'win32') return 'loopback';
+  if (platform !== 'darwin') return 'unsupported';
+  const match = /^(0|[1-9]\d*)(?:\.|$)/u.exec(platformRelease);
+  if (match === null) return 'unsupported';
+  const darwinMajor = Number(match[1]);
+  return Number.isSafeInteger(darwinMajor) && darwinMajor >= 24
+    ? 'native-picker'
+    : 'unsupported';
+}
 
 export function createScreenPermissionService(
   dependencies: ScreenPermissionServiceDependencies,
@@ -35,6 +53,10 @@ export function createScreenPermissionService(
       canOpenSettings:
         dependencies.platform === 'darwin' &&
         (current === 'denied' || current === 'restricted'),
+      systemAudioMode: systemAudioModeForPlatform(
+        dependencies.platform,
+        dependencies.platformRelease,
+      ),
     });
   };
   return Object.freeze({

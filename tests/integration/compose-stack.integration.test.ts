@@ -10,6 +10,14 @@ const envFile = resolve(
 );
 const integrationEnabled = process.env.WO_RUN_COMPOSE_INTEGRATION === '1';
 const keepStack = process.env.WO_KEEP_COMPOSE_INTEGRATION === '1';
+const smokeBaseUrl =
+  process.env.WO_INTEGRATION_SMOKE_BASE_URL ?? 'https://rtc.localhost';
+const integrationHttpPort = Number(
+  process.env.WO_INTEGRATION_HTTP_PORT ?? '80',
+);
+const integrationHttpsPort = Number(
+  process.env.WO_INTEGRATION_HTTPS_PORT ?? '443',
+);
 
 const composeFiles = [
   '--project-name',
@@ -99,6 +107,14 @@ describe.skipIf(!integrationEnabled)('four-service Compose integration', () => {
         }
       }
     }
+    expect(
+      services
+        .find(({ Service }) => Service === 'caddy')
+        ?.Publishers.map(({ PublishedPort }) => PublishedPort)
+        .sort((left, right) => left - right),
+    ).toEqual(
+      [integrationHttpPort, integrationHttpsPort].sort((a, b) => a - b),
+    );
   });
 
   test('passes authenticated signaling smoke through trusted local HTTPS', () => {
@@ -109,7 +125,7 @@ describe.skipIf(!integrationEnabled)('four-service Compose integration', () => {
     run(process.execPath, [
       resolve(deploy, 'scripts', 'smoke.mjs'),
       `--env-file=${envFile}`,
-      '--base-url=https://rtc.localhost',
+      `--base-url=${smokeBaseUrl}`,
       `--ca-file=${resolve(deploy, '.certs', 'caddy-authority', 'root.crt')}`,
       '--integration',
       '--turn-proof',

@@ -114,10 +114,7 @@ describe('createAdminService', () => {
               {
                 id: '33333333-3333-4333-8333-333333333333',
                 state: 'connected',
-                members: [
-                  { online: true },
-                  { online: false },
-                ],
+                members: [{ online: true }, { online: false }],
                 screenLease: null,
                 code: '123456',
               },
@@ -127,9 +124,9 @@ describe('createAdminService', () => {
     });
 
     await service.assertSuperAdmin(ADMIN_USER_ID);
-    await expect(service.assertSuperAdmin(MEMBER_USER_ID)).rejects.toBeInstanceOf(
-      AdminServiceError,
-    );
+    await expect(
+      service.assertSuperAdmin(MEMBER_USER_ID),
+    ).rejects.toBeInstanceOf(AdminServiceError);
 
     const overview = await service.getOverview();
     expect(overview.totals).toEqual({
@@ -138,12 +135,16 @@ describe('createAdminService', () => {
       signalingConnections: 1,
       rooms: 1,
     });
-    expect(overview.users.find((user) => user.userId === ADMIN_USER_ID)).toMatchObject({
+    expect(
+      overview.users.find((user) => user.userId === ADMIN_USER_ID),
+    ).toMatchObject({
       isSuperAdmin: true,
       activeSessions: 2,
       verified: true,
     });
-    const member = overview.users.find((user) => user.userId === MEMBER_USER_ID);
+    const member = overview.users.find(
+      (user) => user.userId === MEMBER_USER_ID,
+    );
     expect(member?.signalingConnections).toHaveLength(1);
     expect(member?.signalingConnections[0]?.state).toBe('active');
     expect(overview.rooms[0]).toMatchObject({
@@ -154,7 +155,8 @@ describe('createAdminService', () => {
   });
 
   test('disables a non-admin user and revokes sessions', async () => {
-    const { identityRepository, sessionRepository, users } = createRepositories();
+    const { identityRepository, sessionRepository, users } =
+      createRepositories();
     let revoked = 0;
     const service = createAdminService({
       identityRepository: identityRepository as never,

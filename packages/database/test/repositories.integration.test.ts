@@ -189,20 +189,27 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
     expect(migration_count).toBe(2);
   }, 60_000);
 
-  test('journals the migration once and skips an identical checksum', async () => {
+  test('journals each migration once and skips identical checksums', async () => {
     await resetDatabaseSchemas();
     await migrateDatabase(client);
 
-    const [first] = await client.sql<
+    const firstRows = await client.sql<
       { migration_id: string; checksum: string; applied_at: Date | string }[]
     >`
       SELECT migration_id, checksum, applied_at
       FROM wo_meta.schema_migrations
+      ORDER BY migration_id
     `;
-    expect(first).toMatchObject({
-      migration_id: '0000_identity',
-      checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
-    });
+    expect(firstRows).toEqual([
+      expect.objectContaining({
+        migration_id: '0000_identity',
+        checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+      expect.objectContaining({
+        migration_id: '0001_email_verification',
+        checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+    ]);
 
     await migrateDatabase(client);
     const rows = await client.sql<
@@ -210,8 +217,9 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
     >`
       SELECT migration_id, checksum, applied_at
       FROM wo_meta.schema_migrations
+      ORDER BY migration_id
     `;
-    expect(rows).toEqual([first]);
+    expect(rows).toEqual(firstRows);
   });
 
   test('rejects a journal checksum mismatch without touching the domain schema', async () => {
@@ -233,7 +241,7 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
         FROM information_schema.tables
         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
       `;
-      expect(table_count).toBe(4);
+      expect(table_count).toBe(5);
     } finally {
       await resetDatabaseSchemas();
       await migrateDatabase(client);
@@ -250,6 +258,7 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
 
     expect(tables.map(({ table_name }) => table_name)).toEqual([
       'auth_identities',
+      'email_verification_challenges',
       'password_credentials',
       'refresh_sessions',
       'users',
@@ -300,6 +309,7 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
 
     expect(credential).toEqual({
       emailNormalized: 'person@example.com',
+      verifiedAt: null,
       passwordHash: '$argon2id$redacted',
       user: {
         id: USER_ONE_ID,
@@ -333,6 +343,7 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
 
     expect(publicUser).toEqual({
       emailNormalized: 'person@example.com',
+      verifiedAt: null,
       user: {
         id: USER_ONE_ID,
         displayName: 'Person',

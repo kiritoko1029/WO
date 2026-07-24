@@ -970,8 +970,7 @@ describe('connection epochs, replacement, and room lifetime', () => {
     expect(registry.getStats().rooms).toBe(1);
     expect(
       result.intents.some(
-        (intent) =>
-          intent.type === 'peer.left' && intent.userId === 'joiner',
+        (intent) => intent.type === 'peer.left' && intent.userId === 'joiner',
       ),
     ).toBe(true);
   });

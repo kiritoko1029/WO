@@ -107,9 +107,7 @@ async function expectCode(
   }
 }
 
-export function createSmtpEmailDelivery(
-  settings: SmtpSettings,
-): EmailDelivery {
+export function createSmtpEmailDelivery(settings: SmtpSettings): EmailDelivery {
   return {
     async send(message) {
       const socket = settings.secure
@@ -189,9 +187,7 @@ export function createSmtpEmailDelivery(
   };
 }
 
-export function createEmailDelivery(
-  smtp: SmtpSettings | null,
-): EmailDelivery {
+export function createEmailDelivery(smtp: SmtpSettings | null): EmailDelivery {
   if (smtp === null) return createConsoleEmailDelivery();
   return createSmtpEmailDelivery(smtp);
 }

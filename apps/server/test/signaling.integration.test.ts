@@ -646,18 +646,48 @@ describe('authenticated signaling gateway', () => {
     });
   });
 
-  test('broadcasts screen release when the owning connection disconnects', async () => {
+  test('preserves and rebinds a screen lease across transient owner reconnect', async () => {
     const fixture = await createFixture();
     const { creator, joiner, roomId } = await openReadyPair(fixture);
     sendRequest(creator, 'screen.acquire', 'screen-acquire-disconnect', {
       roomId,
     });
-    await creator.next(isAck('screen-acquire-disconnect'));
+    const acquired = successData(
+      await creator.next(isAck('screen-acquire-disconnect')),
+    );
+    const leaseId = String(
+      (acquired['lease'] as Record<string, unknown>)['leaseId'],
+    );
     await creator.next(isBroadcast('screen.ownerChanged'));
     await joiner.next(isBroadcast('screen.ownerChanged'));
 
-    creator.socket.close();
+    creator.socket.terminate();
+    expect(await joiner.next(isBroadcast('peer.left'))).toMatchObject({
+      payload: { roomId, userId: 'user-1', reason: 'disconnected' },
+    });
+    expect(joiner.has(isBroadcast('screen.ownerChanged'))).toBe(false);
 
+    const resumed = await openClient(fixture, 'user-1');
+    sendRequest(resumed, 'room.resume', 'screen-owner-resume', { roomId });
+    const resumedData = successData(
+      await resumed.next(isAck('screen-owner-resume')),
+    );
+    expect(resumedData['screen']).toMatchObject({
+      leaseId,
+      owner: { userId: 'user-1' },
+    });
+    sendRequest(resumed, 'screen.renew', 'screen-renew-after-resume', {
+      roomId,
+      leaseId,
+    });
+    expect(
+      await resumed.next(isAck('screen-renew-after-resume')),
+    ).toMatchObject({
+      payload: { ok: true, data: { lease: { leaseId } } },
+    });
+
+    sendRequest(resumed, 'room.leave', 'screen-owner-leave', { roomId });
+    await resumed.next(isAck('screen-owner-leave'));
     expect(await joiner.next(isBroadcast('screen.ownerChanged'))).toMatchObject(
       {
         payload: {

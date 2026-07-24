@@ -52,7 +52,11 @@ describe('auth session broker', () => {
     async (operation) => {
       const store = createStore();
       const http = createHttp();
-      http.post.mockResolvedValue(authResponse);
+      http.post.mockResolvedValue(
+        operation === 'register'
+          ? { ...authResponse, status: 'authenticated' }
+          : authResponse,
+      );
       const broker = createAuthSessionBroker({
         http,
         sessionStore: store,
@@ -72,11 +76,16 @@ describe('auth session broker', () => {
             });
 
       expect(store.write).toHaveBeenCalledWith('refresh-token');
-      expect(result).toEqual({
+      const expectedSession = {
         user: authResponse.user,
         accessToken: 'access-token',
         accessTokenExpiresAt: 901_000,
-      });
+      };
+      expect(result).toEqual(
+        operation === 'register'
+          ? { kind: 'session', session: expectedSession }
+          : expectedSession,
+      );
       expect(JSON.stringify(result)).not.toContain('refresh-token');
       expect(http.post).toHaveBeenCalledWith(
         expect.objectContaining({

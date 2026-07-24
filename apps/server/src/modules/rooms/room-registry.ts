@@ -53,7 +53,7 @@ const DEFAULT_RECONNECT_GRACE_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_CODE_ATTEMPTS = 32;
 const DEFAULT_REQUEST_CACHE_MAX_ENTRIES = 4_096;
 const DEFAULT_MAX_ROOMS = 10_000;
-const DEFAULT_MAX_MEMBERS_PER_ROOM = 8;
+const DEFAULT_MAX_MEMBERS_PER_ROOM = 2;
 const DEFAULT_SCREEN_LEASE_TTL_MS = 15_000;
 const DEFAULT_SCREEN_BITRATE_MIN_BPS = 1_000_000;
 const DEFAULT_SCREEN_BITRATE_MAX_BPS = 20_000_000;
@@ -108,8 +108,8 @@ interface PendingNegotiationResetState extends PendingNegotiationResetSnapshot {
 
 interface ScreenLeaseState {
   readonly ownerUserId: string;
-  readonly connectionId: string;
-  readonly connectionEpoch: number;
+  connectionId: string;
+  connectionEpoch: number;
   readonly leaseId: string;
   readonly expiresAtMs: number;
   targetBitrateBps: number;
@@ -607,9 +607,7 @@ export function createRoomRegistry(
   };
 
   /** Media path remains creator + first joiner (1:1 WebRTC). */
-  const mediaParticipantIds = (
-    room: TemporaryRoom,
-  ): readonly string[] => {
+  const mediaParticipantIds = (room: TemporaryRoom): readonly string[] => {
     if (room.joinerUserId === null) return [room.creatorUserId];
     return [room.creatorUserId, room.joinerUserId];
   };
@@ -774,6 +772,17 @@ export function createRoomRegistry(
       ownerUserId: null,
       leaseId: null,
     };
+  };
+
+  const rebindLeaseToConnection = (
+    room: TemporaryRoom,
+    userId: string,
+    connection: PeerConnectionState,
+  ): void => {
+    const lease = room.screenLease;
+    if (lease === null || lease.ownerUserId !== userId) return;
+    lease.connectionId = connection.connectionId;
+    lease.connectionEpoch = connection.connectionEpoch;
   };
 
   const cancelGrace = (room: TemporaryRoom): void => {
@@ -970,12 +979,17 @@ export function createRoomRegistry(
       if (leaseIntent !== null) {
         intents.push(leaseIntent);
       }
+    } else {
+      expireLeaseIfDue(room);
     }
     const connection = allocateConnection(
       room,
       input.userId,
       input.connectionId,
     );
+    if (previous === undefined) {
+      rebindLeaseToConnection(room, input.userId, connection);
+    }
     cancelGrace(room);
     if (room.activeNegotiation?.status === 'completed') {
       room.activeNegotiation.expectedConnectionEpochByUserId.set(
@@ -1365,17 +1379,8 @@ export function createRoomRegistry(
 
     disconnect(input: DisconnectRoomInput) {
       const room = requireRoom(input.roomId);
-      const connection = requireCurrentConnection(room, input);
+      requireCurrentConnection(room, input);
       const intents: RoomIntent[] = [];
-      const leaseIntent = releaseLeaseForConnection(
-        room,
-        input.userId,
-        connection.connectionId,
-        connection.connectionEpoch,
-      );
-      if (leaseIntent !== null) {
-        intents.push(leaseIntent);
-      }
       room.connectionsByUserId.delete(input.userId);
       removeUserIdempotencyEntries(room, input.userId);
       invalidateIncompleteNegotiation(room, 'signaling_reset');
@@ -1487,10 +1492,7 @@ export function createRoomRegistry(
         reason: 'left',
       });
       scheduleGraceIfEmpty(room);
-      return mutationResult(
-        frozen({ room: snapshotRoom(room) }),
-        intents,
-      );
+      return mutationResult(frozen({ room: snapshotRoom(room) }), intents);
     },
 
     end(input: EndRoomInput) {

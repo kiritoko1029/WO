@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
+import {
+  PACKAGED_RENDERER_HOST,
+  PACKAGED_RENDERER_ORIGIN,
+  PACKAGED_RENDERER_SCHEME,
+} from './packaged-renderer-protocol.js';
+
 export interface CaptureSource {
   readonly id: string;
   readonly name: string;
@@ -93,7 +99,19 @@ export function createCaptureSourceBroker<Source extends CaptureSource>(
   return Object.freeze({
     replaceAvailable(webContentsId: number, sources: readonly Source[]) {
       assertWebContentsId(webContentsId);
-      const expiresAtMs = readNow(now) + tokenTtlMs;
+      const currentTimeMs = readNow(now);
+      const expiresAtMs = currentTimeMs + tokenTtlMs;
+      const previous = contexts.get(webContentsId);
+      const previousSelectedToken = previous?.selectedToken ?? null;
+      const previousSelectedEntry =
+        previousSelectedToken === null
+          ? undefined
+          : previous?.available.get(previousSelectedToken);
+      const reusableSelectedSourceId =
+        previousSelectedEntry !== undefined &&
+        previousSelectedEntry.expiresAtMs > currentTimeMs
+          ? previousSelectedEntry.source.id
+          : null;
       const available = new Map<string, TokenEntry<Source>>();
       const sourceIds = new Set<string>();
       const summaries = sources.map((source: Source) => {
@@ -105,7 +123,11 @@ export function createCaptureSourceBroker<Source extends CaptureSource>(
           throw new TypeError('Invalid capture source ID');
         }
         sourceIds.add(source.id);
-        const token = makeToken();
+        const token =
+          source.id === reusableSelectedSourceId &&
+          previousSelectedToken !== null
+            ? previousSelectedToken
+            : makeToken();
         if (!CAPTURE_TOKEN.test(token) || available.has(token)) {
           throw new TypeError('Invalid capture source token');
         }
@@ -113,7 +135,14 @@ export function createCaptureSourceBroker<Source extends CaptureSource>(
         available.set(token, { source, expiresAtMs });
         return Object.freeze({ token, name });
       });
-      contexts.set(webContentsId, { available, selectedToken: null });
+      const selectedToken =
+        reusableSelectedSourceId !== null &&
+        previousSelectedToken !== null &&
+        available.get(previousSelectedToken)?.source.id ===
+          reusableSelectedSourceId
+          ? previousSelectedToken
+          : null;
+      contexts.set(webContentsId, { available, selectedToken });
       return Object.freeze(summaries);
     },
     select(webContentsId: number, token: string) {
@@ -171,11 +200,27 @@ export interface DisplayCapturePolicy {
 
 export function captureSecurityOrigin(rendererEntry: string): string {
   const url = new URL(rendererEntry);
-  return url.protocol === 'file:' ? 'file://' : url.origin;
+  if (url.protocol === 'file:') return 'file://';
+  if (
+    url.protocol === `${PACKAGED_RENDERER_SCHEME}:` &&
+    url.hostname === PACKAGED_RENDERER_HOST &&
+    url.port === '' &&
+    url.username === '' &&
+    url.password === ''
+  ) {
+    return PACKAGED_RENDERER_ORIGIN;
+  }
+  return url.origin;
 }
 
 function canonicalDisplaySecurityOrigin(value: string): string | null {
   if (value === 'file://' || value === 'file:///') return 'file://';
+  if (
+    value === PACKAGED_RENDERER_ORIGIN ||
+    value === `${PACKAGED_RENDERER_ORIGIN}/`
+  ) {
+    return PACKAGED_RENDERER_ORIGIN;
+  }
   try {
     const url = new URL(value);
     if (

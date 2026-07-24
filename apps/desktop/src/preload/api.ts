@@ -120,13 +120,21 @@ function parseScreenPermission(input: unknown): ScreenPermissionSnapshot {
     'restricted',
     'unknown',
   ]);
+  const systemAudioModes = new Set([
+    'loopback',
+    'native-picker',
+    'unsupported',
+  ]);
   if (
-    keys.length !== 2 ||
+    keys.length !== 3 ||
     !keys.includes('status') ||
     !keys.includes('canOpenSettings') ||
+    !keys.includes('systemAudioMode') ||
     typeof input.status !== 'string' ||
     !statuses.has(input.status) ||
     typeof input.canOpenSettings !== 'boolean' ||
+    typeof input.systemAudioMode !== 'string' ||
+    !systemAudioModes.has(input.systemAudioMode) ||
     (input.canOpenSettings &&
       input.status !== 'denied' &&
       input.status !== 'restricted')
@@ -136,6 +144,8 @@ function parseScreenPermission(input: unknown): ScreenPermissionSnapshot {
   return Object.freeze({
     status: input.status as ScreenPermissionSnapshot['status'],
     canOpenSettings: input.canOpenSettings,
+    systemAudioMode:
+      input.systemAudioMode as ScreenPermissionSnapshot['systemAudioMode'],
   });
 }
 
@@ -185,7 +195,9 @@ async function invokeDesktop<Value>(
   return parseDesktopIpcEnvelope(envelope, parseValue);
 }
 
-function parseAuthRegisterResult(input: unknown): import('./types.js').AuthRegisterResult {
+function parseAuthRegisterResult(
+  input: unknown,
+): import('./types.js').AuthRegisterResult {
   if (!isRecord(input) || typeof input.kind !== 'string') {
     throw new TypeError('Invalid auth register result');
   }

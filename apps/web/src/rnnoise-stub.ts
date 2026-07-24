@@ -20,7 +20,8 @@ export class Rnnoise {
 }
 
 export class DenoiseState {
-  processFrame(_frame: Float32Array): number {
+  processFrame(frame: Float32Array): number {
+    void frame;
     throw new Error('RNNoise is not available in the web client');
   }
 

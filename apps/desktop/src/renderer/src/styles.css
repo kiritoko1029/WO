@@ -80,14 +80,8 @@
   color: var(--wo-text);
   background: var(--wo-bg);
   font-family:
-    'SF Pro Text',
-    'SF Pro Icons',
-    'Helvetica Neue',
-    Helvetica,
-    'PingFang SC',
-    'Microsoft YaHei',
-    Arial,
-    sans-serif;
+    'SF Pro Text', 'SF Pro Icons', 'Helvetica Neue', Helvetica, 'PingFang SC',
+    'Microsoft YaHei', Arial, sans-serif;
   font-synthesis: none;
   letter-spacing: 0;
   text-rendering: optimizeLegibility;
@@ -269,14 +263,8 @@ button:disabled {
   min-width: 0;
   color: var(--wo-text);
   font-family:
-    'SF Pro Display',
-    'SF Pro Icons',
-    'Helvetica Neue',
-    Helvetica,
-    'PingFang SC',
-    'Microsoft YaHei',
-    Arial,
-    sans-serif;
+    'SF Pro Display', 'SF Pro Icons', 'Helvetica Neue', Helvetica,
+    'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.015em;
@@ -308,14 +296,8 @@ button:disabled {
 .auth-panel h1 {
   margin: 18px 0 6px;
   font-family:
-    'SF Pro Display',
-    'SF Pro Icons',
-    'Helvetica Neue',
-    Helvetica,
-    'PingFang SC',
-    'Microsoft YaHei',
-    Arial,
-    sans-serif;
+    'SF Pro Display', 'SF Pro Icons', 'Helvetica Neue', Helvetica,
+    'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
   font-size: 28px;
   font-weight: 600;
   letter-spacing: -0.015em;
@@ -1005,14 +987,8 @@ button:disabled {
 .home-heading h1 {
   margin: 0 0 28px;
   font-family:
-    'SF Pro Display',
-    'SF Pro Icons',
-    'Helvetica Neue',
-    Helvetica,
-    'PingFang SC',
-    'Microsoft YaHei',
-    Arial,
-    sans-serif;
+    'SF Pro Display', 'SF Pro Icons', 'Helvetica Neue', Helvetica,
+    'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
   font-size: clamp(32px, 5vw, 40px);
   font-weight: 600;
   letter-spacing: -0.015em;
@@ -1234,7 +1210,8 @@ button:disabled {
 .room-header {
   color: var(--wo-stage-text);
   background: color-mix(in oklab, var(--wo-stage-bg) 70%, transparent);
-  border-bottom: 1px solid color-mix(in oklab, var(--wo-stage-border) 50%, transparent);
+  border-bottom: 1px solid
+    color-mix(in oklab, var(--wo-stage-border) 50%, transparent);
   backdrop-filter: blur(14px);
 }
 
@@ -1256,7 +1233,8 @@ button:disabled {
   background: var(--wo-warning);
   border-radius: 50%;
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--wo-warning) 22%, transparent);
-  transition: background-color var(--wo-dur) var(--wo-ease),
+  transition:
+    background-color var(--wo-dur) var(--wo-ease),
     box-shadow var(--wo-dur) var(--wo-ease);
 }
 
@@ -2069,9 +2047,46 @@ button:disabled {
 }
 
 .source-picker-footer {
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 8px;
   border-top: 1px solid var(--wo-border);
+}
+
+.source-audio-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.source-audio-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--wo-brand-500);
+}
+
+.source-audio-option span {
+  display: grid;
+  min-width: 0;
+}
+
+.source-audio-option strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.source-audio-option small {
+  color: var(--wo-text-subtle);
+  font-size: 11px;
+}
+
+.source-picker-footer-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .source-cancel-button,
@@ -2349,6 +2364,14 @@ button:disabled {
   .source-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .source-picker-footer {
+    align-items: flex-end;
+  }
+
+  .source-audio-option small {
+    display: none;
+  }
 }
 
 .connection-mode {
@@ -2362,11 +2385,7 @@ button:disabled {
   padding: 28px;
   overflow: auto;
   background:
-    radial-gradient(
-      circle at 30% 20%,
-      var(--wo-brand-50) 0%,
-      transparent 55%
-    ),
+    radial-gradient(circle at 30% 20%, var(--wo-brand-50) 0%, transparent 55%),
     var(--wo-bg);
 }
 

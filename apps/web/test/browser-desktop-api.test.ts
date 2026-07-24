@@ -33,6 +33,46 @@ function memoryStorage(initial?: string) {
 }
 
 describe('browser DesktopApi', () => {
+  test('accepts the authenticated registration discriminator and stores the session', async () => {
+    const storage = memoryStorage();
+    const fetch = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          user: USER,
+          accessToken: 'access-register',
+          refreshToken: 'refresh-register',
+          accessTokenExpiresInSeconds: 900,
+          status: 'authenticated',
+        },
+        '/v1/auth/register',
+        201,
+      ),
+    );
+    const api = createBrowserDesktopApi({
+      origin: ORIGIN,
+      storage,
+      fetch: fetch as typeof globalThis.fetch,
+      now: () => 1_000,
+      displayCaptureSupported: true,
+    });
+
+    await expect(
+      api.auth.register({
+        email: 'alice@example.test',
+        password: 'correct-horse-battery-staple',
+        displayName: 'Alice',
+      }),
+    ).resolves.toEqual({
+      kind: 'session',
+      session: {
+        user: USER,
+        accessToken: 'access-register',
+        accessTokenExpiresAt: 901_000,
+      },
+    });
+    expect(storage.getItem('wo.web.refresh-token.v1')).toBe('refresh-register');
+  });
+
   test('stores and rotates refresh tokens only through tab storage', async () => {
     const storage = memoryStorage();
     const fetch = vi
@@ -236,6 +276,7 @@ describe('browser DesktopApi', () => {
     await expect(supported.capture.permission()).resolves.toEqual({
       status: 'not-determined',
       canOpenSettings: false,
+      systemAudioMode: 'native-picker',
     });
 
     const unsupported = createBrowserDesktopApi({
@@ -248,6 +289,7 @@ describe('browser DesktopApi', () => {
     await expect(unsupported.capture.permission()).resolves.toEqual({
       status: 'restricted',
       canOpenSettings: false,
+      systemAudioMode: 'unsupported',
     });
   });
 });

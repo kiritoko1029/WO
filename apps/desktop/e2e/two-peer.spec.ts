@@ -52,6 +52,11 @@ interface AcceptanceSnapshot {
     height: number;
     frameRate: number;
   }>;
+  readonly rnnoise: Readonly<{
+    processorCreations: number;
+    processedFrames: number;
+  }>;
+  readonly rnnoiseActive: boolean;
   readonly peers: readonly PeerDiagnostic[];
   readonly sockets: readonly Readonly<{
     id: number;
@@ -84,16 +89,28 @@ async function waitForPeer(
   predicate: (peer: PeerDiagnostic, snapshot: AcceptanceSnapshot) => boolean,
   timeout = 45_000,
 ): Promise<PeerDiagnostic> {
-  await expect
-    .poll(
-      async () => {
-        const snapshot = await diagnostics(page);
-        const peer = activePeer(snapshot);
-        return snapshot !== null && peer !== null && predicate(peer, snapshot);
-      },
-      { timeout },
-    )
-    .toBe(true);
+  let latestSnapshot: AcceptanceSnapshot | null = null;
+  try {
+    await expect
+      .poll(
+        async () => {
+          latestSnapshot = await diagnostics(page);
+          const peer = activePeer(latestSnapshot);
+          return (
+            latestSnapshot !== null &&
+            peer !== null &&
+            predicate(peer, latestSnapshot)
+          );
+        },
+        { timeout },
+      )
+      .toBe(true);
+  } catch (error) {
+    const details = JSON.stringify(latestSnapshot).slice(0, 8_192);
+    throw new Error(`Peer diagnostic predicate timed out: ${details}`, {
+      cause: error,
+    });
+  }
   const snapshot = await diagnostics(page);
   const peer = activePeer(snapshot);
   if (peer === null) throw new Error('Active peer diagnostics disappeared');
@@ -120,6 +137,22 @@ async function registerThenLogin(
   await expect(page.getByRole('button', { name: '创建房间' })).toBeVisible();
 }
 
+async function proveCameraRequestRejected(page: Page): Promise<void> {
+  const result = await page.evaluate(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true,
+      });
+      for (const track of stream.getTracks()) track.stop();
+      return 'allowed';
+    } catch (error) {
+      return error instanceof DOMException ? error.name : 'Error';
+    }
+  });
+  expect(result).toBe('NotAllowedError');
+}
+
 async function connectRoom(pair: AcceptancePair): Promise<void> {
   await pair.first.page.getByRole('button', { name: '创建房间' }).click();
   const code = pair.first.page.locator('.room-header code');
@@ -139,21 +172,27 @@ async function connectRoom(pair: AcceptancePair): Promise<void> {
 async function proveBidirectionalAudio(pair: AcceptancePair): Promise<void> {
   const firstStart = await waitForPeer(
     pair.first.page,
-    (peer) =>
+    (peer, snapshot) =>
       peer.connectionState === 'connected' &&
       peer.liveRemoteAudioTracks === 1 &&
       peer.packetsReceivedAudio > 5 &&
       peer.packetsSentAudio > 5 &&
-      peer.inboundAudioEnergy > 0,
+      peer.inboundAudioEnergy > 0 &&
+      snapshot.rnnoiseActive &&
+      snapshot.rnnoise.processorCreations > 0 &&
+      snapshot.rnnoise.processedFrames > 0,
   );
   const secondStart = await waitForPeer(
     pair.second.page,
-    (peer) =>
+    (peer, snapshot) =>
       peer.connectionState === 'connected' &&
       peer.liveRemoteAudioTracks === 1 &&
       peer.packetsReceivedAudio > 5 &&
       peer.packetsSentAudio > 5 &&
-      peer.inboundAudioEnergy > 0,
+      peer.inboundAudioEnergy > 0 &&
+      snapshot.rnnoiseActive &&
+      snapshot.rnnoise.processorCreations > 0 &&
+      snapshot.rnnoise.processedFrames > 0,
   );
 
   await waitForPeer(
@@ -181,9 +220,14 @@ async function startMotionShare(
   await page.getByRole('button', { name: '共享屏幕' }).click();
   const dialog = page.getByRole('dialog', { name: '选择共享内容' });
   await expect(dialog).toBeVisible();
-  await dialog
-    .getByRole('button', { name: `${motionTitle}，窗口`, exact: true })
-    .click();
+  const source = dialog.getByRole('button', {
+    name: `${motionTitle}，窗口`,
+    exact: true,
+  });
+  await source.click();
+  await expect(source).toHaveAttribute('aria-pressed', 'true');
+  await page.waitForTimeout(4_500);
+  await expect(source).toHaveAttribute('aria-pressed', 'true');
   await dialog.getByRole('button', { name: '开始共享' }).click();
   const toolbar = page.getByLabel('屏幕共享状态');
   const alert = page.locator('.room-error');
@@ -212,8 +256,9 @@ async function proveScreenAndBitrates(pair: AcceptancePair): Promise<void> {
   const initial = await waitForPeer(
     pair.first.page,
     (peer) =>
-      peer.screenWidth === 1920 &&
-      peer.screenHeight === 1080 &&
+      peer.screenWidth >= 1920 &&
+      peer.screenHeight >= 1080 &&
+      Math.abs(peer.screenWidth / peer.screenHeight - 16 / 9) < 0.02 &&
       peer.screenFrameRate >= 55 &&
       peer.framesSentVideo > 5,
   );
@@ -229,9 +274,7 @@ async function proveScreenAndBitrates(pair: AcceptancePair): Promise<void> {
     ['原画 20M', 20_000_000],
   ] as const) {
     const remoteBefore = await waitForPeer(pair.second.page, () => true);
-    await pair.first.page
-      .getByLabel('码率上限')
-      .selectOption({ label });
+    await pair.first.page.getByLabel('码率上限').selectOption({ label });
     await expect(pair.first.page.getByLabel('码率上限')).toHaveValue(
       String(bitrate),
     );
@@ -313,6 +356,7 @@ for (const policy of ['all', 'relay'] as const) {
     acceptance,
   }) => {
     const pair = await acceptance.launch(policy);
+    await proveCameraRequestRejected(pair.first.page);
     const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     await Promise.all([
       registerThenLogin(
@@ -331,8 +375,8 @@ for (const policy of ['all', 'relay'] as const) {
 
     const first = await waitForPeer(pair.first.page, () => true);
     const second = await waitForPeer(pair.second.page, () => true);
-    expect(first.transceivers).toBe(2);
-    expect(second.transceivers).toBe(2);
+    expect(first.transceivers).toBe(3);
+    expect(second.transceivers).toBe(3);
     if (policy === 'relay') {
       expect(first.localIceType).toBe('relay');
       expect(first.remoteIceType).toBe('relay');

@@ -238,9 +238,7 @@ export function AccountSecurityPanel() {
                       type="password"
                       value={emailPassword}
                       autoFocus
-                      onChange={(event) =>
-                        setEmailPassword(event.target.value)
-                      }
+                      onChange={(event) => setEmailPassword(event.target.value)}
                     />
                   </label>
                   <label>

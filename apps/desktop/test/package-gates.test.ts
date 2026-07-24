@@ -259,6 +259,8 @@ async function makeMacReleasePackage(): Promise<string> {
         NSMicrophoneUsageDescription: 'WO uses the microphone for voice calls.',
         NSScreenCaptureUsageDescription:
           'WO uses screen capture when you share your desktop.',
+        NSAudioCaptureUsageDescription:
+          'WO captures system audio only when you explicitly enable it while sharing.',
       }),
     );
     await createPackage(source, join(resources, 'app.asar'));
@@ -384,6 +386,7 @@ function runMacApplicationPolicyFixture(
   packageDirectory: string,
   mode:
     | 'metadata'
+    | 'system-audio-metadata'
     | 'runtime'
     | 'entitlements'
     | 'nested-architecture'
@@ -403,6 +406,18 @@ function runMacApplicationPolicyFixture(
         join(process.env.PACKAGE_DIRECTORY, 'mac', 'WO.app', 'Contents', 'Info.plist'),
         JSON.stringify({ CFBundleIdentifier: 'cn.attacker.desktop' }),
       );
+    }
+    if (process.env.POLICY_MODE === 'system-audio-metadata') {
+      const infoPath = join(
+        process.env.PACKAGE_DIRECTORY,
+        'mac',
+        'WO.app',
+        'Contents',
+        'Info.plist',
+      );
+      const info = JSON.parse(await readFile(infoPath, 'utf8'));
+      delete info.NSAudioCaptureUsageDescription;
+      await writeFile(infoPath, JSON.stringify(info));
     }
     if (process.env.POLICY_MODE === 'framework-alias') {
       const framework = join(
@@ -710,6 +725,93 @@ describe('desktop platform package command', () => {
 });
 
 describe('desktop production package verifier', () => {
+  it('retries a resource-busy DMG detach before force-cleaning its temporary mount', () => {
+    const evaluation = `
+      import { pathToFileURL } from 'node:url';
+      const verifier = await import(pathToFileURL(process.env.VERIFIER_SCRIPT).href);
+      const calls = [];
+      await verifier.detachMacDiskImage(
+        '/tmp/wo-dmg-mount-test',
+        async (executable, args) => {
+          calls.push({ executable, args });
+          if (!args.includes('-force')) {
+            throw new Error('hdiutil exited with code 16');
+          }
+          return { stdout: '', stderr: '' };
+        },
+        {},
+        async () => {},
+      );
+      process.stdout.write(JSON.stringify(calls));
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--eval', evaluation],
+      {
+        cwd: desktopDirectory,
+        encoding: 'utf8',
+        env: { ...process.env, VERIFIER_SCRIPT: verifyPackageScript },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    const calls = JSON.parse(result.stdout as string) as Array<{
+      executable: string;
+      args: string[];
+    }>;
+    expect(calls).toHaveLength(5);
+    expect(calls.slice(0, 4)).toEqual(
+      Array.from({ length: 4 }, () => ({
+        executable: '/usr/bin/hdiutil',
+        args: ['detach', '/tmp/wo-dmg-mount-test'],
+      })),
+    );
+    expect(calls[4]).toEqual({
+      executable: '/usr/bin/hdiutil',
+      args: ['detach', '-force', '/tmp/wo-dmg-mount-test'],
+    });
+  });
+
+  it('does not retry a deterministic DMG detach failure', () => {
+    const evaluation = `
+      import { pathToFileURL } from 'node:url';
+      const verifier = await import(pathToFileURL(process.env.VERIFIER_SCRIPT).href);
+      let calls = 0;
+      try {
+        await verifier.detachMacDiskImage(
+          '/tmp/wo-dmg-mount-test',
+          async () => {
+            calls += 1;
+            throw new Error('hdiutil exited with code 1');
+          },
+          {},
+          async () => {},
+        );
+        process.exitCode = 2;
+      } catch (error) {
+        process.stdout.write(JSON.stringify({
+          calls,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--eval', evaluation],
+      {
+        cwd: desktopDirectory,
+        encoding: 'utf8',
+        env: { ...process.env, VERIFIER_SCRIPT: verifyPackageScript },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout as string)).toEqual({
+      calls: 1,
+      message: 'hdiutil exited with code 1',
+    });
+  });
+
   it('accepts a clean, explicitly marked unsigned-development app.asar', async () => {
     const packageDirectory = await makePackage();
     const result = runVerifier([
@@ -1117,6 +1219,7 @@ describe('desktop production package verifier', () => {
 
   it.each([
     ['metadata', /Info\.plist|microphone|screen capture|bundle/iu],
+    ['system-audio-metadata', /Info\.plist|usage metadata/iu],
     ['runtime', /hardened|runtime/iu],
     ['entitlements', /entitlement|audio-input/iu],
     ['nested-architecture', /architecture|crashpad/iu],
@@ -1321,7 +1424,7 @@ describe('desktop production package verifier', () => {
     >;
     expect(environment.PATH).toBe('safe-path');
     expect(environment.WO_PACKAGE_SMOKE).toBe('1');
-    expect(environment.WO_API_ORIGIN).toBe('https://localhost');
+    expect(environment.WO_API_ORIGIN).toBe('https://127.0.0.1:1');
     expect(JSON.stringify(environment)).not.toMatch(
       /TOP_SECRET|WIN_CSC|APPLE_|INTERNAL_TOKEN|HTTPS_PROXY/iu,
     );
@@ -1633,6 +1736,30 @@ describe('desktop production package verifier', () => {
       /certificate verification bypass/iu,
     ],
     [
+      'certificate callbacks that unconditionally accept',
+      'out/main/tls-callback.js',
+      'session.defaultSession.setCertificateVerifyProc((_request, callback) => callback(0));',
+      /certificate verification bypass/iu,
+    ],
+    [
+      'global certificate-error ignore policies',
+      'out/main/tls-ignore.js',
+      'session.defaultSession.setIgnoreCertificateErrors(true);',
+      /certificate verification bypass/iu,
+    ],
+    [
+      'hostname-only certificate verifiers without explicit chain validation',
+      'out/main/tls-hostname-only.js',
+      `
+        const explicitExtraCa = process.env.WO_EXTRA_CA_CERTS;
+        const fixedExtraCaHostname = 'api.example.test';
+        session.defaultSession.setCertificateVerifyProc((request, callback) => {
+          callback(request.hostname === fixedExtraCaHostname ? 0 : -3);
+        });
+      `,
+      /certificate verifier/iu,
+    ],
+    [
       'integration certificate verifiers',
       'out/main/integration-tls.js',
       'const integrationCertificateVerifier = createPinnedVerifier();',
@@ -1691,6 +1818,49 @@ describe('desktop production package verifier', () => {
 
     expect(result.status).not.toBe(0);
     expect(commandOutput(result)).toMatch(expectedMessage);
+  });
+
+  it('allows a guarded fixed-host extra-CA verifier in the production package', async () => {
+    const packageDirectory = await makePackage({
+      files: {
+        'out/main/extra-ca.js': `
+          const configuredExtraCas = loadPem(process.env.WO_EXTRA_CA_CERTS);
+          if (configuredExtraCas.length === 0) {
+            throw new TypeError('At least one explicit extra CA is required');
+          }
+          if (configuredApiHostname.length === 0) {
+            throw new TypeError('At least one fixed extra CA hostname is required');
+          }
+          function verifyCertificateChain(certificate, configuredRoot, hostname) {
+            const leaf = parseCertificate(certificate);
+            return leaf.checkHost(hostname) &&
+              leaf.checkIssued(configuredRoot) &&
+              leaf.verify(configuredRoot.publicKey);
+          }
+          if (configuredExtraCas.length > 0) {
+            session.defaultSession.setCertificateVerifyProc((request, callback) => {
+              const fixedHostname = request.hostname === configuredApiHostname;
+              const authorityInvalid =
+                request.verificationResult === 'ERR_CERT_AUTHORITY_INVALID';
+              const chainValid = verifyCertificateChain(
+                request.certificate,
+                configuredExtraCas[0],
+                request.hostname,
+              );
+              callback(fixedHostname && authorityInvalid && chainValid ? 0 : -3);
+            });
+          }
+        `,
+      },
+    });
+    const result = runVerifier([
+      `--package-dir=${packageDirectory}`,
+      '--platform=win',
+      '--artifact-class=unsigned-development',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(commandOutput(result)).toMatch(/DESKTOP_PACKAGE_VERIFIED/u);
   });
 
   it('scans private-key files outside app.asar', async () => {

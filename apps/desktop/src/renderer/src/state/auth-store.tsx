@@ -37,9 +37,7 @@ interface AuthState {
   verifyEmail(input: AuthVerifyEmailBody): Promise<boolean>;
   resendVerification(input: AuthResendVerificationBody): Promise<boolean>;
   changePassword(input: AuthChangePasswordBody): Promise<boolean>;
-  requestEmailChange(
-    input: AuthRequestEmailChangeBody,
-  ): Promise<string | null>;
+  requestEmailChange(input: AuthRequestEmailChangeBody): Promise<string | null>;
   confirmEmailChange(input: AuthConfirmEmailChangeBody): Promise<boolean>;
   logout(): Promise<boolean>;
   clearError(): void;

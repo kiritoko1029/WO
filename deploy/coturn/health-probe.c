@@ -96,8 +96,9 @@ int main(int argc, char **argv) {
 
   char *client_arguments[] = {
       "turnutils_uclient", "-u", username, "-w", credential,
-      "-Y",                "alloc", "-I", "-m", "1",
-      "-n",                "1",     "-p", argv[2], "127.0.0.1",
+      "-Y",                "alloc", "-I", "-c", "--no-even-port",
+      "-m",                "1",     "-n", "1",  "-p",
+      argv[2],             "127.0.0.1",
       NULL};
   execv("/usr/bin/turnutils_uclient", client_arguments);
   OPENSSL_cleanse(credential, sizeof(credential));

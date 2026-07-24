@@ -30,6 +30,7 @@ import {
   p2pBroadcastEnvelopeSchema,
   p2pOutboundResponseSchema,
   p2pRequestEnvelopeSchema,
+  parseAuthenticatedAuthResponse,
   peerReadyBroadcastSchema,
   protocolErrorResponseSchema,
   producerCreatePayloadSchema,
@@ -1120,6 +1121,13 @@ describe('HTTP email and password authentication contracts', () => {
       refreshToken: 'refresh-token',
       accessTokenExpiresInSeconds: 900,
     };
+
+    expect(
+      parseAuthenticatedAuthResponse({
+        ...response,
+        status: 'authenticated',
+      }),
+    ).toEqual(response);
 
     for (const schema of [
       authRegisterResponseSchema,

@@ -82,7 +82,10 @@ describe('download routes', () => {
     writeFileSync(join(root, 'secret.txt'), 'private');
     writeFileSync(join(root, 'payload.sh'), 'evil');
 
-    const txt = await app.inject({ method: 'GET', url: '/download/secret.txt' });
+    const txt = await app.inject({
+      method: 'GET',
+      url: '/download/secret.txt',
+    });
     const sh = await app.inject({ method: 'GET', url: '/download/payload.sh' });
 
     expect(txt.statusCode).toBe(404);

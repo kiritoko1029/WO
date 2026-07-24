@@ -338,11 +338,11 @@ const desktop = {
     login: vi.fn(),
     refresh: vi.fn(),
     logout: vi.fn(),
-      verifyEmail: vi.fn(),
-      resendVerification: vi.fn(),
-      changePassword: vi.fn(),
-      requestEmailChange: vi.fn(),
-      confirmEmailChange: vi.fn(),
+    verifyEmail: vi.fn(),
+    resendVerification: vi.fn(),
+    changePassword: vi.fn(),
+    requestEmailChange: vi.fn(),
+    confirmEmailChange: vi.fn(),
   },
   realtime: { issueTicket: vi.fn() },
   capture: {
@@ -358,6 +358,7 @@ const desktop = {
     permission: vi.fn().mockResolvedValue({
       status: 'granted',
       canOpenSettings: false,
+      systemAudioMode: 'loopback',
     }),
     openSettings: vi.fn().mockResolvedValue(undefined),
   },
@@ -374,11 +375,28 @@ function deferred<T>() {
 }
 
 function audioTrack() {
+  const listeners = new Set<() => void>();
+  let readyState: MediaStreamTrackState = 'live';
   return {
     kind: 'audio',
     enabled: true,
-    stop: vi.fn(),
-  } as unknown as MediaStreamTrack;
+    get readyState() {
+      return readyState;
+    },
+    stop: vi.fn(() => {
+      readyState = 'ended';
+    }),
+    addEventListener: vi.fn((_type: string, listener: () => void) => {
+      listeners.add(listener);
+    }),
+    removeEventListener: vi.fn((_type: string, listener: () => void) => {
+      listeners.delete(listener);
+    }),
+    emitEnded() {
+      readyState = 'ended';
+      for (const listener of [...listeners]) listener();
+    },
+  } as unknown as MediaStreamTrack & { emitEnded(): void };
 }
 
 function videoTrack() {
@@ -684,7 +702,7 @@ describe('realtime room gateway', () => {
     expect(gateway.getCallSession(room.roomId)).toBeNull();
   });
 
-  it('joins with a six-digit code and updates snapshots from validated peer broadcasts', async () => {
+  it('distinguishes a transient peer disconnect from an explicit leave', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -715,19 +733,34 @@ describe('realtime room gateway', () => {
     );
     expect(snapshots.at(-1)).toMatchObject({
       roomId: 'room-2',
-      connectionStatus: 'waiting',
+      connectionStatus: 'reconnecting',
       participants: [
         expect.objectContaining({ isSelf: true, online: true }),
+        expect.objectContaining({ userId: 'user-2', online: false }),
       ],
     });
-    // Departed peer is removed (not kept offline) so the UI shows "等待加入".
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'event-2' as never,
+      type: 'peer.left',
+      payload: {
+        roomId: 'room-2' as never,
+        userId: 'user-2' as never,
+        reason: 'left',
+      },
+    });
+
+    expect(snapshots.at(-1)).toMatchObject({
+      roomId: 'room-2',
+      connectionStatus: 'waiting',
+      participants: [expect.objectContaining({ isSelf: true, online: true })],
+    });
     expect(
       (snapshots.at(-1) as { participants: readonly { userId: string }[] })
         .participants,
     ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ userId: 'user-2' }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ userId: 'user-2' })]),
     );
   });
 
@@ -1158,7 +1191,7 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
-  it('returns an initial negotiation to waiting when the peer leaves before the call connects', async () => {
+  it('keeps the transport while a peer reconnects before the call connects', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -1167,11 +1200,7 @@ describe('realtime room gateway', () => {
     });
     const room = await gateway.createRoom('access-token');
     const firstPeer = peerConnectionFactory();
-    const secondPeer = peerConnectionFactory();
-    const factory = vi
-      .fn()
-      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
-      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
+    const factory = vi.fn(() => firstPeer.pc as unknown as PeerConnectionLike);
     const call = createCallController({
       room,
       gateway,
@@ -1206,9 +1235,9 @@ describe('realtime room gateway', () => {
       },
     });
 
-    expect(call.getSnapshot().status).toBe('waiting');
-    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
-    expect(firstPeer.pc.close).toHaveBeenCalledOnce();
+    expect(call.getSnapshot().status).toBe('reconnecting');
+    expect(factory).toHaveBeenCalledOnce();
+    expect(firstPeer.pc.close).not.toHaveBeenCalled();
     await call.cleanup();
   });
 
@@ -1550,6 +1579,90 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
+  it('preserves the connected transport and media across a transient peer disconnect', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.joinRoom('access-token', '123456');
+    const microphone = audioTrack();
+    const remoteScreenTrack = videoTrack();
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(microphone)),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    await call.start();
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'offer-before-transient-disconnect' as never,
+      type: 'webrtc.offer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'negotiation-before-transient-disconnect' as never,
+        connectionEpoch: 10,
+        description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      },
+    });
+    await vi.waitFor(() => expect(peer.pc.createAnswer).toHaveBeenCalledOnce());
+    peer.pc.connectionState = 'connected';
+    peer.pc.iceConnectionState = 'connected';
+    peer.pc.emit('connectionstatechange', {});
+    peer.pc.emit('track', { track: remoteScreenTrack });
+    await vi.waitFor(() =>
+      expect(call.getSnapshot()).toMatchObject({
+        status: 'connected',
+        remoteScreenTrack,
+      }),
+    );
+    expect(peer.transceivers[0]!.sender.track).toBe(microphone);
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'transient-peer-disconnect' as never,
+      type: 'peer.left',
+      payload: {
+        roomId: room.roomId as never,
+        userId: 'user-2' as never,
+        reason: 'disconnected',
+      },
+    });
+
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'reconnecting',
+      remoteScreenTrack,
+    });
+    expect(peer.factory).toHaveBeenCalledOnce();
+    expect(peer.pc.close).not.toHaveBeenCalled();
+    expect(peer.transceivers[0]!.sender.track).toBe(microphone);
+    expect(microphone.stop).not.toHaveBeenCalled();
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'ready-after-transient-disconnect' as never,
+      type: 'peer.ready',
+      payload: {
+        roomId: room.roomId as never,
+        peer: { userId: 'user-2' as never, displayName: 'Peer', ready: true },
+      },
+    });
+
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('connected'));
+    expect(call.getSnapshot().remoteScreenTrack).toBe(remoteScreenTrack);
+    expect(peer.factory).toHaveBeenCalledOnce();
+    expect(peer.pc.close).not.toHaveBeenCalled();
+    expect(peer.transceivers[0]!.sender.track).toBe(microphone);
+    expect(microphone.stop).not.toHaveBeenCalled();
+    await call.cleanup();
+  });
+
   it('completes a paired offer, answer and answer-applied flow with both microphones attached', async () => {
     const bus = pairedSignaling();
     const creatorGateway = createRealtimeRoomGateway({
@@ -1673,9 +1786,11 @@ describe('realtime room gateway', () => {
       room: joinerRoom,
       gateway: joinerGateway,
       mediaDevices: {
-        getUserMedia: vi.fn().mockRejectedValue(
-          Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
-        ),
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+          ),
         enumerateDevices: vi.fn().mockResolvedValue([]),
       } as unknown as MediaDevices,
       createPeerConnection: joinerPeer.factory,
@@ -2065,6 +2180,206 @@ describe('realtime room gateway', () => {
             'server-reset-negotiation',
       ),
     ).toBeDefined();
+    await call.cleanup();
+  });
+
+  it('reattaches screen video and system audio when the transport is rebuilt', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const microphone = audioTrack();
+    const screenTrack = videoTrack();
+    const systemAudioTrack = audioTrack();
+    const firstPeer = peerConnectionFactory();
+    const secondPeer = peerConnectionFactory();
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(microphone)),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+        getDisplayMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [screenTrack, systemAudioTrack],
+          getVideoTracks: () => [screenTrack],
+          getAudioTracks: () => [systemAudioTrack],
+        }),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+    });
+    await call.start();
+    await call.prepareScreenShare();
+    await call.selectScreenSource('00000000-0000-4000-8000-000000000001');
+    call.setScreenSystemAudioEnabled(true);
+    await call.startScreenShare();
+    expect(firstPeer.transceivers[2]!.sender.track).toBe(screenTrack);
+    expect(firstPeer.transceivers[1]!.sender.track).toBe(systemAudioTrack);
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'reset-active-screen-share' as never,
+      type: 'webrtc.negotiationReset',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'reset-active-screen-share' as never,
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(call.getSnapshot()).toMatchObject({
+        screenState: 'sharing',
+        localScreenTrack: screenTrack,
+      }),
+    );
+    expect(firstPeer.pc.close).toHaveBeenCalledOnce();
+    expect(secondPeer.transceivers[0]!.sender.track).toBe(microphone);
+    expect(secondPeer.transceivers[2]!.sender.track).toBe(screenTrack);
+    expect(secondPeer.transceivers[1]!.sender.track).toBe(systemAudioTrack);
+    expect(screenTrack.stop).not.toHaveBeenCalled();
+    expect(systemAudioTrack.stop).not.toHaveBeenCalled();
+    expect(microphone.stop).not.toHaveBeenCalled();
+    await call.cleanup();
+  });
+
+  it('reattaches a joiner screen and system audio after reset offer maps new senders', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.joinRoom('access-token', '123456');
+    const baseRequest = client.request.getMockImplementation() as (
+      type: string,
+      payload?: unknown,
+    ) => Promise<unknown>;
+    client.request.mockImplementation(
+      async (type: string, payload?: unknown) => {
+        if (type !== 'screen.acquire' && type !== 'screen.renew') {
+          return baseRequest(type, payload);
+        }
+        return {
+          version: PROTOCOL_VERSION,
+          requestId: 'joiner-screen-request',
+          type: `${type}.ack`,
+          payload: {
+            ok: true,
+            data: {
+              lease: {
+                roomId: room.roomId,
+                leaseId: 'joiner-screen-lease',
+                holderId: user.userId,
+                expiresAt: new Date(Date.now() + 15_000).toISOString(),
+              },
+            },
+          },
+        };
+      },
+    );
+    const microphone = audioTrack();
+    const screenTrack = videoTrack();
+    const systemAudioTrack = audioTrack();
+    const firstPeer = peerConnectionFactory();
+    const secondPeer = peerConnectionFactory();
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(microphone)),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+        getDisplayMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [screenTrack, systemAudioTrack],
+          getVideoTracks: () => [screenTrack],
+          getAudioTracks: () => [systemAudioTrack],
+        }),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+    });
+    await call.start();
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'joiner-initial-screen-offer' as never,
+      type: 'webrtc.offer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'joiner-initial-screen-offer' as never,
+        connectionEpoch: 10,
+        description: {
+          type: 'offer',
+          sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(firstPeer.transceivers[0]!.sender.track).toBe(microphone),
+    );
+    await call.prepareScreenShare();
+    await call.selectScreenSource('00000000-0000-4000-8000-000000000001');
+    call.setScreenSystemAudioEnabled(true);
+    await call.startScreenShare();
+    expect(firstPeer.transceivers[2]!.sender.track).toBe(screenTrack);
+    expect(firstPeer.transceivers[1]!.sender.track).toBe(systemAudioTrack);
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'reset-active-joiner-screen-share' as never,
+      type: 'webrtc.negotiationReset',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'reset-active-joiner-screen-share' as never,
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+    expect(firstPeer.pc.close).toHaveBeenCalledOnce();
+    expect(secondPeer.transceivers[2]!.sender.track).toBeNull();
+    expect(secondPeer.transceivers[1]!.sender.track).toBeNull();
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'joiner-screen-offer-after-reset' as never,
+      type: 'webrtc.offer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'reset-active-joiner-screen-share' as never,
+        connectionEpoch: 11,
+        description: {
+          type: 'offer',
+          sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+        },
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(secondPeer.transceivers[2]!.sender.track).toBe(screenTrack),
+    );
+    expect(secondPeer.transceivers[1]!.sender.track).toBe(systemAudioTrack);
+    expect(secondPeer.transceivers[0]!.sender.track).toBe(microphone);
+    expect(secondPeer.pc.createAnswer).toHaveBeenCalledOnce();
+    expect(secondPeer.pc.createOffer).not.toHaveBeenCalled();
+    expect(call.getSnapshot()).toMatchObject({
+      screenState: 'sharing',
+      localScreenTrack: screenTrack,
+    });
+    expect(screenTrack.stop).not.toHaveBeenCalled();
+    expect(systemAudioTrack.stop).not.toHaveBeenCalled();
+    expect(microphone.stop).not.toHaveBeenCalled();
     await call.cleanup();
   });
 
@@ -2884,6 +3199,7 @@ describe('realtime room gateway', () => {
         permission: vi.fn().mockResolvedValue({
           status: 'denied',
           canOpenSettings: true,
+          systemAudioMode: 'unsupported',
         }),
         openSettings,
       },
@@ -2909,7 +3225,11 @@ describe('realtime room gateway', () => {
       code: 'SCREEN_PERMISSION_DENIED',
     });
     expect(call.getSnapshot()).toMatchObject({
-      screenPermission: { status: 'denied', canOpenSettings: true },
+      screenPermission: {
+        status: 'denied',
+        canOpenSettings: true,
+        systemAudioMode: 'unsupported',
+      },
       screenError: '需要在系统设置中允许屏幕录制',
     });
     expect(

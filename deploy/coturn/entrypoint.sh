@@ -56,8 +56,19 @@ printf '%s\n' \
   "pkey=$runtime_tls_key" >> "$runtime_config"
 chmod 600 "$runtime_config" "$runtime_tls_key"
 chmod 400 "$runtime_tls_cert"
-chown 65534:65533 "$runtime_config" "$runtime_tls_cert" "$runtime_tls_key"
+chown 65534:65533 \
+  "$runtime_config" \
+  "$runtime_tls_cert" \
+  "$runtime_tls_key" \
+  /run/wo-turn
 unset turn_secret
 
-sed -i 's/^nobody:x:65534:65534:/nobody:x:65534:65533:/' /etc/passwd
-exec su -s /bin/sh nobody -c 'exec turnserver -c /run/wo-turn/turnserver.conf'
+exec /bin/setpriv \
+  --reuid=65534 \
+  --regid=65533 \
+  --clear-groups \
+  --no-new-privs \
+  --bounding-set=-all \
+  --inh-caps=-all \
+  --ambient-caps=-all \
+  /usr/bin/turnserver -c /run/wo-turn/turnserver.conf

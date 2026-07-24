@@ -5,7 +5,7 @@ export const MAX_SAMPLE_GAP_MS = 2_000;
 export const MAX_WINDOW_MS = 2_500;
 export const TARGET_WIDTH = 1_920;
 export const TARGET_HEIGHT = 1_080;
-export const BITRATE_TARGETS = Object.freeze(['auto', 2, 4, 6, 8]);
+export const BITRATE_TARGETS = Object.freeze(['auto', 5, 10, 20]);
 
 const SECRET_PATTERN =
   /(?:\b(?:access|refresh)?[_-]?token\b|\bpassword\b|\bcredential\b|\b(?:\d{1,3}\.){3}\d{1,3}\b|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/iu;
@@ -133,9 +133,8 @@ function stableTransport(samples) {
       typeof first?.peerConnectionId === 'string' &&
       first.peerConnectionId.length > 0 &&
       Number.isSafeInteger(first.transceiverCount) &&
-      first.transceiverCount === 2 &&
-      typeof first.screenMid === 'string' &&
-      first.screenMid.length > 0 &&
+      first.transceiverCount === 3 &&
+      first.screenMid === '2' &&
       Number.isSafeInteger(first.negotiationCount) &&
       invalid.length === 0,
   };
@@ -221,24 +220,24 @@ function bitrateGate(events, publisherSamples) {
       failures.push({ code: 'BITRATE_TARGET_NOT_APPLIED', target });
     }
   }
-  const eightMbps = publisherSamples.filter(
+  const twentyMbps = publisherSamples.filter(
     (sample) =>
-      sample.targetBitrateBps === 8_000_000 &&
+      sample.targetBitrateBps === 20_000_000 &&
       finite(sample.outbound?.bitrateBps),
   );
   let streak = 0;
   let maximumStreak = 0;
-  for (const sample of eightMbps) {
+  for (const sample of twentyMbps) {
     const withinTolerance =
       sample.networkLimited !== true &&
-      sample.outbound.bitrateBps >= 6_400_000 &&
-      sample.outbound.bitrateBps <= 9_600_000;
+      sample.outbound.bitrateBps >= 16_000_000 &&
+      sample.outbound.bitrateBps <= 24_000_000;
     streak = withinTolerance ? streak + 1 : 0;
     maximumStreak = Math.max(maximumStreak, streak);
   }
-  if (maximumStreak < 3) failures.push({ code: 'BITRATE_8M_TOLERANCE' });
+  if (maximumStreak < 3) failures.push({ code: 'BITRATE_20M_TOLERANCE' });
   return {
-    maximumEightMbpsStreak: maximumStreak,
+    maximumTwentyMbpsStreak: maximumStreak,
     failures,
     pass: failures.length === 0,
   };

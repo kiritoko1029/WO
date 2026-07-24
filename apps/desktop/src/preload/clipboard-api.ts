@@ -1,8 +1,5 @@
 import type { Invoke } from './api.js';
-import {
-  DesktopIpcError,
-  unwrapDesktopIpcEnvelope,
-} from './ipc-envelope.js';
+import { DesktopIpcError, unwrapDesktopIpcEnvelope } from './ipc-envelope.js';
 
 export interface DesktopClipboardBridge {
   writeText(value: string): Promise<void>;

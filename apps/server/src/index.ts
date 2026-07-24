@@ -146,9 +146,7 @@ function safeErrorName(error: unknown): string {
  * exist; otherwise the server refuses to start so operators notice a broken
  * mount instead of getting silent 404s in production.
  */
-function normalizeDownloadsRoot(
-  value: string | undefined,
-): string | undefined {
+function normalizeDownloadsRoot(value: string | undefined): string | undefined {
   if (value === undefined || value.trim() === '') return undefined;
   const root = resolve(value.trim());
   if (!existsSync(root) || !statSync(root).isDirectory()) {

@@ -12,6 +12,7 @@ import {
 } from '../src/main/capture-sources.js';
 import {
   createScreenPermissionService,
+  systemAudioModeForPlatform,
   type ScreenPermissionStatus,
 } from '../src/main/permissions.js';
 
@@ -69,6 +70,48 @@ describe('desktop capture source policy', () => {
     );
     broker.clear(4);
     expect(() => broker.select(4, first[1]!.token)).toThrow(/not enumerated/i);
+  });
+
+  test('preserves an opaque selection across refresh while the source remains available', () => {
+    let nowMs = 1_000;
+    let token = 0;
+    const broker = createCaptureSourceBroker({
+      now: () => nowMs,
+      tokenTtlMs: 30_000,
+      randomToken: () =>
+        `00000000-0000-4000-8000-${String(++token).padStart(12, '0')}`,
+    });
+    const first = broker.replaceAvailable(7, sources);
+    broker.select(7, first[0]!.token);
+    nowMs += 20_000;
+    const refreshedSource = {
+      id: sources[0].id,
+      name: 'Private document (updated)',
+    };
+
+    const refreshed = broker.replaceAvailable(7, [refreshedSource, sources[1]]);
+
+    expect(refreshed[0]!.token).toBe(first[0]!.token);
+    expect(refreshed[1]!.token).not.toBe(first[1]!.token);
+    expect(refreshed[0]!.name).toBe('Private document (updated)');
+    nowMs += 20_000;
+    expect(broker.consumeSelected(7)).toBe(refreshedSource);
+  });
+
+  test('revokes a selected token when its source disappears during refresh', () => {
+    let token = 0;
+    const broker = createCaptureSourceBroker({
+      randomToken: () =>
+        `00000000-0000-4000-8000-${String(++token).padStart(12, '0')}`,
+    });
+    const first = broker.replaceAvailable(7, sources);
+    broker.select(7, first[0]!.token);
+
+    const refreshed = broker.replaceAvailable(7, [sources[1]]);
+
+    expect(refreshed[0]!.token).not.toBe(first[1]!.token);
+    expect(() => broker.select(7, first[0]!.token)).toThrow(/not enumerated/i);
+    expect(() => broker.consumeSelected(7)).toThrow(/no capture source/i);
   });
 
   test('returns bounded picker summaries without raw platform identifiers', async () => {
@@ -289,6 +332,8 @@ describe('desktop capture source policy', () => {
       webContents: { id: 12, mainFrame },
       rendererEntry: mainFrame.url,
       broker,
+      platform: 'win32',
+      platformRelease: '10.0.26100',
     });
     const callback = vi.fn();
     const request = {
@@ -310,8 +355,97 @@ describe('desktop capture source policy', () => {
     expect(callback).toHaveBeenLastCalledWith({});
     expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
       expect.any(Function),
+      { useSystemPicker: false },
+    );
+  });
+
+  test('fails closed for unsupported system audio without consuming the selected source', () => {
+    const broker = createCaptureSourceBroker({
+      randomToken: () => '00000000-0000-4000-8000-000000000001',
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'darwin',
+      platformRelease: '23.6.0',
+    });
+    const callback = vi.fn();
+    const request = {
+      frame: mainFrame,
+      securityOrigin: 'https://app.example.test',
+      videoRequested: true,
+      audioRequested: false,
+      userGesture: true,
+    };
+
+    handler?.({ ...request, audioRequested: true }, callback);
+    expect(callback).toHaveBeenLastCalledWith({});
+
+    handler?.(request, callback);
+    expect(callback).toHaveBeenLastCalledWith({ video: sources[0] });
+  });
+
+  test('uses the macOS 15 system picker without consuming a custom source token', () => {
+    const broker = createCaptureSourceBroker({
+      randomToken: () => '00000000-0000-4000-8000-000000000001',
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'darwin',
+      platformRelease: '24.0.0',
+    });
+    const callback = vi.fn();
+
+    handler?.(
+      {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: true,
+        userGesture: true,
+      },
+      callback,
+    );
+
+    expect(callback).toHaveBeenLastCalledWith({});
+    expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
+      expect.any(Function),
       { useSystemPicker: true },
     );
+    expect(broker.consumeSelected(12)).toBe(sources[0]);
   });
 
   test('authorizes only a trusted main-frame, user-gesture, video-only request', () => {
@@ -374,11 +508,71 @@ describe('desktop capture source policy', () => {
     }
   });
 
-  test('derives exact HTTP and file display-capture origins', () => {
+  test('derives exact HTTP, file, and packaged display-capture origins', () => {
     expect(captureSecurityOrigin('https://app.example.test/index.html')).toBe(
       'https://app.example.test',
     );
     expect(captureSecurityOrigin('file:///opt/wo/index.html')).toBe('file://');
+    expect(captureSecurityOrigin('wo-app://bundle/index.html')).toBe(
+      'wo-app://bundle',
+    );
+    for (const rendererEntry of [
+      'wo-app://attacker/index.html',
+      'wo-app://bundle:444/index.html',
+      'wo-app://user@bundle/index.html',
+      'wo-app://user:password@bundle/index.html',
+    ]) {
+      expect(captureSecurityOrigin(rendererEntry)).not.toBe('wo-app://bundle');
+    }
+  });
+
+  test('accepts only the exact packaged renderer display-capture origin', () => {
+    const mainFrame = { url: 'wo-app://bundle/index.html' };
+    const request = {
+      frame: mainFrame,
+      securityOrigin: 'wo-app://bundle',
+      videoRequested: true,
+      audioRequested: false,
+      userGesture: true,
+    };
+    const policy = {
+      mainFrame,
+      rendererEntry: mainFrame.url,
+    };
+
+    expect(isDisplayCaptureRequestAllowed(request, policy)).toBe(true);
+    expect(
+      isDisplayCaptureRequestAllowed(
+        { ...request, securityOrigin: 'wo-app://bundle/' },
+        policy,
+      ),
+    ).toBe(true);
+    for (const securityOrigin of [
+      'wo-app://attacker',
+      'wo-app://bundle:444',
+      'wo-app://user@bundle',
+      'wo-app://user:password@bundle',
+      'wo-app://bundle/path',
+      'wo-app://bundle/?query=1',
+      'wo-app://bundle/#fragment',
+    ]) {
+      expect(
+        isDisplayCaptureRequestAllowed({ ...request, securityOrigin }, policy),
+      ).toBe(false);
+    }
+    for (const frameUrl of [
+      'wo-app://attacker/index.html',
+      'wo-app://bundle:444/index.html',
+      'wo-app://user@bundle/index.html',
+    ]) {
+      const attackerFrame = { url: frameUrl };
+      expect(
+        isDisplayCaptureRequestAllowed(
+          { ...request, frame: attackerFrame },
+          { ...policy, mainFrame: attackerFrame },
+        ),
+      ).toBe(false);
+    }
   });
 
   test('accepts Electron packaged file origins without allowing file paths', () => {
@@ -406,6 +600,22 @@ describe('desktop capture source policy', () => {
 });
 
 describe('screen permission policy', () => {
+  test.each([
+    ['win32', '10.0.26100', 'loopback'],
+    ['darwin', '23.6.0', 'unsupported'],
+    ['darwin', '24.0.0', 'native-picker'],
+    ['darwin', '25', 'native-picker'],
+    ['darwin', '24beta', 'unsupported'],
+    ['linux', '24.0.0', 'unsupported'],
+  ] as const)(
+    'maps %s release %s to %s system audio',
+    (platform, platformRelease, expected) => {
+      expect(systemAudioModeForPlatform(platform, platformRelease)).toBe(
+        expected,
+      );
+    },
+  );
+
   test.each<ScreenPermissionStatus>([
     'not-determined',
     'granted',
@@ -418,6 +628,7 @@ describe('screen permission policy', () => {
       const getMediaAccessStatus = vi.fn(() => status);
       const service = createScreenPermissionService({
         platform: 'darwin',
+        platformRelease: '23.6.0',
         systemPreferences: { getMediaAccessStatus },
         shell: { openExternal: vi.fn(async () => undefined) },
       });
@@ -425,6 +636,7 @@ describe('screen permission policy', () => {
       expect(service.status()).toEqual({
         status,
         canOpenSettings: status === 'denied' || status === 'restricted',
+        systemAudioMode: 'unsupported',
       });
       expect(getMediaAccessStatus).toHaveBeenCalledWith('screen');
     },
@@ -434,6 +646,7 @@ describe('screen permission policy', () => {
     const openExternal = vi.fn(async () => undefined);
     const service = createScreenPermissionService({
       platform: 'darwin',
+      platformRelease: '23.6.0',
       systemPreferences: { getMediaAccessStatus: () => 'denied' },
       shell: { openExternal },
     });
@@ -449,11 +662,13 @@ describe('screen permission policy', () => {
     const openExternal = vi.fn(async () => undefined);
     const windows = createScreenPermissionService({
       platform: 'win32',
+      platformRelease: '10.0.26100',
       systemPreferences: { getMediaAccessStatus: () => 'granted' },
       shell: { openExternal },
     });
     const grantedMac = createScreenPermissionService({
       platform: 'darwin',
+      platformRelease: '24.0.0',
       systemPreferences: { getMediaAccessStatus: () => 'granted' },
       shell: { openExternal },
     });
@@ -461,6 +676,12 @@ describe('screen permission policy', () => {
     expect(windows.status()).toEqual({
       status: 'granted',
       canOpenSettings: false,
+      systemAudioMode: 'loopback',
+    });
+    expect(grantedMac.status()).toEqual({
+      status: 'granted',
+      canOpenSettings: false,
+      systemAudioMode: 'native-picker',
     });
     await expect(windows.openSettings()).rejects.toThrow(/unavailable/i);
     await expect(grantedMac.openSettings()).rejects.toThrow(/unavailable/i);

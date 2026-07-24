@@ -1,5 +1,9 @@
 # User-authored design artifacts are preserved verbatim.
 docs/plans/
+opendesign/
+
+# Generated Vite chunks occasionally copied to the repository root.
+/index-*.js
 
 # Generated package-manager and task output.
 pnpm-lock.yaml

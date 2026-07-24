@@ -20,7 +20,9 @@ const migrations = Object.freeze([
 export class MigrationError extends Error {
   readonly code = 'MIGRATION_CHECKSUM_MISMATCH';
 
-  constructor(message = 'Applied database migration checksum does not match this build') {
+  constructor(
+    message = 'Applied database migration checksum does not match this build',
+  ) {
     super(message);
     this.name = 'MigrationError';
   }

@@ -11,7 +11,8 @@
         try {
           var key = 'wo-theme';
           var pref = localStorage.getItem(key) || 'system';
-          if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
+          if (pref !== 'light' && pref !== 'dark' && pref !== 'system')
+            pref = 'system';
           var dark =
             pref === 'dark' ||
             (pref === 'system' &&

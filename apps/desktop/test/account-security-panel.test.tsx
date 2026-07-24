@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -22,9 +28,7 @@ const session: PublicAuthSession = {
   accessTokenExpiresAt: Date.now() + 60_000,
 };
 
-function createApi(
-  overrides: Partial<DesktopApi['auth']> = {},
-): DesktopApi {
+function createApi(overrides: Partial<DesktopApi['auth']> = {}): DesktopApi {
   return {
     auth: {
       register: vi.fn(),
@@ -32,7 +36,9 @@ function createApi(
       verifyEmail: vi.fn(),
       resendVerification: vi.fn(),
       changePassword: vi.fn().mockResolvedValue(undefined),
-      requestEmailChange: vi.fn().mockResolvedValue({ email: 'next@example.cn' }),
+      requestEmailChange: vi
+        .fn()
+        .mockResolvedValue({ email: 'next@example.cn' }),
       confirmEmailChange: vi.fn().mockResolvedValue(session),
       refresh: vi.fn().mockResolvedValue(session),
       logout: vi.fn().mockResolvedValue(undefined),

@@ -43,7 +43,8 @@ export interface DownloadRouteDependencies {
 function contentTypeFor(filename: string): string {
   const lower = filename.toLowerCase();
   for (const ext of ALLOWED_EXTENSIONS) {
-    if (lower.endsWith(ext)) return CONTENT_TYPES[ext] ?? 'application/octet-stream';
+    if (lower.endsWith(ext))
+      return CONTENT_TYPES[ext] ?? 'application/octet-stream';
   }
   return 'application/octet-stream';
 }
@@ -81,27 +82,30 @@ export function registerDownloadRoutes(
   app: FastifyInstance,
   dependencies: DownloadRouteDependencies,
 ): void {
-  app.get('/download/:filename', async (request: FastifyRequest, reply: FastifyReply) => {
-    const { filename } = request.params as { readonly filename: string };
-    const filePath = resolveDownloadPath(dependencies.root, filename);
-    let size: number;
-    try {
-      const stats = statSync(filePath);
-      if (!stats.isFile()) {
+  app.get(
+    '/download/:filename',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { filename } = request.params as { readonly filename: string };
+      const filePath = resolveDownloadPath(dependencies.root, filename);
+      let size: number;
+      try {
+        const stats = statSync(filePath);
+        if (!stats.isFile()) {
+          throw new HttpError(404, 'INVALID_STATE', 'File not found');
+        }
+        size = stats.size;
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
         throw new HttpError(404, 'INVALID_STATE', 'File not found');
       }
-      size = stats.size;
-    } catch (error) {
-      if (error instanceof HttpError) throw error;
-      throw new HttpError(404, 'INVALID_STATE', 'File not found');
-    }
-    void reply.type(contentTypeFor(filename));
-    void reply.header('Content-Length', String(size));
-    void reply.header(
-      'Content-Disposition',
-      `attachment; filename="${filename.replace(/["\\]/gu, '_')}"`,
-    );
-    void reply.header('Cache-Control', 'public, max-age=3600');
-    return reply.send(createReadStream(filePath));
-  });
+      void reply.type(contentTypeFor(filename));
+      void reply.header('Content-Length', String(size));
+      void reply.header(
+        'Content-Disposition',
+        `attachment; filename="${filename.replace(/["\\]/gu, '_')}"`,
+      );
+      void reply.header('Cache-Control', 'public, max-age=3600');
+      return reply.send(createReadStream(filePath));
+    },
+  );
 }

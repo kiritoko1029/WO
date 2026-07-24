@@ -13,6 +13,7 @@ import {
   authResendVerificationBodySchema,
   authResponseSchema,
   authVerifyEmailBodySchema,
+  parseAuthenticatedAuthResponse,
   type AuthChangePasswordBody,
   type AuthConfirmEmailChangeBody,
   type AuthLoginBody,
@@ -71,10 +72,6 @@ function publicSession(response: AuthResponse, now: number): PublicAuthSession {
     accessToken: response.accessToken,
     accessTokenExpiresAt: now + response.accessTokenExpiresInSeconds * 1_000,
   });
-}
-
-function asAuthResponse(value: unknown): AuthResponse {
-  return authResponseSchema.parse(value);
 }
 
 export function createAuthSessionBroker(
@@ -139,7 +136,9 @@ export function createAuthSessionBroker(
             email: response.email,
           });
         }
-        const session = await persistResponse(asAuthResponse(response));
+        const session = await persistResponse(
+          parseAuthenticatedAuthResponse(response),
+        );
         return Object.freeze({ kind: 'session' as const, session });
       }),
     login: (input) =>
@@ -150,7 +149,7 @@ export function createAuthSessionBroker(
           body,
           responseSchema: authLoginResponseSchema,
         });
-        return persistResponse(asAuthResponse(response));
+        return persistResponse(parseAuthenticatedAuthResponse(response));
       }),
     verifyEmail: (input) =>
       exclusiveNonRefresh(async () => {

@@ -165,18 +165,35 @@ describe('production redaction gates', () => {
     );
   });
 
-  test('keeps renderer and main-process source free of browser secret persistence and crash extras', async () => {
+  test('keeps secrets out of browser persistence while allowing named local preferences', async () => {
     const desktopSource = resolve(root, 'apps', 'desktop', 'src');
     const files = await sourceFiles(desktopSource);
+    const localPreferenceFiles = new Set([
+      resolve(desktopSource, 'renderer', 'src', 'media', 'noise-suppressor.ts'),
+      resolve(desktopSource, 'renderer', 'src', 'media', 'voice-controller.ts'),
+      resolve(desktopSource, 'renderer', 'src', 'theme.ts'),
+    ]);
     const combined = (
       await Promise.all(
         files.map(async (path) => `${path}\n${await readFile(path, 'utf8')}`),
       )
     ).join('\n');
+    const restricted = (
+      await Promise.all(
+        files
+          .filter((path) => !localPreferenceFiles.has(path))
+          .map(async (path) => `${path}\n${await readFile(path, 'utf8')}`),
+      )
+    ).join('\n');
 
-    expect(combined).not.toMatch(
+    expect(restricted).not.toMatch(
       /\b(?:localStorage|sessionStorage|indexedDB|crashReporter)\b/u,
     );
+    for (const path of localPreferenceFiles) {
+      expect(await readFile(path, 'utf8')).not.toMatch(
+        /\b(?:sessionStorage|indexedDB|crashReporter)\b/u,
+      );
+    }
     expect(combined).not.toMatch(
       /(?:setExtraParameter|addExtraParameter)\s*\(/u,
     );

@@ -44,6 +44,22 @@ services:
       dockerfile: apps/server/Dockerfile
     restart: unless-stopped
     user: '0:0'
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETPCAP
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,6 +111,8 @@ services:
       - jwt_access_secret
       - postgres_password
       - turn_shared_secret
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700,noexec,nosuid,nodev
     volumes:
       - ./server/entrypoint.sh:/opt/wo/server-entrypoint.sh:ro
       - ./downloads:/app/downloads:ro
@@ -130,6 +148,23 @@ services:
       dockerfile: deploy/coturn/Dockerfile
     restart: unless-stopped
     user: '0:0'
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETPCAP
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
     environment:
       TURN_EXTERNAL_IP: ${PUBLIC_IPV4:?PUBLIC_IPV4 is required}
       TURN_LISTEN_PORT: '3478'
@@ -144,24 +179,28 @@ services:
           'CMD-SHELL',
           'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" >/dev/null 2>&1',
         ]
-      interval: 10s
+      interval: 60s
       timeout: 5s
-      retries: 12
+      retries: 3
       start_period: 10s
     ports:
       - target: 3478
         published: ${TURN_PORT:-3478}
         protocol: tcp
+        host_ip: 0.0.0.0
       - target: 3478
         published: ${TURN_PORT:-3478}
         protocol: udp
+        host_ip: 0.0.0.0
       - target: 5349
         published: ${TURN_TLS_PORT:-5349}
         protocol: tcp
+        host_ip: 0.0.0.0
       - target: 5349
         published: ${TURN_TLS_PORT:-5349}
         protocol: udp
-      - ${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
+        host_ip: 0.0.0.0
+      - 0.0.0.0:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
     networks:
       - turn_edge
     secrets:
@@ -169,7 +208,7 @@ services:
       - turn_tls_cert
       - turn_tls_key
     tmpfs:
-      - /run/wo-turn:uid=65534,gid=65533,mode=0700
+      - /run/wo-turn:uid=0,gid=0,mode=0700,noexec,nosuid,nodev
     volumes:
       - ./coturn/entrypoint.sh:/opt/wo/turn-entrypoint.sh:ro
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.wo.conf:ro

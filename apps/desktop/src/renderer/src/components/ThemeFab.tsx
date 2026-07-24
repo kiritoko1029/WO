@@ -31,9 +31,7 @@ export function ThemeFab({
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const onChange = () => {
       setState((current) =>
-        current.preference === 'system'
-          ? applyTheme('system')
-          : current,
+        current.preference === 'system' ? applyTheme('system') : current,
       );
     };
     if (typeof media.addEventListener === 'function') {

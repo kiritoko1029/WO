@@ -462,7 +462,13 @@ const parseSmtpConfig = (
 ): P2pServerConfig['email']['smtp'] => {
   const host = env.SMTP_HOST?.trim() ?? '';
   if (host.length === 0) return null;
-  const port = parseInteger('SMTP_PORT', env.SMTP_PORT ?? '587', 1, 65_535, issues);
+  const port = parseInteger(
+    'SMTP_PORT',
+    env.SMTP_PORT ?? '587',
+    1,
+    65_535,
+    issues,
+  );
   const secure = parseOptionalBoolean(
     'SMTP_SECURE',
     env.SMTP_SECURE,

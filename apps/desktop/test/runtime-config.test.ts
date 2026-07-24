@@ -70,8 +70,23 @@ describe('desktop runtime configuration', () => {
       packagedRendererEntry: 'file:///C:/app/out/renderer/index.html',
     });
 
-    expect(config.rendererEntry).toBe('file:///C:/app/out/renderer/index.html');
+    expect(config.rendererEntry).toBe('wo-app://bundle/index.html');
     expect(config.developmentProfile).toBeNull();
+  });
+
+  it.each([
+    'https://attacker.invalid/index.html',
+    'file:///C:/app/out/renderer/other.html',
+    'file:///C:/app/out/renderer/index.html?debug=1',
+  ])('rejects an invalid packaged renderer source %s', (rendererEntry) => {
+    expect(() =>
+      loadRuntimeConfig({
+        apiOrigin: 'https://localhost',
+        isPackaged: true,
+        environment: {},
+        packagedRendererEntry: rendererEntry,
+      }),
+    ).toThrow(TypeError);
   });
 
   it('sets a contained development userData directory before ready', () => {

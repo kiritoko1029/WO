@@ -61,15 +61,17 @@ function transceiver(kind: 'audio' | 'video', mid: string) {
 function createPc(log: string[]) {
   const listeners = new Map<string, Set<(event: unknown) => void>>();
   const audio = transceiver('audio', '0');
-  const video = transceiver('video', '1');
+  const screenAudio = transceiver('audio', '1');
+  const video = transceiver('video', '2');
   const pc = {
     connectionState: 'connected' as RTCPeerConnectionState,
     remoteDescription: null as RTCSessionDescription | null,
     addTransceiver: vi
       .fn()
       .mockReturnValueOnce(audio)
+      .mockReturnValueOnce(screenAudio)
       .mockReturnValueOnce(video),
-    getTransceivers: vi.fn(() => [video, audio]),
+    getTransceivers: vi.fn(() => [video, audio, screenAudio]),
     addEventListener: vi.fn(
       (type: string, listener: (event: unknown) => void) => {
         const values = listeners.get(type) ?? new Set();
@@ -89,7 +91,9 @@ function createPc(log: string[]) {
       log.push('createAnswer');
       return {
         type: 'answer' as const,
-        sdp: 'v=0\r\nm=audio\r\na=sendrecv\r\nm=video\r\na=sendrecv',
+        sdp:
+          'v=0\r\nm=audio\r\na=sendrecv\r\n' +
+          'm=audio\r\na=sendrecv\r\nm=video\r\na=sendrecv',
       };
     }),
     setLocalDescription: vi.fn(async () => {
@@ -108,7 +112,7 @@ function createPc(log: string[]) {
     restartIce: vi.fn(() => log.push('restartIce')),
     close: vi.fn(),
   };
-  return { pc, audio, video, listeners };
+  return { pc, audio, screenAudio, video, listeners };
 }
 
 function ack(type: string, data: unknown = {}) {
@@ -263,7 +267,10 @@ describe('creator-only fixed-plan negotiation', () => {
       roomId: 'room-1',
       negotiationId: 'negotiation-1',
       connectionEpoch: 10,
-      description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      description: {
+        type: 'offer',
+        sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+      },
     });
 
     expect(subject.pc.addTransceiver).not.toHaveBeenCalled();
@@ -319,7 +326,10 @@ describe('creator-only fixed-plan negotiation', () => {
       roomId: 'room-1',
       negotiationId: 'negotiation-1',
       connectionEpoch: 10,
-      description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      description: {
+        type: 'offer',
+        sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+      },
     });
     await vi.waitFor(() =>
       expect(subject.pc.addIceCandidate).toHaveBeenCalledTimes(1),
@@ -592,13 +602,19 @@ describe('creator-only fixed-plan negotiation', () => {
       roomId: 'room-1',
       negotiationId: 'negotiation-1',
       connectionEpoch: 10,
-      description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      description: {
+        type: 'offer',
+        sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+      },
     });
     await subject.negotiation.handleOffer({
       roomId: 'room-1',
       negotiationId: 'negotiation-2',
       connectionEpoch: 10,
-      description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      description: {
+        type: 'offer',
+        sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+      },
     });
     subject.pc.addIceCandidate.mockClear();
 
@@ -652,7 +668,7 @@ describe('creator-only fixed-plan negotiation', () => {
       connectionEpoch: 10,
       description: {
         type: 'offer' as const,
-        sdp: 'v=0\r\nm=audio\r\nm=video',
+        sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
       },
     };
     const firstOffer = joiner.negotiation.handleOffer(offer);
@@ -748,7 +764,10 @@ describe('creator-only fixed-plan negotiation', () => {
         roomId: 'room-1',
         negotiationId: 'negotiation-1',
         connectionEpoch: 10,
-        description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+        description: {
+          type: 'offer',
+          sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+        },
       }),
     ).rejects.toThrow('bad ICE');
     await expect(
@@ -756,7 +775,10 @@ describe('creator-only fixed-plan negotiation', () => {
         roomId: 'room-1',
         negotiationId: 'negotiation-2',
         connectionEpoch: 11,
-        description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+        description: {
+          type: 'offer',
+          sdp: 'v=0\r\nm=audio\r\nm=audio\r\nm=video',
+        },
       }),
     ).resolves.toBeUndefined();
     expect(recovering.pc.createAnswer).toHaveBeenCalledOnce();

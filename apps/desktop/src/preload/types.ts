@@ -38,9 +38,12 @@ export interface CaptureSourceSummary {
 export type ScreenPermissionStatus =
   'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 
+export type SystemAudioMode = 'loopback' | 'native-picker' | 'unsupported';
+
 export interface ScreenPermissionSnapshot {
   readonly status: ScreenPermissionStatus;
   readonly canOpenSettings: boolean;
+  readonly systemAudioMode: SystemAudioMode;
 }
 
 export interface DesktopApi {

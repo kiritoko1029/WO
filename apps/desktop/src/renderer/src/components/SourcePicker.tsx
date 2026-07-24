@@ -9,22 +9,31 @@ const PLACEHOLDER_THUMBNAIL =
 /** How often to re-list OS windows/screens while the picker is open. */
 const SOURCE_REFRESH_MS = 2_000;
 
-import type { CaptureSourceSummary } from '../../../preload/types.js';
+import type {
+  CaptureSourceSummary,
+  SystemAudioMode,
+} from '../../../preload/types.js';
 import type { ScreenShareState } from '../media/screen-controller.js';
 
 export function SourcePicker({
   sources,
   selectedToken,
+  systemAudioEnabled,
+  systemAudioMode,
   state,
   onSelect,
+  onSystemAudioEnabledChange,
   onStart,
   onCancel,
   onRefresh,
 }: {
   readonly sources: readonly CaptureSourceSummary[];
   readonly selectedToken: string | null;
+  readonly systemAudioEnabled: boolean;
+  readonly systemAudioMode: SystemAudioMode;
   readonly state: ScreenShareState;
   readonly onSelect: (token: string) => void;
+  readonly onSystemAudioEnabledChange: (enabled: boolean) => void;
   readonly onStart: () => void;
   readonly onCancel: () => void;
   readonly onRefresh: () => void;
@@ -32,13 +41,14 @@ export function SourcePicker({
   const loading = state === 'acquiring';
   const starting = state === 'capturing';
   const picking = state === 'picking';
+  const nativePicker = systemAudioMode === 'native-picker';
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
 
   // While the user is browsing sources, re-list periodically so newly opened
   // or closed windows appear without re-opening the picker.
   useEffect(() => {
-    if (!picking) return;
+    if (!picking || nativePicker) return;
     const timer = window.setInterval(() => {
       onRefreshRef.current();
     }, SOURCE_REFRESH_MS);
@@ -50,7 +60,7 @@ export function SourcePicker({
       window.clearInterval(timer);
       window.removeEventListener('focus', onFocus);
     };
-  }, [picking]);
+  }, [nativePicker, picking]);
 
   return (
     <div className="source-picker-backdrop">
@@ -64,19 +74,21 @@ export function SourcePicker({
         <header className="source-picker-header">
           <div>
             <h2 id="source-picker-title">选择共享内容</h2>
-            <p>屏幕或应用窗口</p>
+            <p>{nativePicker ? '系统选择器' : '屏幕或应用窗口'}</p>
           </div>
           <div className="source-picker-header-actions">
-            <button
-              className="source-picker-refresh"
-              type="button"
-              title="刷新列表"
-              aria-label="刷新可共享内容列表"
-              disabled={loading || starting}
-              onClick={onRefresh}
-            >
-              <RefreshCw size={17} />
-            </button>
+            {!nativePicker && (
+              <button
+                className="source-picker-refresh"
+                type="button"
+                title="刷新列表"
+                aria-label="刷新可共享内容列表"
+                disabled={loading || starting}
+                onClick={onRefresh}
+              >
+                <RefreshCw size={17} />
+              </button>
+            )}
             <button
               className="source-picker-close"
               type="button"
@@ -90,7 +102,12 @@ export function SourcePicker({
         </header>
 
         <div className="source-picker-body">
-          {loading ? (
+          {nativePicker ? (
+            <div className="source-picker-status" role="status">
+              <Monitor size={30} />
+              <span>准备选择共享内容</span>
+            </div>
+          ) : loading ? (
             <div className="source-picker-status" role="status">
               <LoaderCircle className="source-spinner" size={28} />
               <span>正在读取可共享内容</span>
@@ -151,21 +168,41 @@ export function SourcePicker({
         </div>
 
         <footer className="source-picker-footer">
-          <button
-            className="source-cancel-button"
-            type="button"
-            onClick={onCancel}
-          >
-            取消
-          </button>
-          <button
-            className="source-start-button"
-            type="button"
-            disabled={selectedToken === null || loading || starting}
-            onClick={onStart}
-          >
-            {starting ? '正在启动' : '开始共享'}
-          </button>
+          {systemAudioMode !== 'unsupported' && (
+            <label className="source-audio-option">
+              <input
+                type="checkbox"
+                checked={systemAudioEnabled}
+                disabled={!picking || starting}
+                onChange={(event) =>
+                  onSystemAudioEnabledChange(event.currentTarget.checked)
+                }
+              />
+              <span>
+                <strong>共享系统音频</strong>
+                <small>让对方听到设备播放的声音</small>
+              </span>
+            </label>
+          )}
+          <div className="source-picker-footer-actions">
+            <button
+              className="source-cancel-button"
+              type="button"
+              onClick={onCancel}
+            >
+              取消
+            </button>
+            <button
+              className="source-start-button"
+              type="button"
+              disabled={
+                (!nativePicker && selectedToken === null) || loading || starting
+              }
+              onClick={onStart}
+            >
+              {starting ? '正在启动' : nativePicker ? '继续' : '开始共享'}
+            </button>
+          </div>
         </footer>
       </section>
     </div>

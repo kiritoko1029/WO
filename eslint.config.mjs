@@ -23,6 +23,8 @@ export default tseslint.config(
       '.trellis/**',
       '.worktrees/**',
       '.zcode/**',
+      'opendesign/**',
+      'index-*.js',
       'outputs/**',
       'work/**',
     ],

@@ -41,23 +41,19 @@ export function registerAdminRoutes(
     },
   );
 
-  app.get(
-    '/v1/admin/me',
-    { preHandler: app.authenticate },
-    async (request) => {
-      if (request.authIdentity === null) {
-        throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
-      }
-      try {
-        await dependencies.adminService.assertSuperAdmin(
-          request.authIdentity.userId,
-        );
-        return { admin: true as const };
-      } catch {
-        return { admin: false as const };
-      }
-    },
-  );
+  app.get('/v1/admin/me', { preHandler: app.authenticate }, async (request) => {
+    if (request.authIdentity === null) {
+      throw new HttpError(401, 'AUTH_REQUIRED', 'Authentication is required');
+    }
+    try {
+      await dependencies.adminService.assertSuperAdmin(
+        request.authIdentity.userId,
+      );
+      return { admin: true as const };
+    } catch {
+      return { admin: false as const };
+    }
+  });
 
   app.post(
     '/v1/admin/users/:userId/disabled',
@@ -84,7 +80,11 @@ export function registerAdminRoutes(
         }
         throw error;
       }
-      return { ok: true as const, userId: params.userId, disabled: body.disabled };
+      return {
+        ok: true as const,
+        userId: params.userId,
+        disabled: body.disabled,
+      };
     },
   );
 }

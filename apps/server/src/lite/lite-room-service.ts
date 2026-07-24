@@ -290,7 +290,7 @@ export async function startLiteRoomService(
     roomCodeTtlMs: SESSION_TTL_MS,
     maxCodeAttempts: 1,
     maxRooms: 1,
-    maxMembersPerRoom: 8,
+    maxMembersPerRoom: 2,
   });
   const createLanIce = (): LanIceConfigurationData =>
     lanIceConfigurationDataSchema.parse({
@@ -321,8 +321,8 @@ export async function startLiteRoomService(
       ) {
         throw new SignalingHandlerError('FORBIDDEN');
       }
-      // LAN lite rooms still cap concurrent media peers via room registry
-      // maxMembersPerRoom; no single-guest lock here.
+      // The current WebRTC topology is 1:1, so LAN rooms use the same
+      // creator-plus-one-guest capacity as centralized rooms.
       const result = baseRoomHandler.handle(context, request);
       if (request.type === 'room.join') {
         guestClientId = context.identity.userId;
@@ -419,6 +419,17 @@ export async function startLiteRoomService(
             error: {
               code: 'VALIDATION_ERROR',
               message: 'Request validation failed',
+            },
+          });
+      }
+      if (guestClientId !== null && parsed.data.clientId !== guestClientId) {
+        return reply
+          .status(409)
+          .header('Cache-Control', 'no-store')
+          .send({
+            error: {
+              code: 'ROOM_FULL',
+              message: 'Room is full',
             },
           });
       }

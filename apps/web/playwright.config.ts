@@ -10,7 +10,7 @@ export default defineConfig({
   retries: 0,
   reporter: [['list']],
   use: {
-    baseURL: 'https://rtc.localhost',
+    baseURL: process.env.WO_E2E_BASE_URL ?? 'https://rtc.localhost',
     ignoreHTTPSErrors: true,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',

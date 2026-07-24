@@ -38,7 +38,10 @@ export function systemPrefersDark(
 }
 
 function readPrefersColorScheme(): Pick<MediaQueryList, 'matches'> | null {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+  if (
+    typeof window === 'undefined' ||
+    typeof window.matchMedia !== 'function'
+  ) {
     return null;
   }
   return window.matchMedia('(prefers-color-scheme: dark)');
@@ -94,10 +97,7 @@ export function applyTheme(
   root.style.colorScheme = resolved;
   const meta = document.querySelector('meta[name="color-scheme"]');
   if (meta !== null) {
-    meta.setAttribute(
-      'content',
-      next === 'system' ? 'light dark' : resolved,
-    );
+    meta.setAttribute('content', next === 'system' ? 'light dark' : resolved);
   }
   return { preference: next, resolved };
 }

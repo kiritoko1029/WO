@@ -1,4 +1,4 @@
-FROM node:24.18.0-bookworm-slim AS workspace
+FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS workspace
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -42,7 +42,16 @@ RUN pnpm --filter @wo/config build \
     -name '*.map' -o -name '*.d.ts' -o -name '*.d.cts' \
   \) -delete
 
-FROM node:24.18.0-bookworm-slim AS runtime
+FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS runtime
+
+ARG BUILD_CREATED=unknown
+ARG BUILD_REVISION=unknown
+ARG BUILD_VERSION=dev
+
+LABEL org.opencontainers.image.created="${BUILD_CREATED}" \
+  org.opencontainers.image.revision="${BUILD_REVISION}" \
+  org.opencontainers.image.source="https://github.com/kiritoko1029/WO" \
+  org.opencontainers.image.version="${BUILD_VERSION}"
 
 ENV NODE_ENV=production
 ENV DOWNLOADS_ROOT=/app/downloads

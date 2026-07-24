@@ -1,6 +1,8 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { PACKAGED_RENDERER_ENTRY } from './packaged-renderer-protocol.js';
+
 export interface DesktopRuntimeConfig {
   readonly apiOrigin: string;
   readonly realtimeOrigin: string;
@@ -65,7 +67,7 @@ function packagedEntry(value: string): string {
   ) {
     throw new TypeError('Packaged renderer entry is invalid');
   }
-  return url.href;
+  return PACKAGED_RENDERER_ENTRY;
 }
 
 function developmentEntry(value: string): string {

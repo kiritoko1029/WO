@@ -173,7 +173,10 @@ class MemoryIdentityRepository implements IdentityRepository {
     throw new IdentityRepositoryError('USER_NOT_FOUND');
   }
 
-  async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+  async updatePasswordHash(
+    userId: string,
+    passwordHash: string,
+  ): Promise<void> {
     for (const [email, credential] of this.credentials.entries()) {
       if (credential.user.id === userId) {
         this.credentials.set(email, { ...credential, passwordHash });
@@ -240,9 +243,9 @@ class MemoryIdentityRepository implements IdentityRepository {
     userId: string,
     purpose: 'register' | 'rebind',
   ) {
-    let latest: (typeof this.challenges extends Map<string, infer V>
-      ? V
-      : never) | null = null;
+    let latest:
+      (typeof this.challenges extends Map<string, infer V> ? V : never) | null =
+      null;
     for (const challenge of this.challenges.values()) {
       if (
         challenge.userId === userId &&
@@ -420,13 +423,14 @@ class MemorySessionRepository implements SessionRepository {
 
 let dummyPasswordHash: string;
 
-function asAuthenticated(response: Awaited<ReturnType<AuthService['register']>>) {
+function asAuthenticated(
+  response: Awaited<ReturnType<AuthService['register']>>,
+) {
   if ('status' in response && response.status === 'verification_required') {
     throw new Error('expected authenticated registration response');
   }
   return response;
 }
-
 
 beforeAll(async () => {
   dummyPasswordHash = await hashPassword('dummy password value');
@@ -445,7 +449,7 @@ function createHarness() {
     sessionRepository,
     accessTokenService,
     dummyPasswordHash,
-      ...defaultEmailDeps,
+    ...defaultEmailDeps,
     now: () => new Date(NOW),
     randomUUID: createUuidSequence(),
   });
@@ -509,7 +513,7 @@ function createServiceWithSessionError(error: unknown) {
       now: () => new Date(NOW),
     }),
     dummyPasswordHash,
-      ...defaultEmailDeps,
+    ...defaultEmailDeps,
     now: () => new Date(NOW),
     randomUUID: createUuidSequence(),
   });
@@ -533,7 +537,7 @@ async function createLoginServiceWithSessionCreateError(error: unknown) {
       now: () => new Date(NOW),
     }),
     dummyPasswordHash,
-      ...defaultEmailDeps,
+    ...defaultEmailDeps,
     now: () => new Date(NOW),
     randomUUID: createUuidSequence(),
   });
@@ -878,7 +882,7 @@ describe('auth service', () => {
         sessionRepository,
         accessTokenService,
         dummyPasswordHash,
-      ...defaultEmailDeps,
+        ...defaultEmailDeps,
         now: () => new Date(NOW),
         randomUUID: createUuidSequence(),
       });
@@ -957,10 +961,14 @@ describe('auth service', () => {
       refreshToken: asAuthenticated(registered).refreshToken,
     });
 
-    expect(refreshed.refreshToken).not.toBe(asAuthenticated(registered).refreshToken);
+    expect(refreshed.refreshToken).not.toBe(
+      asAuthenticated(registered).refreshToken,
+    );
     expect(refreshed.user).toEqual(asAuthenticated(registered).user);
     await expect(
-      authService.refresh({ refreshToken: asAuthenticated(registered).refreshToken }),
+      authService.refresh({
+        refreshToken: asAuthenticated(registered).refreshToken,
+      }),
     ).rejects.toEqual(new AuthServiceError('AUTH_REQUIRED'));
     expect(
       [...sessionRepository.sessions.values()].every(
@@ -978,13 +986,19 @@ describe('auth service', () => {
     });
 
     await expect(
-      authService.logout({ refreshToken: asAuthenticated(registered).refreshToken }),
+      authService.logout({
+        refreshToken: asAuthenticated(registered).refreshToken,
+      }),
     ).resolves.toEqual({ loggedOut: true });
     await expect(
-      authService.logout({ refreshToken: asAuthenticated(registered).refreshToken }),
+      authService.logout({
+        refreshToken: asAuthenticated(registered).refreshToken,
+      }),
     ).resolves.toEqual({ loggedOut: true });
     await expect(
-      authService.refresh({ refreshToken: asAuthenticated(registered).refreshToken }),
+      authService.refresh({
+        refreshToken: asAuthenticated(registered).refreshToken,
+      }),
     ).rejects.toEqual(new AuthServiceError('AUTH_REQUIRED'));
   });
 

@@ -1,8 +1,9 @@
 {
 	local_certs
+	default_sni 127.0.0.1
 }
 
-{$APP_DOMAIN} {
+{$APP_DOMAIN}, 127.0.0.1 {
 	tls internal
 	encode zstd gzip
 

@@ -1,4 +1,8 @@
-import { createHash, randomInt, randomUUID as nodeRandomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomInt,
+  randomUUID as nodeRandomUUID,
+} from 'node:crypto';
 import { types as utilTypes } from 'node:util';
 
 import {
@@ -545,10 +549,9 @@ export function createAuthService(
         credential.user.id,
         operationTime,
       );
-      const identity =
-        await dependencies.identityRepository.findEmailUserById(
-          credential.user.id,
-        );
+      const identity = await dependencies.identityRepository.findEmailUserById(
+        credential.user.id,
+      );
       if (identity === null) {
         throw new AuthServiceError('INVALID_CREDENTIALS');
       }
@@ -601,7 +604,10 @@ export function createAuthService(
         throw new AuthServiceError('INVALID_CREDENTIALS');
       }
       const nextHash = await hashPassword(body.newPassword);
-      await dependencies.identityRepository.updatePasswordHash(userId, nextHash);
+      await dependencies.identityRepository.updatePasswordHash(
+        userId,
+        nextHash,
+      );
       return authChangePasswordResponseSchema.parse({ changed: true });
     },
 
@@ -631,9 +637,10 @@ export function createAuthService(
       if (!matches) {
         throw new AuthServiceError('INVALID_CREDENTIALS');
       }
-      const existing = await dependencies.identityRepository.findEmailCredential(
-        body.newEmail,
-      );
+      const existing =
+        await dependencies.identityRepository.findEmailCredential(
+          body.newEmail,
+        );
       if (existing !== null) {
         throw new AuthServiceError('EMAIL_ALREADY_REGISTERED');
       }

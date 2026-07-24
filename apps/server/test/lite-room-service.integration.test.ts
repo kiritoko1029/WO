@@ -527,7 +527,6 @@ describe('LAN room service', () => {
     );
     expect(left.payload.ok).toBe(true);
     await closeSocket(reconnectedGuest);
-    await closeSocket(host);
 
     const replacementTicketResponse = await exchangeGuestTicket(
       service,
@@ -537,30 +536,6 @@ describe('LAN room service', () => {
     const replacementTicket = signalTicketResponseSchema.parse(
       await replacementTicketResponse.json(),
     );
-    const replacementHostTicket = service.issueHostTicket().ticket;
-    const replacementHost = await openSocket(
-      service.invite.endpoint,
-      replacementHostTicket,
-    );
-    const replacementHostCodec = createLanFrameCodec(
-      service.invite.inviteKey,
-      'client',
-    );
-    replacementHostCodec.bind('replacement-host', replacementHostTicket);
-    const replacementRoom = roomCreateAckSchema.parse(
-      await sendLanRequest(
-        replacementHost,
-        replacementHostCodec,
-        'replacement-host',
-        'room.create',
-        'create-replacement-room',
-        {},
-      ),
-    );
-    expect(replacementRoom.payload.ok).toBe(true);
-    if (!replacementRoom.payload.ok) {
-      throw new Error('Expected replacement room creation');
-    }
     const replacementGuest = await openSocket(
       service.invite.endpoint,
       replacementTicket.ticket,
@@ -577,11 +552,13 @@ describe('LAN room service', () => {
         'replacement-guest',
         'room.join',
         'replacement-join',
-        { roomCode: replacementRoom.payload.data.roomCode },
+        { roomCode: service.invite.roomCode },
       ),
     );
     expect(replacementJoined.payload.ok).toBe(true);
     expect((await exchangeGuestTicket(service, firstGuestId)).status).toBe(409);
+    await closeSocket(replacementGuest);
+    await closeSocket(host);
   });
 
   test('does not reserve a guest when ticket issuance fails', async () => {

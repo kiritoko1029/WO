@@ -67,6 +67,7 @@ const idleScreenSnapshot = {
   screenState: 'idle' as const,
   screenSources: [],
   screenSelectedToken: null,
+  screenSystemAudioEnabled: false,
   screenCaptureSettings: null,
   screenError: null,
   screenOwner: null,
@@ -104,7 +105,9 @@ function createDesktop(
       register: vi.fn().mockResolvedValue({ kind: 'session', session }),
       login: vi.fn().mockResolvedValue(session),
       verifyEmail: vi.fn().mockResolvedValue(session),
-      resendVerification: vi.fn().mockResolvedValue({ email: session.user.email }),
+      resendVerification: vi
+        .fn()
+        .mockResolvedValue({ email: session.user.email }),
       changePassword: vi.fn().mockResolvedValue(undefined),
       requestEmailChange: vi
         .fn()
@@ -127,6 +130,7 @@ function createDesktop(
       permission: vi.fn().mockResolvedValue({
         status: 'granted',
         canOpenSettings: false,
+        systemAudioMode: 'loopback',
       }),
       openSettings: vi.fn().mockResolvedValue(undefined),
     },
@@ -402,9 +406,9 @@ describe('desktop account and room workflow', () => {
 
     expect(await screen.findByText('语音已连接')).toBeTruthy();
     expect(gateway.joinRoom).toHaveBeenCalledWith('access-token', '123456');
-    expect(screen.getAllByTestId('participant-slot').length).toBeGreaterThanOrEqual(
-      2,
-    );
+    expect(
+      screen.getAllByTestId('participant-slot').length,
+    ).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('林远')).toBeTruthy();
   });
 
@@ -819,7 +823,10 @@ describe('desktop account and room workflow', () => {
       value: vi.fn().mockReturnValue(false),
     });
     render(
-      <App desktop={createDesktop(session)} roomGateway={createRoomGateway()} />,
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={createRoomGateway()}
+      />,
     );
     await waitForHome();
     await user.click(screen.getByRole('button', { name: '创建房间' }));
@@ -831,9 +838,7 @@ describe('desktop account and room workflow', () => {
       'https://wo.example.cn/join/482731',
     );
     expect(browserClipboard.writeText).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole('button', { name: '已复制网页链接' }),
-    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: '已复制网页链接' })).toBeTruthy();
   });
 
   it('falls back to the Web Clipboard API when the desktop bridge rejects', async () => {
@@ -858,7 +863,10 @@ describe('desktop account and room workflow', () => {
       value: execCommand,
     });
     render(
-      <App desktop={createDesktop(session)} roomGateway={createRoomGateway()} />,
+      <App
+        desktop={createDesktop(session)}
+        roomGateway={createRoomGateway()}
+      />,
     );
     await waitForHome();
     await user.click(screen.getByRole('button', { name: '创建房间' }));
@@ -873,9 +881,7 @@ describe('desktop account and room workflow', () => {
       'https://wo.example.cn/join/482731',
     );
     expect(execCommand).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole('button', { name: '已复制网页链接' }),
-    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: '已复制网页链接' })).toBeTruthy();
   });
 
   it.each([
@@ -1004,6 +1010,7 @@ describe('desktop account and room workflow', () => {
       supportsOutputSelection: true,
       microphoneRetryAvailable: false,
       noiseIntensity: 'off' as const,
+      rnnoiseActive: false,
       localAudioLevel: 0,
       remoteAudioLevel: 0,
       ...idleScreenSnapshot,
@@ -1011,6 +1018,7 @@ describe('desktop account and room workflow', () => {
       screenPermission: {
         status: 'denied' as const,
         canOpenSettings: true,
+        systemAudioMode: 'unsupported' as const,
       },
     };
     const call = {
@@ -1027,6 +1035,7 @@ describe('desktop account and room workflow', () => {
       refreshDevices: vi.fn().mockResolvedValue(undefined),
       prepareScreenShare: vi.fn().mockResolvedValue(undefined),
       selectScreenSource: vi.fn().mockResolvedValue(undefined),
+      setScreenSystemAudioEnabled: vi.fn(),
       refreshScreenSources: vi.fn().mockResolvedValue(undefined),
       startScreenShare: vi.fn().mockResolvedValue(undefined),
       stopScreenShare: vi.fn().mockResolvedValue(undefined),
@@ -1113,6 +1122,7 @@ describe('desktop account and room workflow', () => {
       supportsOutputSelection: false,
       microphoneRetryAvailable: false,
       noiseIntensity: 'off' as const,
+      rnnoiseActive: false,
       localAudioLevel: 0,
       remoteAudioLevel: 0,
       ...idleScreenSnapshot,
@@ -1131,6 +1141,7 @@ describe('desktop account and room workflow', () => {
       refreshDevices: vi.fn(),
       prepareScreenShare: vi.fn(),
       selectScreenSource: vi.fn(),
+      setScreenSystemAudioEnabled: vi.fn(),
       refreshScreenSources: vi.fn(),
       startScreenShare: vi.fn(),
       stopScreenShare: vi.fn(),

@@ -8,6 +8,7 @@ import {
 import type {
   CaptureSourceSummary,
   DesktopApi,
+  SystemAudioMode,
 } from '../../../preload/types.js';
 import type { RuntimeSchema } from './signaling-client.js';
 
@@ -18,13 +19,16 @@ const RELEASE_PENDING_MESSAGE = '屏幕已在本机停止，服务端将在租�
 
 export const DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
   Object.freeze({
-    // Request system audio (loopback) alongside the video so the sharer can
-    // broadcast desktop sound. On macOS the user must additionally check
-    // "Share Computer Audio" in the system picker dialog.
-    audio: true,
+    audio: false,
     video: Object.freeze({
       frameRate: Object.freeze({ ideal: 60 }),
     }),
+  });
+
+export const SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
+  Object.freeze({
+    audio: true,
+    video: DISPLAY_CAPTURE_CONSTRAINTS.video,
   });
 
 export type ScreenShareState =
@@ -46,6 +50,7 @@ export interface ScreenControllerSnapshot {
   readonly state: ScreenShareState;
   readonly sources: readonly CaptureSourceSummary[];
   readonly selectedToken: string | null;
+  readonly systemAudioEnabled: boolean;
   readonly captureSettings: ScreenCaptureSettings | null;
   readonly leaseId: string | null;
   readonly leaseExpiresAtMs: number | null;
@@ -62,6 +67,7 @@ export interface ScreenController {
    */
   refreshSources(): Promise<void>;
   selectSource(token: string): Promise<void>;
+  setSystemAudioEnabled(enabled: boolean): void;
   startSelectedCapture(): Promise<void>;
   stop(): Promise<void>;
   handleLeaseLost(): Promise<void>;
@@ -107,6 +113,7 @@ export interface ScreenControllerOptions {
   readonly audioSender?: Pick<RTCRtpSender, 'replaceTrack'>;
   readonly signaling: ScreenSignaling;
   readonly capture: Pick<DesktopApi['capture'], 'list' | 'select'>;
+  readonly getSystemAudioMode: () => SystemAudioMode;
   readonly mediaDevices?: Pick<MediaDevices, 'getDisplayMedia'>;
   readonly makeRequestId?: () => string;
   readonly now?: () => number;
@@ -198,6 +205,7 @@ export function createScreenController(
     state: 'idle',
     sources: Object.freeze([]),
     selectedToken: null,
+    systemAudioEnabled: false,
     captureSettings: null,
     leaseId: null,
     leaseExpiresAtMs: null,
@@ -212,7 +220,9 @@ export function createScreenController(
   let startPromise: Promise<void> | null = null;
   let lifecycleFailure: unknown = null;
   let senderQueue: Promise<void> = Promise.resolve();
+  let audioSenderQueue: Promise<void> = Promise.resolve();
   let renewalQueue: Promise<void> = Promise.resolve();
+  let refreshPromise: Promise<void> | null = null;
 
   const update = (change: Partial<ScreenControllerSnapshot>): void => {
     snapshot = Object.freeze({ ...snapshot, ...change });
@@ -224,6 +234,18 @@ export function createScreenController(
       .catch(() => undefined)
       .then(() => sender.replaceTrack(track));
     senderQueue = operation;
+    return operation;
+  };
+
+  const queueAudioSenderTrack = (
+    track: MediaStreamTrack | null,
+  ): Promise<void> => {
+    const target = audioSender;
+    if (target === undefined) return Promise.resolve();
+    const operation = audioSenderQueue
+      .catch(() => undefined)
+      .then(() => target.replaceTrack(track));
+    audioSenderQueue = operation;
     return operation;
   };
 
@@ -332,6 +354,7 @@ export function createScreenController(
       return Promise.resolve();
     }
     generation += 1;
+    refreshPromise = null;
     clearRenewalTimer();
     const lease = currentLease;
     const track = currentTrack;
@@ -344,9 +367,10 @@ export function createScreenController(
     stopPromise = (async () => {
       await queueSenderTrack(null).catch(() => undefined);
       if (audioTrack !== null && audioSender !== undefined) {
-        await audioSender.replaceTrack(null).catch(() => undefined);
+        await queueAudioSenderTrack(null).catch(() => undefined);
       }
       track?.removeEventListener('ended', handleTrackEnded);
+      audioTrack?.removeEventListener('ended', handleAudioTrackEnded);
       track?.stop();
       audioTrack?.stop();
       const released = lease === null ? true : await releaseLease(lease);
@@ -354,6 +378,7 @@ export function createScreenController(
         state: finalState,
         sources: Object.freeze([]),
         selectedToken: null,
+        systemAudioEnabled: false,
         captureSettings: null,
         leaseId: null,
         leaseExpiresAtMs: null,
@@ -370,6 +395,16 @@ export function createScreenController(
 
   function handleTrackEnded(): void {
     void cleanupSession('idle');
+  }
+
+  function handleAudioTrackEnded(): void {
+    const track = currentAudioTrack;
+    if (track === null) return;
+    currentAudioTrack = null;
+    track.removeEventListener('ended', handleAudioTrackEnded);
+    track.stop();
+    update({ systemAudioEnabled: false });
+    void queueAudioSenderTrack(null).catch(() => undefined);
   }
 
   const fail = async (error: unknown): Promise<never> => {
@@ -417,11 +452,13 @@ export function createScreenController(
       stopPromise = null;
       lifecycleFailure = null;
       generation += 1;
+      refreshPromise = null;
       const expectedGeneration = generation;
       update({
         state: 'acquiring',
         sources: Object.freeze([]),
         selectedToken: null,
+        systemAudioEnabled: false,
         captureSettings: null,
         error: null,
       });
@@ -456,6 +493,14 @@ export function createScreenController(
         await renew(expectedGeneration);
         assertCurrent(expectedGeneration);
         scheduleRenewal(expectedGeneration);
+        if (options.getSystemAudioMode() === 'native-picker') {
+          update({
+            state: 'picking',
+            sources: Object.freeze([]),
+            selectedToken: null,
+          });
+          return;
+        }
         const sources = await options.capture.list();
         assertCurrent(expectedGeneration);
         update({ state: 'picking', sources: Object.freeze([...sources]) });
@@ -463,37 +508,56 @@ export function createScreenController(
         await failForGeneration(expectedGeneration, error);
       }
     },
-    async refreshSources() {
+    refreshSources() {
       if (snapshot.state !== 'picking') {
-        return;
+        return Promise.resolve();
       }
+      if (options.getSystemAudioMode() === 'native-picker') {
+        return Promise.resolve();
+      }
+      if (refreshPromise !== null) return refreshPromise;
       const expectedGeneration = generation;
-      try {
-        const sources = await options.capture.list();
-        assertCurrent(expectedGeneration);
-        const frozen = Object.freeze([...sources]);
-        const selectedStillPresent =
-          snapshot.selectedToken !== null &&
-          frozen.some((source) => source.token === snapshot.selectedToken);
-        update({
-          sources: frozen,
-          selectedToken: selectedStillPresent ? snapshot.selectedToken : null,
-          error: null,
-        });
-      } catch (error) {
-        // Keep the picker open with the previous list; surface a soft error.
-        if (generation === expectedGeneration) {
+      const operation = (async (): Promise<void> => {
+        try {
+          const sources = await options.capture.list();
+          assertCurrent(expectedGeneration);
+          const frozen = Object.freeze([...sources]);
+          const selectedStillPresent =
+            snapshot.selectedToken !== null &&
+            frozen.some((source) => source.token === snapshot.selectedToken);
           update({
-            error:
-              error instanceof Error
-                ? error.message
-                : '无法刷新可共享内容列表',
+            sources: frozen,
+            selectedToken: selectedStillPresent ? snapshot.selectedToken : null,
+            error: null,
           });
+        } catch (error) {
+          // Keep the picker open with the previous list; surface a soft error.
+          if (generation === expectedGeneration) {
+            update({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : '无法刷新可共享内容列表',
+            });
+          }
         }
-      }
+      })();
+      refreshPromise = operation;
+      void operation.then(
+        () => {
+          if (refreshPromise === operation) refreshPromise = null;
+        },
+        () => {
+          if (refreshPromise === operation) refreshPromise = null;
+        },
+      );
+      return operation;
     },
     async selectSource(token) {
-      if (snapshot.state !== 'picking') {
+      if (
+        snapshot.state !== 'picking' ||
+        options.getSystemAudioMode() === 'native-picker'
+      ) {
         throw new ScreenControllerError('INVALID_STATE');
       }
       const expectedGeneration = generation;
@@ -505,8 +569,23 @@ export function createScreenController(
         await failForGeneration(expectedGeneration, error);
       }
     },
+    setSystemAudioEnabled(enabled) {
+      if (snapshot.state !== 'picking') {
+        throw new ScreenControllerError('INVALID_STATE');
+      }
+      if (enabled && options.getSystemAudioMode() === 'unsupported') {
+        throw Object.assign(new Error('System audio capture is unavailable'), {
+          code: 'SYSTEM_AUDIO_UNSUPPORTED',
+        });
+      }
+      update({ systemAudioEnabled: enabled, error: null });
+    },
     startSelectedCapture() {
-      if (snapshot.state !== 'picking' || snapshot.selectedToken === null) {
+      const systemAudioMode = options.getSystemAudioMode();
+      if (
+        snapshot.state !== 'picking' ||
+        (systemAudioMode !== 'native-picker' && snapshot.selectedToken === null)
+      ) {
         return Promise.reject(new ScreenControllerError('INVALID_STATE'));
       }
       if (startPromise !== null) return startPromise;
@@ -526,10 +605,22 @@ export function createScreenController(
           }),
         );
       }
+      const systemAudioEnabled = snapshot.systemAudioEnabled;
+      if (systemAudioEnabled && systemAudioMode === 'unsupported') {
+        return fail(
+          Object.assign(new Error('System audio capture is unavailable'), {
+            code: 'SYSTEM_AUDIO_UNSUPPORTED',
+          }),
+        );
+      }
       let capturePromise: Promise<MediaStream>;
       try {
         capturePromise = Promise.resolve(
-          mediaDevices.getDisplayMedia(DISPLAY_CAPTURE_CONSTRAINTS),
+          mediaDevices.getDisplayMedia(
+            systemAudioEnabled
+              ? SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS
+              : DISPLAY_CAPTURE_CONSTRAINTS,
+          ),
         );
       } catch (error) {
         console.error(
@@ -557,12 +648,13 @@ export function createScreenController(
         const tracks = stream.getTracks();
         const videoTracks = stream.getVideoTracks();
         const audioTracks = stream.getAudioTracks();
-        // Allow exactly 1 video track plus 0 or 1 audio track (desktop audio
-        // is optional — the user may not check "Share Computer Audio").
+        // Audio is accepted only after the explicit picker opt-in. This stays
+        // fail-closed even if a platform returns audio against constraints.
         if (
           videoTracks.length !== 1 ||
           videoTracks[0]!.kind !== 'video' ||
           audioTracks.length > 1 ||
+          (!systemAudioEnabled && audioTracks.length > 0) ||
           tracks.length !== videoTracks.length + audioTracks.length
         ) {
           stopStream(stream);
@@ -573,6 +665,9 @@ export function createScreenController(
         currentTrack = track;
         currentAudioTrack = audioTrack;
         track.addEventListener('ended', handleTrackEnded, { once: true });
+        audioTrack?.addEventListener('ended', handleAudioTrackEnded, {
+          once: true,
+        });
         const settings = captureSettings(track);
         try {
           if (trackEnded(track)) {
@@ -589,8 +684,13 @@ export function createScreenController(
             throw new ScreenControllerError('INVALID_STATE');
           }
           // Attach desktop audio if present and a sender is available.
-          if (audioTrack !== null && audioSender !== undefined) {
-            await audioSender.replaceTrack(audioTrack);
+          if (
+            audioTrack !== null &&
+            currentAudioTrack === audioTrack &&
+            !trackEnded(audioTrack) &&
+            audioSender !== undefined
+          ) {
+            await queueAudioSenderTrack(audioTrack);
             assertCurrent(expectedGeneration);
           }
           update({ state: 'sharing', captureSettings: settings, error: null });
@@ -619,20 +719,33 @@ export function createScreenController(
         return;
       }
       const expectedGeneration = generation;
+      const previousState = snapshot.state;
       sender = newSender;
       audioSender = newAudioSender;
       // Reset the sender queue so replaceTrack calls go to the new sender.
       senderQueue = Promise.resolve();
+      audioSenderQueue = Promise.resolve();
       const video = currentTrack;
       const audio = currentAudioTrack;
-      if (video !== null) {
-        await sender.replaceTrack(video).catch(() => undefined);
-      }
-      if (audio !== null && audioSender !== undefined) {
-        await audioSender.replaceTrack(audio).catch(() => undefined);
-      }
-      if (generation === expectedGeneration) {
-        update({ state: 'sharing', error: null });
+      try {
+        if (video !== null) {
+          await queueSenderTrack(video);
+          assertCurrent(expectedGeneration);
+        }
+        if (
+          audio !== null &&
+          currentAudioTrack === audio &&
+          !trackEnded(audio) &&
+          audioSender !== undefined
+        ) {
+          await queueAudioSenderTrack(audio);
+          assertCurrent(expectedGeneration);
+        }
+        if (generation === expectedGeneration) {
+          update({ state: previousState, error: null });
+        }
+      } catch (error) {
+        await failForGeneration(expectedGeneration, error);
       }
     },
     cleanup: () => cleanupSession('idle'),

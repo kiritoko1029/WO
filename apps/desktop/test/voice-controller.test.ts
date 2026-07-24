@@ -263,14 +263,18 @@ describe('voice capture and playback', () => {
     Object.defineProperty(mic, 'readyState', { value: 'live' });
     Object.defineProperty(desktop, 'readyState', { value: 'live' });
     // Mock addEventListener used by multi-track attach.
-    (mic as unknown as { addEventListener: ReturnType<typeof vi.fn> }).addEventListener =
-      vi.fn();
-    (desktop as unknown as { addEventListener: ReturnType<typeof vi.fn> }).addEventListener =
-      vi.fn();
-    (mic as unknown as { removeEventListener: ReturnType<typeof vi.fn> }).removeEventListener =
-      vi.fn();
-    (desktop as unknown as { removeEventListener: ReturnType<typeof vi.fn> }).removeEventListener =
-      vi.fn();
+    (
+      mic as unknown as { addEventListener: ReturnType<typeof vi.fn> }
+    ).addEventListener = vi.fn();
+    (
+      desktop as unknown as { addEventListener: ReturnType<typeof vi.fn> }
+    ).addEventListener = vi.fn();
+    (
+      mic as unknown as { removeEventListener: ReturnType<typeof vi.fn> }
+    ).removeEventListener = vi.fn();
+    (
+      desktop as unknown as { removeEventListener: ReturnType<typeof vi.fn> }
+    ).removeEventListener = vi.fn();
 
     await playback.attach(mic);
     await playback.attach(desktop);

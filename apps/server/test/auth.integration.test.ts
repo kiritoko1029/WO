@@ -43,7 +43,9 @@ const JWT_SECRET = Buffer.from(
 ).toString('base64url');
 const PUBLIC_URL = 'https://rtc.example.test/';
 const LOGIN_RACE_USER_ID = '00000000-0000-4000-8000-000000000099';
-function asAuthenticated<T extends { status?: string }>(response: T): Exclude<T, { status: 'verification_required' }> {
+function asAuthenticated<T extends { status?: string }>(
+  response: T,
+): Exclude<T, { status: 'verification_required' }> {
   if ('status' in response && response.status === 'verification_required') {
     throw new Error('expected authenticated response');
   }
@@ -226,7 +228,9 @@ describe('HTTP email/password authentication', () => {
       },
     });
     const registered = authRegisterResponseSchema.parse(registration.json());
-    await identityRepository.disableUser(asAuthenticated(registered).user.userId);
+    await identityRepository.disableUser(
+      asAuthenticated(registered).user.userId,
+    );
 
     const attempts = [
       { email: 'missing@example.com', password: 'wrong password value' },
@@ -286,7 +290,7 @@ describe('HTTP email/password authentication', () => {
           sessionRepository: failingSessionRepository,
           accessTokenService,
           dummyPasswordHash,
-      ...defaultEmailDeps,
+          ...defaultEmailDeps,
         }),
         accessTokenService,
         readinessCheck: async () => undefined,
@@ -343,7 +347,7 @@ describe('HTTP email/password authentication', () => {
         sessionRepository: createSessionRepository(client),
         accessTokenService,
         dummyPasswordHash,
-      ...defaultEmailDeps,
+        ...defaultEmailDeps,
       }),
       accessTokenService,
       readinessCheck: async () => undefined,
@@ -390,7 +394,9 @@ describe('HTTP email/password authentication', () => {
     });
     expect(rotation.statusCode).toBe(200);
     const refreshed = authRefreshResponseSchema.parse(rotation.json());
-    expect(refreshed.refreshToken).not.toBe(asAuthenticated(registered).refreshToken);
+    expect(refreshed.refreshToken).not.toBe(
+      asAuthenticated(registered).refreshToken,
+    );
 
     const reuse = await app!.inject({
       method: 'POST',
@@ -477,7 +483,7 @@ describe('HTTP email/password authentication', () => {
         sessionRepository: failingSessionRepository,
         accessTokenService,
         dummyPasswordHash,
-      ...defaultEmailDeps,
+        ...defaultEmailDeps,
       }),
       accessTokenService,
       readinessCheck: async () => undefined,
@@ -551,7 +557,7 @@ describe('HTTP email/password authentication', () => {
           sessionRepository: failingSessionRepository,
           accessTokenService,
           dummyPasswordHash,
-      ...defaultEmailDeps,
+          ...defaultEmailDeps,
         }),
         accessTokenService,
         readinessCheck: async () => undefined,
@@ -623,7 +629,9 @@ describe('HTTP email/password authentication', () => {
     const refreshed = authRefreshResponseSchema.parse(refresh.json());
     expect(refreshed.user).toEqual(asAuthenticated(registered).user);
 
-    await identityRepository.disableUser(asAuthenticated(registered).user.userId);
+    await identityRepository.disableUser(
+      asAuthenticated(registered).user.userId,
+    );
     const disabled = await app.inject({
       method: 'POST',
       url: '/v1/auth/refresh',
@@ -661,7 +669,9 @@ describe('HTTP email/password authentication', () => {
     const protectedResponse = await app!.inject({
       method: 'POST',
       url: '/test/protected',
-      headers: { authorization: `Bearer ${asAuthenticated(registered).accessToken}` },
+      headers: {
+        authorization: `Bearer ${asAuthenticated(registered).accessToken}`,
+      },
       payload: { userId: 'attacker', sessionId: 'attacker-session' },
     });
     expect(protectedResponse.statusCode).toBe(200);
@@ -744,7 +754,7 @@ describe('HTTP email/password authentication', () => {
           issuer: PUBLIC_URL,
         }),
         dummyPasswordHash,
-      ...defaultEmailDeps,
+        ...defaultEmailDeps,
       }),
       accessTokenService: createAccessTokenService({
         jwtAccessSecret: JWT_SECRET,

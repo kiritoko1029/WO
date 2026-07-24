@@ -14,6 +14,10 @@ Release is blocked unless every applicable item is checked and linked to immutab
 - [ ] Native Windows desktop E2E passes both real two-Electron direct and acceptance-forced relay workflows against the four-service stack (`pnpm test:e2e:desktop`).
 - [ ] Acceptance E2E uses the pinned current Caddy CA SPKI, rejects a mismatched pin/host/error, and leaves no Electron process or temporary profile.
 - [ ] A fresh production build scan proves the acceptance app ID, WAV IPC, diagnostics IPC, certificate handler, and control hooks are absent.
+- [ ] Every client in the release cohort uses the current three-m-line media plan
+      (microphone audio, system audio, screen video). Two-m-line and
+      three-m-line desktop builds are not supported in the same room; upgrade
+      and rollback must replace the whole active client cohort.
 
 ## Server deployment
 
@@ -21,7 +25,7 @@ Release is blocked unless every applicable item is checked and linked to immutab
 - [ ] `deploy/scripts/preflight` passes before any service is changed.
 - [ ] Backup and staging restore pass before upgrade.
 - [ ] Internal smoke passes while Caddy is still closed to public traffic.
-- [ ] Auth registration/login/refresh/logout, two-person capacity, room resume/reset, screen lease, and TURN UDP/TLS proofs pass.
+- [ ] Auth registration/login/refresh/logout, two-person capacity, room resume/reset, screen lease, and TURN UDP/TCP/TLS relay-data proofs pass.
 - [ ] Upgrade rollback and data rollback evidence are attached.
 - [ ] Logs were searched for all prohibited sensitive values.
 
@@ -31,7 +35,9 @@ Release is blocked unless every applicable item is checked and linked to immutab
 - [ ] Final NSIS and portable artifacts contain the expected x64 PE application.
 - [ ] Authenticode chain, expected publisher identity, and trusted timestamp match the release configuration.
 - [ ] Normal startup loads main, preload, and renderer from the final artifact and reaches the readiness probe without a certificate bypass.
-- [ ] A final packaged `file://` renderer performs one live window share on Windows; this remains required even when the development-origin E2E passes.
+- [ ] A final packaged `wo-app://bundle/index.html` renderer performs one live
+      window share on Windows; this remains required even when the
+      development-origin E2E passes.
 - [ ] No child process or temporary profile remains after smoke.
 - [ ] Artifact SHA-256 values are recorded.
 
@@ -42,7 +48,7 @@ Release is blocked unless every applicable item is checked and linked to immutab
 - [ ] Nested code and the final app pass `codesign --verify --deep --strict`.
 - [ ] Team ID matches the expected release team.
 - [ ] Gatekeeper assessment, notarization, and stapling pass for the final distributable artifacts.
-- [ ] Hardened runtime, microphone usage text, screen-capture usage text, and both entitlements files are present.
+- [ ] Hardened runtime, microphone usage text, screen-capture usage text, system-audio capture usage text, and both entitlements files are present.
 - [ ] Normal startup loads main, preload, and renderer from each final artifact.
 - [ ] Artifact SHA-256 values are recorded.
 
@@ -53,10 +59,15 @@ Release is blocked unless every applicable item is checked and linked to immutab
 - [ ] Both window and monitor sources were measured.
 - [ ] Capture, encode, decode, and presentation remain 1920x1080 with at least 95% of valid windows at or above 55 fps.
 - [ ] Audio packets, samples, and energy progress with no gap above two seconds through share and bitrate changes.
-- [ ] Auto/2/4/6/8 Mbps changes preserve PeerConnection, transceiver count, screen MID, and negotiation count.
+- [ ] Auto/5/10/20 Mbps changes preserve the PeerConnection, all three transceivers, screen MID 2, and the negotiation count.
 - [ ] Forced relay evidence contains zero non-relay selected-pair samples; direct evidence contains zero relay samples.
 - [ ] Installer/archive, executable, `app.asar`, and resource hashes match on both devices.
 - [ ] Firewall watchdog and final restoration are proven on both devices.
 - [ ] Evidence is privacy-redacted and the gate output is `HARDWARE_PASS`.
 
 Any unchecked physical row remains `NOT TESTED`; it must not be inferred from another OS, GPU, source type, network path, or direction.
+
+Release certification scope is limited to Windows and macOS desktop packages
+plus Chrome and Edge Web clients. Linux desktop, Safari, Firefox, and mobile
+clients remain `NOT CERTIFIED` and must not inherit a certification claim from
+another Chromium, operating-system, or package row.

@@ -76,7 +76,11 @@ describe('desktop preload API', () => {
                       },
                     ]
                   : channel === 'desktop:capture:permission'
-                    ? { status: 'granted', canOpenSettings: false }
+                    ? {
+                        status: 'granted',
+                        canOpenSettings: false,
+                        systemAudioMode: 'loopback',
+                      }
                     : authSession;
       return { ok: true, value };
     });
@@ -133,7 +137,11 @@ describe('desktop preload API', () => {
     await bridge.capture.select('00000000-0000-4000-8000-000000000001');
     await expect(bridge.capture.permission()).resolves.toEqual({
       ok: true,
-      value: { status: 'granted', canOpenSettings: false },
+      value: {
+        status: 'granted',
+        canOpenSettings: false,
+        systemAudioMode: 'loopback',
+      },
     });
     await bridge.capture.openSettings();
 
@@ -167,6 +175,30 @@ describe('desktop preload API', () => {
     );
 
     await expect(bridge.capture.list()).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_IPC_RESPONSE' },
+    });
+  });
+
+  it.each([
+    { status: 'granted', canOpenSettings: false },
+    {
+      status: 'granted',
+      canOpenSettings: false,
+      systemAudioMode: 'loopback',
+      unexpected: true,
+    },
+    {
+      status: 'granted',
+      canOpenSettings: false,
+      systemAudioMode: 'macos-loopback',
+    },
+  ])('rejects an invalid screen permission capability: %o', async (value) => {
+    const bridge = createDesktopApi(
+      vi.fn().mockResolvedValue({ ok: true, value }),
+    );
+
+    await expect(bridge.capture.permission()).resolves.toMatchObject({
       ok: false,
       error: { code: 'INVALID_IPC_RESPONSE' },
     });
@@ -266,10 +298,7 @@ describe('desktop preload API', () => {
   it('publishes a narrow IPC-backed clipboard writer through both preloads', async () => {
     const sources = await Promise.all(
       ['index.ts', 'index.acceptance.ts'].map((entry) =>
-        readFile(
-          new URL(`../src/preload/${entry}`, import.meta.url),
-          'utf8',
-        ),
+        readFile(new URL(`../src/preload/${entry}`, import.meta.url), 'utf8'),
       ),
     );
 

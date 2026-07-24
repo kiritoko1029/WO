@@ -4,6 +4,23 @@ services:
   server:
     image: 195658/wo-server:${WO_IMAGE_TAG:-2026.07.19}
     restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETPCAP
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,7 +65,7 @@ services:
       retries: 12
       start_period: 20s
     ports:
-      - ${WO_HTTP_PORT:-18080}:3000
+      - 127.0.0.1:${WO_HTTP_PORT:-18080}:3000
     networks:
       - edge
       - db_internal
@@ -56,6 +73,8 @@ services:
       - jwt_access_secret
       - postgres_password
       - turn_shared_secret
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700,noexec,nosuid,nodev
 
   postgres:
     image: postgres:17.10-alpine3.23
@@ -84,6 +103,24 @@ services:
   coturn:
     image: 195658/wo-coturn:${WO_IMAGE_TAG:-2026.07.19}
     restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETPCAP
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
     environment:
       TURN_EXTERNAL_IP: ${PUBLIC_IPV4:?PUBLIC_IPV4 is required}
       TURN_LISTEN_PORT: '3478'
@@ -97,16 +134,16 @@ services:
           'CMD-SHELL',
           'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" >/dev/null 2>&1',
         ]
-      interval: 10s
+      interval: 60s
       timeout: 5s
-      retries: 12
+      retries: 3
       start_period: 10s
     ports:
-      - ${TURN_PORT:-3478}:3478/tcp
-      - ${TURN_PORT:-3478}:3478/udp
-      - ${TURN_TLS_PORT:-5349}:5349/tcp
-      - ${TURN_TLS_PORT:-5349}:5349/udp
-      - ${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
+      - 0.0.0.0:${TURN_PORT:-3478}:3478/tcp
+      - 0.0.0.0:${TURN_PORT:-3478}:3478/udp
+      - 0.0.0.0:${TURN_TLS_PORT:-5349}:5349/tcp
+      - 0.0.0.0:${TURN_TLS_PORT:-5349}:5349/udp
+      - 0.0.0.0:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
     networks:
       - turn_edge
     secrets:
@@ -114,7 +151,7 @@ services:
       - turn_tls_cert
       - turn_tls_key
     tmpfs:
-      - /run/wo-turn:uid=65534,gid=65533,mode=0700
+      - /run/wo-turn:uid=0,gid=0,mode=0700,noexec,nosuid,nodev
 
 networks:
   edge: {}
@@ -124,11 +161,11 @@ networks:
 
 secrets:
   jwt_access_secret:
-    environment: JWT_ACCESS_SECRET
+    file: ${DEPLOY_SECRET_DIR:-./secrets}/jwt_access_secret
   postgres_password:
-    environment: POSTGRES_PASSWORD
+    file: ${DEPLOY_SECRET_DIR:-./secrets}/postgres_password
   turn_shared_secret:
-    environment: TURN_SHARED_SECRET
+    file: ${DEPLOY_SECRET_DIR:-./secrets}/turn_shared_secret
   turn_tls_cert:
     file: ${TURN_TLS_CERT_FILE:-./turn_tls_cert.pem}
   turn_tls_key:

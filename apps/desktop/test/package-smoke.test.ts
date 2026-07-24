@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  createPackageSmokeSessionStore,
   resolvePackageSmokeRequest,
+  verifyPackageSmokeRendererSecurity,
   waitForPackageSmokeRendererReady,
   writePackageSmokeReady,
 } from '../src/main/package-smoke.js';
@@ -39,6 +41,16 @@ afterEach(async () => {
 });
 
 describe('packaged application smoke request', () => {
+  it('uses a non-persistent empty session store without touching OS credentials', async () => {
+    const store = createPackageSmokeSessionStore();
+
+    await expect(store.read()).resolves.toBeNull();
+    await expect(store.clear()).resolves.toBeUndefined();
+    await expect(store.write('refresh-token')).rejects.toThrow(
+      /cannot persist authentication sessions/iu,
+    );
+  });
+
   it('does nothing during an ordinary production launch', () => {
     expect(
       resolvePackageSmokeRequest({
@@ -178,6 +190,47 @@ describe('packaged application smoke request', () => {
     expect(scripts[0]).toMatch(/startup-shell/iu);
   });
 
+  it('requires packaged CSP to allow WASM while blocking JavaScript evaluation', async () => {
+    const scripts: string[] = [];
+    await verifyPackageSmokeRendererSecurity({
+      executeJavaScript: (script) => {
+        scripts.push(script);
+        return Promise.resolve({
+          locationOrigin: 'wo-app://bundle',
+          locationProtocol: 'wo-app:',
+          policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'",
+          wasmCompiled: true,
+          evalBlocked: true,
+          functionConstructorBlocked: true,
+          rnnoiseChunkLoaded: true,
+        });
+      },
+    });
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0]).toContain('fetch(globalThis.location.href');
+    expect(scripts[0]).toContain("headers.get('content-security-policy')");
+    expect(scripts[0]).toContain('WebAssembly.compile');
+    expect(scripts[0]).toContain("new Function('return 1')");
+    expect(scripts[0]).toContain('rnnoise-');
+    expect(scripts[0]).toContain('import(chunkUrl.href)');
+
+    await expect(
+      verifyPackageSmokeRendererSecurity({
+        executeJavaScript: () =>
+          Promise.resolve({
+            locationOrigin: 'file://',
+            locationProtocol: 'file:',
+            policy:
+              "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'",
+            wasmCompiled: true,
+            evalBlocked: false,
+            functionConstructorBlocked: false,
+            rnnoiseChunkLoaded: false,
+          }),
+      }),
+    ).rejects.toThrow(/security probe/iu);
+  });
+
   it('creates normal app services and a renderer window before acknowledging readiness', async () => {
     const source = await readFile(
       new URL('../src/main/index.ts', import.meta.url),
@@ -197,12 +250,18 @@ describe('packaged application smoke request', () => {
       'writePackageSmokeReady(packageSmokeRequest)',
       rendererReady,
     );
+    const securityProbe = source.indexOf(
+      'verifyPackageSmokeRendererSecurity(mainWindow.webContents)',
+      rendererReady,
+    );
 
     expect(request).toBeGreaterThanOrEqual(0);
     expect(secureStore).toBeGreaterThan(request);
+    expect(source).toContain('createPackageSmokeSessionStore()');
     expect(windowCreation).toBeGreaterThan(secureStore);
     expect(rendererReady).toBeGreaterThan(windowCreation);
-    expect(acknowledgement).toBeGreaterThan(rendererReady);
+    expect(securityProbe).toBeGreaterThan(rendererReady);
+    expect(acknowledgement).toBeGreaterThan(securityProbe);
     expect(source).toMatch(/app\.quit\(\)/u);
   });
 });

@@ -273,7 +273,11 @@ export function ScreenStage({
         </div>
       )}
       {viewerControls && (
-        <div className="screen-view-controls" role="toolbar" aria-label="画面控制">
+        <div
+          className="screen-view-controls"
+          role="toolbar"
+          aria-label="画面控制"
+        >
           {zoom > 1 && (
             <button
               type="button"

@@ -9,11 +9,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
   DISPLAY_CAPTURE_CONSTRAINTS,
+  SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
   createScreenController,
 } from '../src/renderer/src/media/screen-controller.js';
+import type { SystemAudioMode } from '../src/preload/types.js';
 
 class FakeTrack {
-  readonly kind = 'video';
   readonly stop = vi.fn();
   readyState: MediaStreamTrackState = 'live';
   readonly getSettings = vi.fn(() => ({
@@ -22,6 +23,8 @@ class FakeTrack {
     frameRate: 60,
   }));
   private readonly ended = new Set<() => void>();
+
+  constructor(readonly kind: 'audio' | 'video' = 'video') {}
 
   addEventListener(type: string, listener: () => void): void {
     if (type === 'ended') this.ended.add(listener);
@@ -47,11 +50,12 @@ function deferred<Value>() {
   return { promise, resolve, reject };
 }
 
-function streamWith(track: FakeTrack) {
+function streamWith(track: FakeTrack, audioTrack?: FakeTrack) {
+  const tracks = audioTrack === undefined ? [track] : [track, audioTrack];
   return {
-    getTracks: () => [track],
+    getTracks: () => tracks,
     getVideoTracks: () => [track],
-    getAudioTracks: () => [],
+    getAudioTracks: () => (audioTrack === undefined ? [] : [audioTrack]),
   } as unknown as MediaStream;
 }
 
@@ -101,6 +105,7 @@ function createHarness(
     readonly acquire?: Promise<P2pScreenLease>;
     readonly releaseFails?: boolean;
     readonly capture?: Promise<MediaStream>;
+    readonly systemAudioMode?: SystemAudioMode;
     readonly replaceTrack?: (track: MediaStreamTrack | null) => Promise<void>;
     readonly renew?: (
       call: number,
@@ -123,6 +128,13 @@ function createHarness(
     replaceTrack: vi.fn(async (next: MediaStreamTrack | null) => {
       order.push(next === null ? 'replaceTrack:null' : 'replaceTrack:track');
       await options.replaceTrack?.(next);
+    }),
+  };
+  const audioSender = {
+    replaceTrack: vi.fn(async (next: MediaStreamTrack | null) => {
+      order.push(
+        next === null ? 'replaceAudioTrack:null' : 'replaceAudioTrack:track',
+      );
     }),
   };
   const desktop = {
@@ -178,14 +190,17 @@ function createHarness(
     roomId: 'room-1',
     userId: 'user-1',
     sender: sender as unknown as RTCRtpSender,
+    audioSender: audioSender as unknown as RTCRtpSender,
     signaling: signaling as never,
     capture: desktop,
+    getSystemAudioMode: () => options.systemAudioMode ?? 'loopback',
     mediaDevices: mediaDevices as unknown as MediaDevices,
     makeRequestId: () => `screen-request-${++request}`,
     now: () => Date.now(),
   });
   return {
     controller,
+    audioSender,
     desktop,
     mediaDevices,
     order,
@@ -368,12 +383,388 @@ describe('single screen controller', () => {
     await harness.controller.startSelectedCapture();
 
     expect(DISPLAY_CAPTURE_CONSTRAINTS).toEqual({
-      audio: true,
+      audio: false,
       video: {
         frameRate: { ideal: 60 },
       },
     });
     expect(harness.track.getSettings).toHaveBeenCalledOnce();
+  });
+
+  test('coalesces overlapping source refreshes into one enumeration', async () => {
+    const harness = createHarness();
+    await harness.controller.prepare();
+    const refresh = deferred<
+      Array<{
+        token: string;
+        name: string;
+        kind: 'window';
+        thumbnailDataUrl: string;
+      }>
+    >();
+    harness.desktop.list.mockImplementationOnce(() => refresh.promise);
+
+    const first = harness.controller.refreshSources();
+    const second = harness.controller.refreshSources();
+
+    expect(first).toBe(second);
+    expect(harness.desktop.list).toHaveBeenCalledTimes(2);
+    refresh.resolve([
+      {
+        token: '00000000-0000-4000-8000-000000000001',
+        name: 'Editor refreshed',
+        kind: 'window',
+        thumbnailDataUrl: 'data:image/png;base64,AAAA',
+      },
+    ]);
+    await Promise.all([first, second]);
+    expect(harness.controller.getSnapshot().sources).toEqual([
+      expect.objectContaining({ name: 'Editor refreshed' }),
+    ]);
+  });
+
+  test('does not let a stale refresh block a later picker lifecycle', async () => {
+    const harness = createHarness();
+    await harness.controller.prepare();
+    const staleRefresh = deferred<
+      Array<{
+        token: string;
+        name: string;
+        kind: 'window';
+        thumbnailDataUrl: string;
+      }>
+    >();
+    harness.desktop.list.mockImplementationOnce(() => staleRefresh.promise);
+
+    const stale = harness.controller.refreshSources();
+    await harness.controller.stop();
+    await harness.controller.prepare();
+    const current = harness.controller.refreshSources();
+
+    expect(harness.desktop.list).toHaveBeenCalledTimes(4);
+    await current;
+    staleRefresh.resolve([]);
+    await stale;
+    expect(harness.controller.getSnapshot().state).toBe('picking');
+  });
+
+  test('rejects system audio when the platform capability is unsupported', async () => {
+    const harness = createHarness({ systemAudioMode: 'unsupported' });
+    await harness.controller.prepare();
+
+    expect(() => harness.controller.setSystemAudioEnabled(true)).toThrowError(
+      expect.objectContaining({ code: 'SYSTEM_AUDIO_UNSUPPORTED' }),
+    );
+    expect(harness.controller.getSnapshot().systemAudioEnabled).toBe(false);
+    expect(harness.mediaDevices.getDisplayMedia).not.toHaveBeenCalled();
+  });
+
+  test('captures system audio only after an explicit picker opt-in', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    expect(harness.controller.getSnapshot().systemAudioEnabled).toBe(false);
+    harness.controller.setSystemAudioEnabled(true);
+    expect(harness.controller.getSnapshot().systemAudioEnabled).toBe(true);
+
+    await harness.controller.startSelectedCapture();
+
+    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
+      SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
+    );
+    expect(harness.audioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);
+    expect(harness.controller.getSnapshot().state).toBe('sharing');
+  });
+
+  test('routes macOS native capture directly to the system picker authority', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+      systemAudioMode: 'native-picker',
+    });
+
+    await harness.controller.prepare();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'picking',
+      sources: [],
+      selectedToken: null,
+      systemAudioEnabled: false,
+    });
+    expect(harness.desktop.list).not.toHaveBeenCalled();
+    expect(harness.desktop.select).not.toHaveBeenCalled();
+    await expect(
+      harness.controller.selectSource('00000000-0000-4000-8000-000000000001'),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+
+    harness.controller.setSystemAudioEnabled(true);
+    await harness.controller.startSelectedCapture();
+
+    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
+      SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
+    );
+    expect(harness.desktop.list).not.toHaveBeenCalled();
+    expect(harness.desktop.select).not.toHaveBeenCalled();
+    expect(harness.sender.replaceTrack).toHaveBeenCalledWith(videoTrack);
+    expect(harness.audioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);
+    expect(harness.controller.getSnapshot().state).toBe('sharing');
+  });
+
+  test('stops system-audio sharing by detaching and stopping both tracks', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    await harness.controller.startSelectedCapture();
+
+    await harness.controller.stop();
+
+    expect(harness.sender.replaceTrack.mock.calls).toEqual([
+      [videoTrack],
+      [null],
+    ]);
+    expect(harness.audioSender.replaceTrack.mock.calls).toEqual([
+      [audioTrack],
+      [null],
+    ]);
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+    expect(audioTrack.stop).toHaveBeenCalledOnce();
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'idle',
+      systemAudioEnabled: false,
+    });
+  });
+
+  test('reattaches both tracks and detaches only system audio when it ends', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    await harness.controller.startSelectedCapture();
+    const rebuiltVideoSender = {
+      replaceTrack: vi.fn().mockResolvedValue(undefined),
+    };
+    const rebuiltAudioSender = {
+      replaceTrack: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await harness.controller.reattachTransport(
+      rebuiltVideoSender as unknown as RTCRtpSender,
+      rebuiltAudioSender as unknown as RTCRtpSender,
+    );
+
+    expect(rebuiltVideoSender.replaceTrack).toHaveBeenCalledWith(videoTrack);
+    expect(rebuiltAudioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);
+    audioTrack.end();
+    await vi.waitFor(() =>
+      expect(rebuiltAudioSender.replaceTrack.mock.calls).toEqual([
+        [audioTrack],
+        [null],
+      ]),
+    );
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      systemAudioEnabled: false,
+    });
+    expect(audioTrack.stop).toHaveBeenCalledOnce();
+    expect(videoTrack.stop).not.toHaveBeenCalled();
+    expect(rebuiltVideoSender.replaceTrack).not.toHaveBeenCalledWith(null);
+    expect(
+      harness.signaling.request.mock.calls.filter(
+        ([type]) => type === 'screen.release',
+      ),
+    ).toHaveLength(0);
+
+    await harness.controller.stop();
+  });
+
+  test('does not reattach system audio that ends during transport migration', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    await harness.controller.startSelectedCapture();
+    const videoAttached = deferred<void>();
+    const rebuiltVideoSender = {
+      replaceTrack: vi.fn(async (track: MediaStreamTrack | null) => {
+        if (track !== null) await videoAttached.promise;
+      }),
+    };
+    const rebuiltAudioSender = {
+      replaceTrack: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const reattaching = harness.controller.reattachTransport(
+      rebuiltVideoSender as unknown as RTCRtpSender,
+      rebuiltAudioSender as unknown as RTCRtpSender,
+    );
+    await vi.waitFor(() =>
+      expect(rebuiltVideoSender.replaceTrack).toHaveBeenCalledWith(videoTrack),
+    );
+    audioTrack.end();
+    videoAttached.resolve();
+    await reattaching;
+
+    await vi.waitFor(() =>
+      expect(rebuiltAudioSender.replaceTrack).toHaveBeenCalledWith(null),
+    );
+    expect(rebuiltAudioSender.replaceTrack).not.toHaveBeenCalledWith(
+      audioTrack,
+    );
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      systemAudioEnabled: false,
+    });
+    expect(audioTrack.stop).toHaveBeenCalledOnce();
+    expect(videoTrack.stop).not.toHaveBeenCalled();
+
+    await harness.controller.stop();
+  });
+
+  test('fails and cleans up when screen reattachment rejects', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    await harness.controller.startSelectedCapture();
+    const failure = new Error('screen reattach failed');
+    const rebuiltVideoSender = {
+      replaceTrack: vi.fn(async (track: MediaStreamTrack | null) => {
+        if (track !== null) throw failure;
+      }),
+    };
+    const rebuiltAudioSender = {
+      replaceTrack: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      harness.controller.reattachTransport(
+        rebuiltVideoSender as unknown as RTCRtpSender,
+        rebuiltAudioSender as unknown as RTCRtpSender,
+      ),
+    ).rejects.toBe(failure);
+
+    expect(rebuiltVideoSender.replaceTrack.mock.calls).toEqual([
+      [videoTrack],
+      [null],
+    ]);
+    expect(rebuiltAudioSender.replaceTrack).toHaveBeenCalledOnce();
+    expect(rebuiltAudioSender.replaceTrack).toHaveBeenCalledWith(null);
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+    expect(audioTrack.stop).toHaveBeenCalledOnce();
+    expect(harness.controller.getSnapshot().state).toBe('error');
+    expect(
+      harness.signaling.request.mock.calls.filter(
+        ([type]) => type === 'screen.release',
+      ),
+    ).toHaveLength(1);
+  });
+
+  test('rolls back screen reattachment when system audio rejects', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    await harness.controller.startSelectedCapture();
+    const failure = new Error('system audio reattach failed');
+    const rebuiltVideoSender = {
+      replaceTrack: vi.fn().mockResolvedValue(undefined),
+    };
+    const rebuiltAudioSender = {
+      replaceTrack: vi.fn(async (track: MediaStreamTrack | null) => {
+        if (track !== null) throw failure;
+      }),
+    };
+
+    await expect(
+      harness.controller.reattachTransport(
+        rebuiltVideoSender as unknown as RTCRtpSender,
+        rebuiltAudioSender as unknown as RTCRtpSender,
+      ),
+    ).rejects.toBe(failure);
+
+    expect(rebuiltVideoSender.replaceTrack.mock.calls).toEqual([
+      [videoTrack],
+      [null],
+    ]);
+    expect(rebuiltAudioSender.replaceTrack.mock.calls).toEqual([
+      [audioTrack],
+      [null],
+    ]);
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+    expect(audioTrack.stop).toHaveBeenCalledOnce();
+    expect(harness.controller.getSnapshot().state).toBe('error');
+    expect(
+      harness.signaling.request.mock.calls.filter(
+        ([type]) => type === 'screen.release',
+      ),
+    ).toHaveLength(1);
+  });
+
+  test('fails closed if the platform returns audio without opt-in', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    await expect(
+      harness.controller.startSelectedCapture(),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+    expect(audioTrack.stop).toHaveBeenCalledOnce();
+    expect(harness.audioSender.replaceTrack).not.toHaveBeenCalledWith(
+      audioTrack,
+    );
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'error',
+      systemAudioEnabled: false,
+    });
   });
 
   test('stops and releases at most once across ended, stop, and cleanup races', async () => {

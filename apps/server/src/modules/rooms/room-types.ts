@@ -312,7 +312,7 @@ export interface RoomRegistryDependencies {
   readonly maxCodeAttempts?: number;
   readonly requestCacheMaxEntries?: number;
   readonly maxRooms?: number;
-  /** Maximum simultaneous members per room (creator included). Default 8. */
+  /** Maximum simultaneous members per room (creator included). Default 2. */
   readonly maxMembersPerRoom?: number;
   readonly maxNegotiationGeneration?: number;
   readonly screenLeaseTtlMs?: number;
@@ -334,9 +334,7 @@ export interface RoomRegistry {
   /** Creator leave closes the room; joiner leave keeps it open for others. */
   leave(
     input: LeaveRoomInput,
-  ): RoomMutationResult<
-    Readonly<{ room: ClosedRoomSnapshot | RoomSnapshot }>
-  >;
+  ): RoomMutationResult<Readonly<{ room: ClosedRoomSnapshot | RoomSnapshot }>>;
   /** Terminal calls are not replay-cached here; Task 10 owns per-connection ACK replay. */
   end(
     input: EndRoomInput,

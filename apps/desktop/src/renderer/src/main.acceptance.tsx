@@ -71,6 +71,10 @@ const captureDiagnostic = {
   height: 0,
   frameRate: 0,
 };
+const rnnoiseDiagnostic = {
+  processorCreations: 0,
+  processedFrames: 0,
+};
 
 function numberValue(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
@@ -379,12 +383,46 @@ function installAudioFixture(): void {
   });
 }
 
+function installRnnoiseProbe(): void {
+  const nativeCreateScriptProcessor =
+    AudioContext.prototype.createScriptProcessor;
+  Object.defineProperty(AudioContext.prototype, 'createScriptProcessor', {
+    configurable: true,
+    writable: true,
+    value: function (
+      this: AudioContext,
+      bufferSize?: number,
+      numberOfInputChannels?: number,
+      numberOfOutputChannels?: number,
+    ): ScriptProcessorNode {
+      const processor = nativeCreateScriptProcessor.call(
+        this,
+        bufferSize,
+        numberOfInputChannels,
+        numberOfOutputChannels,
+      );
+      rnnoiseDiagnostic.processorCreations += 1;
+      processor.addEventListener('audioprocess', (event) => {
+        rnnoiseDiagnostic.processedFrames += (
+          event as AudioProcessingEvent
+        ).inputBuffer.length;
+      });
+      return processor;
+    },
+  });
+}
+
 function snapshot(): unknown {
   return {
     sequence: ++reportSequence,
     icePolicy: window.woAcceptance.iceTransportPolicy,
     signalingDrops,
     capture: { ...captureDiagnostic },
+    rnnoise: { ...rnnoiseDiagnostic },
+    rnnoiseActive:
+      document
+        .querySelector('.room-shell')
+        ?.getAttribute('data-rnnoise-active') === 'true',
     peers: [...peerDiagnostics.values()].map((value) => ({ ...value })),
     sockets: [...signalingSockets.values()].map((value) => ({ ...value })),
   };
@@ -393,6 +431,7 @@ function snapshot(): unknown {
 installPeerConnectionProbe();
 installWebSocketProbe();
 installDisplayCaptureProbe();
+installRnnoiseProbe();
 installAudioFixture();
 Object.defineProperty(window, 'woAcceptanceControl', {
   configurable: false,

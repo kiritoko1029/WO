@@ -12,8 +12,14 @@ function read(relativePath: string): string {
 describe('production server image contract', () => {
   test('builds a portable production-only server on the current Node LTS patch', () => {
     const dockerfile = read('apps/server/Dockerfile');
+    const entrypoint = read('deploy/server/entrypoint.sh');
 
-    expect(dockerfile).toContain('node:24.18.0-bookworm-slim');
+    expect(
+      dockerfile.match(/FROM node:24\.18\.0-bookworm-slim@sha256:/gu),
+    ).toHaveLength(2);
+    expect(dockerfile).toContain(
+      'node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d',
+    );
     expect(dockerfile).toContain('pnpm@10.32.1');
     expect(dockerfile).toContain('pnpm install --frozen-lockfile');
     expect(dockerfile).toMatch(
@@ -22,8 +28,24 @@ describe('production server image contract', () => {
     for (const workspace of ['config', 'database', 'protocol', 'server']) {
       expect(dockerfile).toContain(`pnpm --filter @wo/${workspace} build`);
     }
-    expect(dockerfile).toContain('USER node');
-    expect(dockerfile).toContain('CMD ["node", "dist/index.js"]');
+    expect(dockerfile).toContain('USER root');
+    expect(dockerfile).toContain(
+      'ENTRYPOINT ["/usr/local/bin/wo-server-entrypoint"]',
+    );
+    for (const label of [
+      'org.opencontainers.image.created',
+      'org.opencontainers.image.revision',
+      'org.opencontainers.image.source',
+      'org.opencontainers.image.version',
+    ]) {
+      expect(dockerfile).toContain(label);
+    }
+    expect(entrypoint).toContain('exec /usr/bin/setpriv');
+    expect(entrypoint).toContain('--reuid=1000');
+    expect(entrypoint).toContain('--regid=1000');
+    expect(entrypoint).toContain('--no-new-privs');
+    expect(entrypoint).toContain('--bounding-set=-all');
+    expect(entrypoint).toContain('/usr/local/bin/node /app/dist/index.js');
     expect(dockerfile).toContain("-name '*.map'");
     expect(dockerfile).toContain("-name '*.d.ts'");
     expect(dockerfile).not.toMatch(

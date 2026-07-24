@@ -62,6 +62,16 @@ export const authAuthenticatedResponseSchema = authResponseSchema.extend({
   status: z.literal('authenticated').optional(),
 });
 
+export function parseAuthenticatedAuthResponse(input: unknown): AuthResponse {
+  const response = authAuthenticatedResponseSchema.parse(input);
+  return authResponseSchema.parse({
+    user: response.user,
+    accessToken: response.accessToken,
+    refreshToken: response.refreshToken,
+    accessTokenExpiresInSeconds: response.accessTokenExpiresInSeconds,
+  });
+}
+
 export const authRegisterResponseSchema = z.union([
   authAuthenticatedResponseSchema,
   authVerificationRequiredResponseSchema,
@@ -78,7 +88,10 @@ export const authLogoutResponseSchema = z
 export const authVerifyEmailBodySchema = z
   .object({
     email: emailSchema,
-    code: z.string().trim().regex(/^\d{6}$/u),
+    code: z
+      .string()
+      .trim()
+      .regex(/^\d{6}$/u),
   })
   .strict();
 
@@ -120,7 +133,10 @@ export const authRequestEmailChangeBodySchema = z
 export const authConfirmEmailChangeBodySchema = z
   .object({
     newEmail: emailSchema,
-    code: z.string().trim().regex(/^\d{6}$/u),
+    code: z
+      .string()
+      .trim()
+      .regex(/^\d{6}$/u),
   })
   .strict();
 

@@ -15,6 +15,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import {
   checkBackupDirectory,
   checkPortConflicts,
+  integrationEdgePorts,
 } from '../../deploy/scripts/preflight.mjs';
 import { inspectCaddyArchive } from '../../deploy/scripts/restore.mjs';
 import { postgresMajorFromImage } from '../../deploy/scripts/upgrade.mjs';
@@ -76,6 +77,39 @@ describe('deployment filesystem safety', () => {
       'Port conflict check requires a valid bounded TURN port plan',
     ]);
   });
+
+  test('checks effective integration edge ports with shell precedence', async () => {
+    expect(
+      integrationEdgePorts(
+        {
+          WO_INTEGRATION_HTTP_PORT: '18080',
+          WO_INTEGRATION_HTTPS_PORT: '18443',
+        },
+        { WO_INTEGRATION_HTTPS_PORT: '19443' },
+      ),
+    ).toEqual({ httpPort: '18080', httpsPort: '19443' });
+    expect(
+      integrationEdgePorts(
+        { WO_INTEGRATION_HTTP_PORT: '18080' },
+        { WO_INTEGRATION_HTTP_PORT: '' },
+      ),
+    ).toEqual({ httpPort: '80', httpsPort: '443' });
+    await expect(
+      checkPortConflicts(
+        {
+          TURN_PORT: '3478',
+          TURN_TLS_PORT: '5349',
+          TURN_RELAY_MIN_PORT: '49160',
+          TURN_RELAY_MAX_PORT: '49200',
+        },
+        '127.0.0.1',
+        { httpPort: 'invalid', httpsPort: '18443' },
+      ),
+    ).resolves.toEqual([
+      'Port conflict check requires valid HTTP and HTTPS ports',
+    ]);
+  });
+
   test('accepts a provisioned backup directory without changing its mode', async () => {
     const root = await mkdtemp(
       resolve(await realpath(tmpdir()), 'wo-backup-test-'),

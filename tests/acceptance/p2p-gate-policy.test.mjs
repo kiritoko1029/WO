@@ -15,10 +15,10 @@ function passingFixture() {
     const common = {
       timestampMs,
       peerConnectionId: 'pc-1',
-      transceiverCount: 2,
-      screenMid: '1',
+      transceiverCount: 3,
+      screenMid: '2',
       negotiationCount: 1,
-      targetBitrateBps: 8_000_000,
+      targetBitrateBps: 20_000_000,
       networkLimited: false,
       path: { localCandidateType: 'host', remoteCandidateType: 'srflx' },
       visual: { black: false, freezeDurationMs: 0 },
@@ -30,7 +30,7 @@ function passingFixture() {
         width: 1_920,
         height: 1_080,
         framesEncoded: second * 60,
-        bitrateBps: 8_000_000,
+        bitrateBps: 20_000_000,
       },
     });
     receiverSamples.push({
@@ -59,7 +59,7 @@ function passingFixture() {
     path: 'direct',
     publisherSamples,
     receiverSamples,
-    bitrateEvents: ['auto', 2, 4, 6, 8].map((target) => ({
+    bitrateEvents: ['auto', 5, 10, 20].map((target) => ({
       target,
       applied: true,
       peerConnectionIdUnchanged: true,
@@ -125,6 +125,18 @@ describe('P2P hardware gate policy', () => {
     [
       'transport identity change',
       (fixture) => (fixture.publisherSamples[100].peerConnectionId = 'pc-2'),
+    ],
+    [
+      'legacy two-transceiver media plan',
+      (fixture) => {
+        for (const sample of [
+          ...fixture.publisherSamples,
+          ...fixture.receiverSamples,
+        ]) {
+          sample.transceiverCount = 2;
+          sample.screenMid = '1';
+        }
+      },
     ],
     [
       'bitrate renegotiation',

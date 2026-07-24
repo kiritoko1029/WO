@@ -1,4 +1,4 @@
-FROM node:24.18.0-bookworm-slim AS web-builder
+FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS web-builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -25,6 +25,6 @@ RUN mkdir -p apps/desktop \
   && ln -s ../web/node_modules apps/desktop/node_modules \
   && pnpm --filter @wo/web build
 
-FROM caddy:2.11.4-alpine
+FROM caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 
 COPY --from=web-builder /workspace/apps/web/dist /srv

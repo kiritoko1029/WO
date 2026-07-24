@@ -58,6 +58,7 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: WO uses the microphone for voice calls.
     NSScreenCaptureUsageDescription: WO uses screen capture when you share your desktop.
+    NSAudioCaptureUsageDescription: WO captures system audio only when you explicitly enable it while sharing.
 
 dmg:
   sign: true

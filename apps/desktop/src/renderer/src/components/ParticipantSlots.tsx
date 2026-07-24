@@ -58,7 +58,10 @@ export function ParticipantSlots({
         );
       })}
       {ordered.length === 1 && (
-        <div className="participant-chip waiting" data-testid="participant-waiting">
+        <div
+          className="participant-chip waiting"
+          data-testid="participant-waiting"
+        >
           <span className="participant-chip-name">等待加入…</span>
         </div>
       )}

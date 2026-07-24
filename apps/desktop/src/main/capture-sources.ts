@@ -4,6 +4,7 @@ import type {
   DisplayCaptureRequest,
 } from './capture-policy.js';
 import { isDisplayCaptureRequestAllowed } from './capture-policy.js';
+import { systemAudioModeForPlatform } from './permissions.js';
 
 export interface DesktopCaptureSource extends CaptureSource {
   readonly thumbnail: {
@@ -65,7 +66,10 @@ function thumbnailData(source: DesktopCaptureSource): {
   // not yet rendered) get a lightweight placeholder instead of being dropped.
   // The source still appears in the picker so the user can select it.
   if (size.width === 0 && size.height === 0) {
-    return { value: PLACEHOLDER_THUMBNAIL, bytes: PLACEHOLDER_THUMBNAIL.length };
+    return {
+      value: PLACEHOLDER_THUMBNAIL,
+      bytes: PLACEHOLDER_THUMBNAIL.length,
+    };
   }
   if (
     !Number.isSafeInteger(size.width) ||
@@ -151,10 +155,12 @@ export interface DisplayMediaSession {
   setDisplayMediaRequestHandler(
     handler: (
       request: DisplayCaptureRequest,
-      callback: (streams: Readonly<{
-        video?: CaptureSource;
-        audio?: 'loopback' | 'loopbackWithMute';
-      }>) => void,
+      callback: (
+        streams: Readonly<{
+          video?: CaptureSource;
+          audio?: 'loopback' | 'loopbackWithMute';
+        }>,
+      ) => void,
     ) => void,
     options: Readonly<{ useSystemPicker: boolean }>,
   ): void;
@@ -167,12 +173,13 @@ export function installDisplayMediaHandler<
   readonly webContents: Readonly<{ id: number; mainFrame: unknown }>;
   readonly rendererEntry: string;
   readonly broker: CaptureSourceBroker<Source>;
+  readonly platform?: NodeJS.Platform;
+  readonly platformRelease: string;
 }): void {
-  // Use the OS-native screen picker when the renderer requests system audio
-  // (macOS loopback), because loopback capture is only available through the
-  // system picker on macOS. Otherwise use the custom in-app picker for a
-  // smoother UX.
-  const useSystemPicker = true;
+  const systemAudioMode = systemAudioModeForPlatform(
+    input.platform ?? process.platform,
+    input.platformRelease,
+  );
   input.session.setDisplayMediaRequestHandler(
     (request, callback) => {
       if (
@@ -184,20 +191,28 @@ export function installDisplayMediaHandler<
         callback({});
         return;
       }
+      // When enabled, Electron's macOS picker is the sole source authority and
+      // this handler is not expected to run. Fail closed if Electron falls
+      // back to it instead of consuming a custom-picker broker token.
+      if (systemAudioMode === 'native-picker') {
+        callback({});
+        return;
+      }
+      if (request.audioRequested && systemAudioMode !== 'loopback') {
+        callback({});
+        return;
+      }
       try {
         const video = input.broker.consumeSelected(input.webContents.id);
-        // Provide loopback audio when the renderer asked for it. On macOS
-        // the user must also check "Share Computer Audio" in the system
-        // dialog; we can only enable the capability, not force it.
-        const audio = request.audioRequested ? 'loopback' : undefined;
+        const audio =
+          request.audioRequested && systemAudioMode === 'loopback'
+            ? 'loopback'
+            : undefined;
         callback(audio !== undefined ? { video, audio } : { video });
       } catch {
-        // If the broker has no selection (system picker path), let the OS
-        // handle both video and audio selection natively.
-        const audio = request.audioRequested ? 'loopback' : undefined;
-        callback(audio !== undefined ? { audio } : {});
+        callback({});
       }
     },
-    { useSystemPicker },
+    { useSystemPicker: systemAudioMode === 'native-picker' },
   );
 }

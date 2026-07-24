@@ -105,6 +105,11 @@ refresh token 按 origin 隔离。打开来自其他服务的邀请时，桌面�
 显示目标域名并由用户确认，随后重启并在目标服务重新登录；它不会把旧 origin
 的凭据发送给新服务。
 
+当前媒体计划固定为三条 m-line：麦克风音频、系统音频和屏幕视频。旧的两条
+m-line 客户端不能与当前客户端混合进房；服务端不会重写或翻译 SDP。发布和
+回滚必须替换整个活跃客户端批次，不能只滚动升级其中一端。完成握手级客户端
+版本拒绝前，运维必须通过下载入口和发布窗口阻止旧/新版本并存。
+
 本地集成的自签证书只适用于隔离测试。桌面手工联调应安装公开 CA 证书，不能
 关闭 TLS 校验。
 
@@ -117,10 +122,10 @@ refresh token 按 origin 隔离。打开来自其他服务的邀请时，桌面�
 
 ### 必须反代与禁止反代
 
-| 流量 | 处理 |
-|------|------|
-| `https://${APP_DOMAIN}/`、`/v1/*` | 反代到 `http://127.0.0.1:18080`（或你设置的 `WO_HTTP_PORT`） |
-| `wss://${APP_DOMAIN}/v1/realtime` | **同一 origin**，必须正确升级 WebSocket |
+| 流量                                        | 处理                                                                   |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| `https://${APP_DOMAIN}/`、`/v1/*`           | 反代到 `http://127.0.0.1:18080`（或你设置的 `WO_HTTP_PORT`）           |
+| `wss://${APP_DOMAIN}/v1/realtime`           | **同一 origin**，必须正确升级 WebSocket                                |
 | `stun:` / `turn:` / `turns:`（`TURN_HOST`） | **不要** HTTP 反代；客户端直连 coturn 的 `3478`/`5349` 与 relay UDP 段 |
 
 桌面与 Web 的「服务器」均填 canonical HTTPS origin，例如
@@ -290,9 +295,39 @@ node deploy/scripts/smoke.mjs --env-file=deploy/.env.integration --base-url=http
 docker compose --project-name wo-integration --env-file deploy/.env.integration -f deploy/compose.yaml -f deploy/compose.integration.yaml down -v
 ```
 
+如果本机的 `80/443` 已被其他栈占用，可仅覆盖 integration 的宿主发布端口，
+容器内部端口和默认契约保持不变。preflight、Compose 集成、Web E2E 和桌面 E2E
+必须使用同一组覆盖值：
+
+```bash
+export WO_INTEGRATION_HTTP_PORT=18080
+export WO_INTEGRATION_HTTPS_PORT=18443
+export WO_E2E_BASE_URL=https://rtc.localhost:18443
+node deploy/scripts/preflight.mjs --env-file=deploy/.env.integration --integration --allow-non-linux
+pnpm test:e2e:web
+pnpm test:e2e:desktop
+```
+
+当本机 Node 无法解析 `rtc.localhost` 时，CLI smoke 可以继续严格校验证书并使用
+Caddy 为 loopback IP 签发的 internal 证书：
+
+```bash
+WO_INTEGRATION_HTTP_PORT=18080 WO_INTEGRATION_HTTPS_PORT=18443 \
+WO_INTEGRATION_SMOKE_BASE_URL=https://127.0.0.1:18443 \
+WO_RUN_COMPOSE_INTEGRATION=1 pnpm exec vitest run \
+  --config vitest.root.integration.config.ts \
+  tests/integration/compose-stack.integration.test.ts
+```
+
+不得关闭 Node 或浏览器的 TLS 证书校验。桌面 acceptance 证书例外仍只接受
+`rtc.localhost`、当前 Caddy CA 链和固定 root SPKI；高端口不会扩大主机信任范围。
+
 本地有两条彼此独立的信任链：HTTPS/WSS 使用 Caddy internal CA，`export-local-ca.mjs` 只导出其公开 `root.crt`；`turns:` 使用 `secrets.integration/turn_tls_cert.pem`。CLI smoke 会分别校验两条链。桌面端手工联调时，只在隔离测试机器的系统信任库中加入这两个公开证书，绝不能复制 Caddy CA 私钥或 `turn_tls_key.pem`，也不得关闭 TLS 校验。
 
-`--turn-proof` 使用业务服务签发的短期凭据，验证 UDP relay 双向数据、`turns:` TLS relay 和错误凭据拒绝。该测试发生在本机 Docker 网络，只证明本地配置和认证链路，不代表公网 NAT、防火墙或运营商路径已经可用。
+`--turn-proof` 使用业务服务签发的短期凭据，验证 UDP、TCP 和
+`turns:` TLS relay 双向数据，以及错误凭据拒绝。该测试发生在本机
+Docker 网络，只证明本地配置和认证链路，不代表公网 NAT、防火墙或
+运营商路径已经可用。
 
 ## 备份、恢复与升级
 

@@ -19,7 +19,11 @@ function adminDevRewrite(): Plugin {
     configureServer(server) {
       server.middlewares.use((request, _response, next) => {
         const url = request.url ?? '';
-        if (url === '/admin' || url.startsWith('/admin?') || url.startsWith('/admin/')) {
+        if (
+          url === '/admin' ||
+          url.startsWith('/admin?') ||
+          url.startsWith('/admin/')
+        ) {
           request.url = `/admin.html${url.includes('?') ? url.slice(url.indexOf('?')) : ''}`;
         }
         next();

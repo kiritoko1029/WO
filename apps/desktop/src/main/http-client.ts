@@ -15,7 +15,7 @@ export interface MainHttpClient {
 
 export interface MainHttpClientOptions {
   readonly apiOrigin: string;
-  readonly fetch?: typeof globalThis.fetch;
+  readonly fetch?: (input: string, init?: RequestInit) => Promise<Response>;
   readonly timeoutMs?: number;
   readonly maxResponseBytes?: number;
 }

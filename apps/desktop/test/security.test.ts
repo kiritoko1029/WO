@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -88,7 +89,7 @@ describe('desktop window security', () => {
     const csp = buildContentSecurityPolicy('wss://rtc.example.cn');
 
     expect(csp).toContain("default-src 'self'");
-    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval'");
     expect(csp).toContain("font-src 'self'");
     expect(csp).toContain("connect-src 'self' wss://rtc.example.cn");
     expect(csp).not.toContain('https:');
@@ -96,6 +97,22 @@ describe('desktop window security', () => {
     expect(csp).not.toContain("'unsafe-inline'");
     expect(csp).not.toContain("'unsafe-eval'");
   });
+
+  it.each(['index.html', 'index.acceptance.html'])(
+    'pins the inline theme bootstrap in the response CSP for %s',
+    async (name) => {
+      const source = await readFile(
+        new URL(`../src/renderer/${name}`, import.meta.url),
+        'utf8',
+      );
+      const script = source.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+      const policy = buildContentSecurityPolicy('wss://rtc.example.cn');
+      expect(source).not.toContain('http-equiv="Content-Security-Policy"');
+      expect(script).toBeDefined();
+      const hash = createHash('sha256').update(script!).digest('base64');
+      expect(policy).toContain(`'sha256-${hash}'`);
+    },
+  );
 
   it('injects the CSP only into the exact main renderer document', () => {
     let listener:
@@ -154,7 +171,7 @@ describe('desktop window security', () => {
     });
   });
 
-  it('enables the app sandbox before readiness and never installs a certificate bypass', async () => {
+  it('enables the sandbox and installs only an explicitly configured extra-CA verifier', async () => {
     const source = await readFile(
       new URL('../src/main/index.ts', import.meta.url),
       'utf8',
@@ -166,6 +183,14 @@ describe('desktop window security', () => {
     );
     expect(source).not.toContain('setCertificateVerifyProc');
     expect(source).not.toContain('certificate-error');
+    expect(source).toMatch(
+      /const extraCaCertificates = installExtraCaFromEnvironment\(process\.env\);\s+if \(extraCaCertificates\.length > 0\) \{\s+installExtraCaCertificateVerifier\(session\.defaultSession,/u,
+    );
+    expect(
+      source.lastIndexOf(
+        'installExtraCaCertificateVerifier(session.defaultSession',
+      ),
+    ).toBeLessThan(source.indexOf('mainWindow = createMainWindow();'));
     expect(source).toContain('createCaptureSourceBroker');
     expect(source).toContain('createCaptureSourceService');
     expect(source).toContain('installDisplayMediaHandler');
@@ -239,17 +264,11 @@ describe('desktop window security', () => {
       isMainFrame: true,
     });
     expect(callback).toHaveBeenLastCalledWith(true);
-
     for (const [contents, permission, details] of [
       [
         trusted,
         'media',
         { mediaTypes: ['video'], requestingUrl: entry, isMainFrame: true },
-      ],
-      [
-        trusted,
-        'display-capture',
-        { requestingUrl: entry, isMainFrame: false },
       ],
       [
         trusted,
@@ -259,6 +278,11 @@ describe('desktop window security', () => {
           requestingUrl: entry,
           isMainFrame: true,
         },
+      ],
+      [
+        trusted,
+        'display-capture',
+        { requestingUrl: entry, isMainFrame: false },
       ],
       [
         trusted,

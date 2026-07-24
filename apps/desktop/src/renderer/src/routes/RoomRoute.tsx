@@ -146,7 +146,10 @@ export function RoomRoute({
   };
 
   return (
-    <div className="room-shell">
+    <div
+      className="room-shell"
+      data-rnnoise-active={call.snapshot.rnnoiseActive}
+    >
       <header className="room-header">
         <div className="product-lockup compact">
           <span className="product-mark" aria-hidden="true">
@@ -273,11 +276,18 @@ export function RoomRoute({
         <SourcePicker
           sources={call.snapshot.screenSources}
           selectedToken={call.snapshot.screenSelectedToken}
+          systemAudioEnabled={call.snapshot.screenSystemAudioEnabled}
+          systemAudioMode={
+            call.snapshot.screenPermission?.systemAudioMode ?? 'unsupported'
+          }
           state={screenState}
           onSelect={(token) =>
             void call.controller
               .selectScreenSource(token)
               .catch(() => undefined)
+          }
+          onSystemAudioEnabledChange={
+            call.controller.setScreenSystemAudioEnabled
           }
           onStart={() => {
             void call.controller.startScreenShare().catch(() => undefined);
@@ -310,7 +320,9 @@ export function RoomRoute({
         onRemoteVolumeChange={call.controller.setRemoteVolume}
         onMicrophoneVolumeChange={call.controller.setMicrophoneVolume}
         onNoiseIntensityChange={(intensity) =>
-          void call.controller.setNoiseIntensity(intensity).catch(() => undefined)
+          void call.controller
+            .setNoiseIntensity(intensity)
+            .catch(() => undefined)
         }
         onRefreshDevices={() =>
           void call.controller.refreshDevices().catch(() => undefined)

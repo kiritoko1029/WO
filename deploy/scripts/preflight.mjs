@@ -137,11 +137,40 @@ async function checkUdpPort(port, host) {
   });
 }
 
-export async function checkPortConflicts(environment, host = '0.0.0.0') {
+export function integrationEdgePorts(
+  environment,
+  shellEnvironment = process.env,
+) {
+  const composeValue = (name, fallback) => {
+    const value = Object.hasOwn(shellEnvironment, name)
+      ? shellEnvironment[name]
+      : environment[name];
+    return value === undefined || value === '' ? fallback : value;
+  };
+  return {
+    httpPort: composeValue('WO_INTEGRATION_HTTP_PORT', '80'),
+    httpsPort: composeValue('WO_INTEGRATION_HTTPS_PORT', '443'),
+  };
+}
+
+export async function checkPortConflicts(
+  environment,
+  host = '0.0.0.0',
+  edgePorts = { httpPort: 80, httpsPort: 443 },
+) {
+  const httpPort = Number(edgePorts.httpPort);
+  const httpsPort = Number(edgePorts.httpsPort);
   const turnPort = Number(environment.TURN_PORT);
   const turnTlsPort = Number(environment.TURN_TLS_PORT);
   const relayMinimum = Number(environment.TURN_RELAY_MIN_PORT);
   const relayMaximum = Number(environment.TURN_RELAY_MAX_PORT);
+  if (
+    ![httpPort, httpsPort].every(
+      (port) => Number.isInteger(port) && port >= 1 && port <= 65_535,
+    )
+  ) {
+    return ['Port conflict check requires valid HTTP and HTTPS ports'];
+  }
   if (
     ![turnPort, turnTlsPort, relayMinimum, relayMaximum].every(
       (port) => Number.isInteger(port) && port >= 1 && port <= 65_535,
@@ -151,7 +180,7 @@ export async function checkPortConflicts(environment, host = '0.0.0.0') {
   ) {
     return ['Port conflict check requires a valid bounded TURN port plan'];
   }
-  const tcpPorts = [80, 443, turnPort, turnTlsPort];
+  const tcpPorts = [httpPort, httpsPort, turnPort, turnTlsPort];
   if (new Set(tcpPorts).size !== tcpPorts.length) {
     return ['TCP listener port plan contains an internal conflict'];
   }
@@ -326,6 +355,7 @@ export async function runPreflight() {
       ...(await checkPortConflicts(
         environment,
         integration ? '127.0.0.1' : '0.0.0.0',
+        integration ? integrationEdgePorts(environment) : undefined,
       )),
     );
   }

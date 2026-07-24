@@ -32,6 +32,9 @@ interface PermissionWebContents {
   getURL(): string;
 }
 
+const themeBootstrapCspHash =
+  "'sha256-CEw6eB3Ljk1xx1wZK9eKTNvmfzTOxws2+T2zmoonEF4='";
+
 export interface PermissionSession {
   setPermissionRequestHandler(
     handler: (
@@ -127,24 +130,15 @@ export function installMediaPermissionPolicy(
         permission === 'media' &&
         details.mediaTypes?.length === 1 &&
         details.mediaTypes[0] === 'audio';
-      // Electron 43 on Windows reports getDisplayMedia as media with no types.
+      // Electron can report getDisplayMedia as media with no types before the
+      // stricter display-media handler validates its user gesture and source.
       const displayCaptureFallback =
         permission === 'media' &&
         (details.mediaTypes === undefined || details.mediaTypes.length === 0);
-      // getDisplayMedia with system audio: mediaTypes has both 'audio' and
-      // 'video'. Allow this for trusted renderers so screen-share-with-audio
-      // works.
-      const displayCaptureWithAudio =
-        permission === 'media' &&
-        details.mediaTypes !== undefined &&
-        details.mediaTypes.length >= 2 &&
-        details.mediaTypes.includes('audio') &&
-        details.mediaTypes.includes('video');
       callback(
         trusted &&
           (audioOnly ||
             displayCaptureFallback ||
-            displayCaptureWithAudio ||
             permission === 'speaker-selection' ||
             permission === 'display-capture'),
       );
@@ -185,7 +179,7 @@ export function buildContentSecurityPolicy(realtimeOrigin: string): string {
     "form-action 'none'",
     "frame-ancestors 'none'",
     "object-src 'none'",
-    "script-src 'self'",
+    `script-src 'self' 'wasm-unsafe-eval' ${themeBootstrapCspHash}`,
     "style-src 'self'",
     "font-src 'self'",
     "img-src 'self' data: blob:",

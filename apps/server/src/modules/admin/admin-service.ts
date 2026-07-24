@@ -1,11 +1,5 @@
-import type {
-  IdentityRepository,
-  SessionRepository,
-} from '@wo/database';
-import {
-  adminOverviewSchema,
-  type AdminOverview,
-} from '@wo/protocol';
+import type { IdentityRepository, SessionRepository } from '@wo/database';
+import { adminOverviewSchema, type AdminOverview } from '@wo/protocol';
 
 import type { RoomRegistry } from '../rooms/room-types.ts';
 import type { SignalingConnection } from '../signaling/connection-registry.ts';
@@ -100,7 +94,8 @@ export function createAdminService(
           isSuperAdmin: isSuperAdminEmail(user.emailNormalized),
           createdAt: user.user.createdAt.toISOString(),
           activeSessions: session?.activeSessionCount ?? 0,
-          latestSessionAt: session?.latestSessionCreatedAt?.toISOString() ?? null,
+          latestSessionAt:
+            session?.latestSessionCreatedAt?.toISOString() ?? null,
           signalingConnections: userConnections.map((connection) => ({
             connectionId: connection.connectionId,
             userId: connection.identity.userId,

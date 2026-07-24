@@ -403,6 +403,15 @@ describe('operational script contract', () => {
     expect(smoke).toContain('tls.connect');
     expect(smoke).toContain('TURN rejected invalid credentials');
     expect(smoke).toContain('TURN relay data passed');
+    expect(smoke).toContain("runTurnClient(envFile, credentials, 'tcp', true)");
+    expect(smoke).toContain('Smoke: authenticated TURN TCP relay data passed');
+    expect(smoke).toContain(
+      'turnutils_uclient -u "$username" -w "$credential" -t -c',
+    );
+    expect(smoke).toContain("'65534:65533'");
+    expect(smoke).toContain('/run/wo-turn/wo-turn-peer-$$.log');
+    expect(smoke).toContain('kill -0 "$peer_pid"');
+    expect(smoke).not.toContain('/tmp/wo-turn-peer');
     const integrationTest = readFileSync(
       resolve(
         root,

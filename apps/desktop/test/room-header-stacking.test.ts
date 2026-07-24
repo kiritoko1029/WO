@@ -26,8 +26,6 @@ describe('room header stacking for share/quality popovers', () => {
       /\.quality-panel\s*\{[^}]*z-index:\s*30;[^}]*height:\s*fit-content;/s,
     );
     expect(css).toMatch(/\.room-share-error:empty\s*\{\s*display:\s*none;/s);
-    expect(css).not.toMatch(
-      /\.room-share-error\s*\{[^}]*min-height:\s*18px;/s,
-    );
+    expect(css).not.toMatch(/\.room-share-error\s*\{[^}]*min-height:\s*18px;/s);
   });
 });

@@ -139,7 +139,7 @@ async function proveAudio(page: Page): Promise<AudioPeerSnapshot> {
         return (
           snapshot !== null &&
           snapshot.connectionState === 'connected' &&
-          snapshot.liveRemoteAudioTracks === 1 &&
+          snapshot.liveRemoteAudioTracks === 2 &&
           snapshot.packetsSent > 5 &&
           snapshot.packetsReceived > 5 &&
           snapshot.bytesSent > 0 &&

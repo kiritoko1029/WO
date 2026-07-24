@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -87,12 +93,16 @@ describe('desktop share controls', () => {
     const onStart = vi.fn();
     const onCancel = vi.fn();
     const onRefresh = vi.fn();
+    const onSystemAudioEnabledChange = vi.fn();
     const { rerender } = render(
       <SourcePicker
         sources={sources}
         selectedToken={null}
+        systemAudioEnabled={false}
+        systemAudioMode="loopback"
         state="picking"
         onSelect={onSelect}
+        onSystemAudioEnabledChange={onSystemAudioEnabledChange}
         onStart={onStart}
         onCancel={onCancel}
         onRefresh={onRefresh}
@@ -103,15 +113,26 @@ describe('desktop share controls', () => {
     expect(onSelect).toHaveBeenCalledWith(sources[0]!.token);
     expect(onStart).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole('button', { name: '刷新可共享内容列表' }));
+    await user.click(
+      screen.getByRole('button', { name: '刷新可共享内容列表' }),
+    );
     expect(onRefresh).toHaveBeenCalledOnce();
+    const systemAudioCheckbox = screen.getByRole('checkbox', {
+      name: /共享系统音频/,
+    }) as HTMLInputElement;
+    expect(systemAudioCheckbox.checked).toBe(false);
+    await user.click(systemAudioCheckbox);
+    expect(onSystemAudioEnabledChange).toHaveBeenCalledWith(true);
 
     rerender(
       <SourcePicker
         sources={sources}
         selectedToken={sources[0]!.token}
+        systemAudioEnabled={true}
+        systemAudioMode="loopback"
         state="picking"
         onSelect={onSelect}
+        onSystemAudioEnabledChange={onSystemAudioEnabledChange}
         onStart={onStart}
         onCancel={onCancel}
         onRefresh={onRefresh}
@@ -119,6 +140,64 @@ describe('desktop share controls', () => {
     );
     await user.click(screen.getByRole('button', { name: '开始共享' }));
     expect(onStart).toHaveBeenCalledOnce();
+  });
+
+  it('hides system audio when the current platform cannot capture it', () => {
+    render(
+      <SourcePicker
+        sources={sources}
+        selectedToken={sources[0]!.token}
+        systemAudioEnabled={false}
+        systemAudioMode="unsupported"
+        state="picking"
+        onSelect={vi.fn()}
+        onSystemAudioEnabledChange={vi.fn()}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole('checkbox', { name: /共享系统音频/ })).toBeNull();
+  });
+
+  it('keeps source selection exclusively in the macOS system picker', async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const onRefresh = vi.fn();
+    const onSelect = vi.fn();
+    const onSystemAudioEnabledChange = vi.fn();
+    render(
+      <SourcePicker
+        sources={[]}
+        selectedToken={null}
+        systemAudioEnabled={false}
+        systemAudioMode="native-picker"
+        state="picking"
+        onSelect={onSelect}
+        onSystemAudioEnabledChange={onSystemAudioEnabledChange}
+        onStart={onStart}
+        onCancel={vi.fn()}
+        onRefresh={onRefresh}
+      />,
+    );
+
+    expect(
+      screen.queryByRole('button', { name: '刷新可共享内容列表' }),
+    ).toBeNull();
+    expect(screen.queryByLabelText('可共享内容')).toBeNull();
+    expect(screen.getByText('准备选择共享内容')).toBeTruthy();
+
+    const systemAudioCheckbox = screen.getByRole('checkbox', {
+      name: /共享系统音频/,
+    });
+    await user.click(systemAudioCheckbox);
+    expect(onSystemAudioEnabledChange).toHaveBeenCalledWith(true);
+
+    await user.click(screen.getByRole('button', { name: '继续' }));
+    expect(onStart).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onRefresh).not.toHaveBeenCalled();
   });
 
   it('offers quality tiers as max-bitrate ceilings and stats behind a toggle', async () => {
@@ -375,7 +454,8 @@ describe('desktop share controls', () => {
 
     const video = screen.getByLabelText('林远的共享屏幕') as HTMLVideoElement;
     const requestFullscreen = vi.fn().mockResolvedValue(undefined);
-    video.requestFullscreen = requestFullscreen as unknown as typeof video.requestFullscreen;
+    video.requestFullscreen =
+      requestFullscreen as unknown as typeof video.requestFullscreen;
 
     fireEvent.click(screen.getByRole('button', { name: '全屏展示' }));
     expect(requestFullscreen).toHaveBeenCalled();

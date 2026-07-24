@@ -376,16 +376,84 @@ describe('authoritative screen lease registry', () => {
     ).toBeNull();
   });
 
-  test('releases on disconnect and room end', () => {
+  test('preserves a disconnected holder lease across resume and renews it on the new epoch', () => {
+    const { leases, creator, roomRegistry } = createHarness();
+    const lease = leases.acquire({ ...creator, requestId: 'acquire' }).data
+      .lease;
+
+    const disconnected = roomRegistry.disconnect(creator);
+    expect(disconnected.intents).not.toContainEqual(
+      expect.objectContaining({ type: 'screen.ownerChanged' }),
+    );
+    expect(disconnected.data.room.screenLease).toMatchObject({
+      leaseId: lease.leaseId,
+      ownerUserId: creator.userId,
+    });
+
+    const resumed = roomRegistry.resume({
+      roomId: creator.roomId,
+      userId: creator.userId,
+      displayName: 'Creator',
+      connectionId: 'creator-resumed',
+      requestId: 'resume',
+    }).data;
+    const rebound = {
+      roomId: creator.roomId,
+      userId: creator.userId,
+      connectionId: resumed.connection.connectionId,
+      connectionEpoch: resumed.connection.connectionEpoch,
+    };
+
+    expect(leases.current(rebound)?.leaseId).toBe(lease.leaseId);
+    expect(() =>
+      leases.renew({
+        ...creator,
+        requestId: 'stale-renew',
+        leaseId: lease.leaseId,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'STALE_CONNECTION' }));
+    expect(
+      leases.renew({
+        ...rebound,
+        requestId: 'resumed-renew',
+        leaseId: lease.leaseId,
+      }).data.lease,
+    ).toMatchObject({
+      leaseId: lease.leaseId,
+      ownerUserId: creator.userId,
+      expiresAtMs: 15_000,
+    });
+  });
+
+  test('lets a disconnected lease expire exactly once without a resume', () => {
+    const { leases, creator, roomRegistry, asyncIntents } = createHarness();
+    leases.acquire({ ...creator, requestId: 'acquire' });
+    roomRegistry.disconnect(creator);
+
+    vi.advanceTimersByTime(15_000);
+
+    expect(
+      asyncIntents.filter(
+        (intent) =>
+          (intent as { type?: string }).type === 'screen.ownerChanged',
+      ),
+    ).toEqual([
+      {
+        type: 'screen.ownerChanged',
+        roomId: creator.roomId,
+        ownerUserId: null,
+        leaseId: null,
+      },
+    ]);
+  });
+
+  test('preserves on disconnect but releases on room end', () => {
     const first = createHarness();
     first.leases.acquire({ ...first.creator, requestId: 'acquire' });
     const disconnected = first.roomRegistry.disconnect(first.creator);
-    expect(disconnected.intents).toContainEqual({
-      type: 'screen.ownerChanged',
-      roomId: first.roomId,
-      ownerUserId: null,
-      leaseId: null,
-    });
+    expect(disconnected.intents).not.toContainEqual(
+      expect.objectContaining({ type: 'screen.ownerChanged' }),
+    );
 
     const second = createHarness();
     second.leases.acquire({ ...second.creator, requestId: 'acquire' });

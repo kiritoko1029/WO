@@ -333,11 +333,23 @@ export function createRealtimeRoomGateway(
         }));
         break;
       case 'peer.left': {
+        if (event.payload.reason === 'disconnected') {
+          if (callSession !== null) {
+            callSession = Object.freeze({ ...callSession, peerReady: false });
+          }
+          updatePeer(event.payload.userId, (peer) => ({
+            ...peer,
+            online: false,
+          }));
+          emitSnapshot({
+            ...current,
+            connectionStatus: 'reconnecting',
+          });
+          break;
+        }
         const remainingRemotes = current.participants.filter(
           (item) =>
-            !item.isSelf &&
-            item.userId !== event.payload.userId &&
-            item.online,
+            !item.isSelf && item.userId !== event.payload.userId && item.online,
         );
         if (callSession !== null && remainingRemotes.length === 0) {
           callSession = Object.freeze({ ...callSession, peerReady: false });
@@ -563,9 +575,11 @@ export interface CallSnapshot {
   readonly supportsOutputSelection: boolean;
   readonly microphoneRetryAvailable: boolean;
   readonly noiseIntensity: NoiseIntensity;
+  readonly rnnoiseActive: boolean;
   readonly screenState: ScreenShareState;
   readonly screenSources: readonly CaptureSourceSummary[];
   readonly screenSelectedToken: string | null;
+  readonly screenSystemAudioEnabled: boolean;
   readonly screenCaptureSettings: ScreenCaptureSettings | null;
   readonly screenError: string | null;
   readonly screenOwner: Readonly<{
@@ -600,6 +614,7 @@ export interface CallController {
   refreshDevices(): Promise<void>;
   prepareScreenShare(): Promise<void>;
   selectScreenSource(token: string): Promise<void>;
+  setScreenSystemAudioEnabled(enabled: boolean): void;
   /** Re-list OS windows/screens while the picker is open. */
   refreshScreenSources(): Promise<void>;
   startScreenShare(): Promise<void>;
@@ -724,9 +739,11 @@ export function createCallController(
     supportsOutputSelection: false,
     microphoneRetryAvailable: false,
     noiseIntensity: readNoiseIntensity(),
+    rnnoiseActive: false,
     screenState: 'idle',
     screenSources: Object.freeze([]),
     screenSelectedToken: null,
+    screenSystemAudioEnabled: false,
     screenCaptureSettings: null,
     screenError: null,
     screenOwner: initialScreenOwner,
@@ -801,6 +818,7 @@ export function createCallController(
   let waitingForPeer = !options.room.participants.some(
     (participant) => !participant.isSelf && participant.online,
   );
+  let remoteSignalingDisconnected = false;
   const subscriptions: Array<() => void> = [];
   let cleanupCall: () => Promise<void> = async () => undefined;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
@@ -974,6 +992,7 @@ export function createCallController(
       screenState: screenSnapshot.state,
       screenSources: screenSnapshot.sources,
       screenSelectedToken: screenSnapshot.selectedToken,
+      screenSystemAudioEnabled: screenSnapshot.systemAudioEnabled,
       screenCaptureSettings: screenSnapshot.captureSettings,
       screenError: screenSnapshot.error,
       localScreenTrack:
@@ -1032,6 +1051,8 @@ export function createCallController(
       ...(audioSender === undefined ? {} : { audioSender }),
       signaling: options.gateway.signaling,
       capture: options.gateway.desktop.capture,
+      getSystemAudioMode: () =>
+        snapshot.screenPermission?.systemAudioMode ?? 'unsupported',
       ...(options.mediaDevices === undefined
         ? {}
         : { mediaDevices: options.mediaDevices }),
@@ -1073,6 +1094,7 @@ export function createCallController(
       screenState: 'idle',
       screenSources: Object.freeze([]),
       screenSelectedToken: null,
+      screenSystemAudioEnabled: false,
       screenCaptureSettings: null,
       screenError: null,
       localScreenTrack: null,
@@ -1114,6 +1136,7 @@ export function createCallController(
         // and must not drive reconnect / fail into "语音连接异常".
         if (
           !waitingForPeer &&
+          !remoteSignalingDisconnected &&
           (everConnected || iceConnectionState === 'failed')
         ) {
           void reconnect
@@ -1148,6 +1171,7 @@ export function createCallController(
             });
         } else if (
           !waitingForPeer &&
+          !remoteSignalingDisconnected &&
           (connectionState === 'failed' ||
             (connectionState === 'disconnected' && everConnected))
         ) {
@@ -1211,9 +1235,9 @@ export function createCallController(
       null;
     // Hoisted so the .catch() path can release a preserved screen controller
     // if the rebuild fails before re-attach.
-    let preservedScreenController = screenController;
+    const preservedScreenController = screenController;
     const preservedScreenState = screenController?.getSnapshot().state;
-    let screenWasActive =
+    const screenWasActive =
       preservedScreenState === 'sharing' ||
       preservedScreenState === 'capturing';
     const operation = (async () => {
@@ -1298,9 +1322,9 @@ export function createCallController(
       // If the rebuild failed and we preserved the screen controller, we
       // must release its tracks and lease now since there's no new peer.
       if (screenWasActive) {
-        await preservedScreenController?.handleSignalingClosed().catch(
-          () => undefined,
-        );
+        await preservedScreenController
+          ?.handleSignalingClosed()
+          .catch(() => undefined);
       }
       if (nextPeer !== null && peer === nextPeer) {
         negotiationSubscription?.();
@@ -1428,9 +1452,8 @@ export function createCallController(
       for (const stats of report.values()) {
         const record = stats as Record<string, unknown>;
         if (record.kind !== 'audio') continue;
-        const level = typeof record.audioLevel === 'number'
-          ? record.audioLevel
-          : 0;
+        const level =
+          typeof record.audioLevel === 'number' ? record.audioLevel : 0;
         if (record.type === 'media-source') {
           localLevel = Math.max(localLevel, level);
         } else if (record.type === 'inbound-rtp') {
@@ -1593,6 +1616,10 @@ export function createCallController(
             );
             return;
           }
+          if (remoteSignalingDisconnected) {
+            dispatchCall({ type: 'recover', reason: 'signal' });
+            return;
+          }
           failTerminal(recovery.error ?? new Error('Recovery failed'));
         } else if (recovery.state === 'reconnecting-signal') {
           dispatchCall({ type: 'recover', reason: 'signal' });
@@ -1613,8 +1640,19 @@ export function createCallController(
           case 'peer.ready':
             remoteReady = true;
             waitingForPeer = false;
-            if (negotiationEstablished) settleCallPhase();
-            else dispatchCall({ type: 'negotiate' });
+            remoteSignalingDisconnected = false;
+            if (negotiationEstablished) {
+              settleCallPhase();
+              if (
+                peer !== null &&
+                peer.connectionState !== 'connected' &&
+                reconnect !== null
+              ) {
+                void reconnect.handleIceConnectionState('failed').catch(fail);
+              }
+            } else {
+              dispatchCall({ type: 'negotiate' });
+            }
             maybeOffer();
             break;
           case 'webrtc.offer':
@@ -1633,7 +1671,14 @@ export function createCallController(
                   ) {
                     return;
                   }
-                  ensureScreenController();
+                  const screen = ensureScreenController();
+                  const screenSender = activePeer.screenSender;
+                  if (screen !== null && screenSender !== null) {
+                    await screen.reattachTransport(
+                      screenSender,
+                      activePeer.screenAudioSender ?? undefined,
+                    );
+                  }
                   const sender = activePeer.audioSender;
                   if (sender !== null && voice!.microphoneTrack !== null) {
                     await voice!.bindSender(sender, true);
@@ -1808,9 +1853,16 @@ export function createCallController(
             break;
           }
           case 'peer.left': {
+            if (event.payload.reason === 'disconnected') {
+              remoteReady = false;
+              remoteSignalingDisconnected = true;
+              dispatchCall({ type: 'recover', reason: 'signal' });
+              break;
+            }
             const wasConnected = everConnected;
             remoteReady = false;
             waitingForPeer = true;
+            remoteSignalingDisconnected = false;
             negotiationEstablished = false;
             // Re-establish after rejoin is a fresh connect attempt: transient
             // offer/ICE errors must not permanently fail the host UI.
@@ -1828,14 +1880,15 @@ export function createCallController(
               localAudioLevel: 0,
               remoteAudioLevel: 0,
             });
-            dispatchCall(
-              { type: 'peer-left', wasConnected },
-              { error: null },
-            );
+            dispatchCall({ type: 'peer-left', wasConnected }, { error: null });
             // Terminal failures (e.g. mic permission) must stay failed — a
             // late peer.left must not attempt recovery.
             const phase = callMachine.getSnapshot().phase;
-            if (phase === 'failed' || phase === 'closing' || phase === 'closed') {
+            if (
+              phase === 'failed' ||
+              phase === 'closing' ||
+              phase === 'closed'
+            ) {
               break;
             }
             // Rebuild a live PeerConnection while waiting. After a completed
@@ -1962,7 +2015,10 @@ export function createCallController(
       }
       if (deviceChangeHandler !== null) {
         const mediaDevices = options.mediaDevices ?? navigator.mediaDevices;
-        mediaDevices?.removeEventListener?.('devicechange', deviceChangeHandler);
+        mediaDevices?.removeEventListener?.(
+          'devicechange',
+          deviceChangeHandler,
+        );
         deviceChangeHandler = null;
       }
       presentationSampler = null;
@@ -2015,6 +2071,7 @@ export function createCallController(
           selectedInputId: deviceId,
           error: null,
           microphoneRetryAvailable: false,
+          rnnoiseActive: voice!.rnnoiseActive,
         });
         settleCallPhase();
       } catch (error) {
@@ -2084,7 +2141,10 @@ export function createCallController(
               await voice!.bindSender(currentSender);
               assertCurrentLifecycle(generation);
             }
-            update({ microphoneRetryAvailable: false });
+            update({
+              microphoneRetryAvailable: false,
+              rnnoiseActive: voice!.rnnoiseActive,
+            });
           }
           try {
             const devices = await voice!.listDevices();
@@ -2133,6 +2193,7 @@ export function createCallController(
             selectedInputId: deviceId,
             error: null,
             microphoneRetryAvailable: false,
+            rnnoiseActive: voice!.rnnoiseActive,
           },
         );
         settleCallPhase();
@@ -2170,7 +2231,10 @@ export function createCallController(
     setNoiseIntensity: async (intensity) => {
       await voice!.setNoiseIntensity(intensity);
       writeNoiseIntensity(intensity);
-      update({ noiseIntensity: intensity });
+      update({
+        noiseIntensity: intensity,
+        rnnoiseActive: voice!.rnnoiseActive,
+      });
     },
     selectOutput: async (deviceId) => {
       if (await voice!.selectOutput(deviceId)) {
@@ -2239,6 +2303,16 @@ export function createCallController(
         });
       }
       await screen.selectSource(token);
+    },
+    setScreenSystemAudioEnabled: (enabled) => {
+      currentLifecycle();
+      const screen = ensureScreenController();
+      if (screen === null) {
+        throw Object.assign(new Error('Screen sender is unavailable'), {
+          code: 'INVALID_STATE',
+        });
+      }
+      screen.setSystemAudioEnabled(enabled);
     },
     refreshScreenSources: async () => {
       currentLifecycle();
@@ -2320,9 +2394,11 @@ function passiveCallController(room: RoomSnapshot): CallController {
     supportsOutputSelection: false,
     microphoneRetryAvailable: false,
     noiseIntensity: readNoiseIntensity(),
+    rnnoiseActive: false,
     screenState: 'idle',
     screenSources: Object.freeze([]),
     screenSelectedToken: null,
+    screenSystemAudioEnabled: false,
     screenCaptureSettings: null,
     screenError: null,
     screenOwner: null,
@@ -2360,6 +2436,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
         code: 'INVALID_STATE',
       });
     },
+    setScreenSystemAudioEnabled: () => undefined,
     refreshScreenSources: async () => undefined,
     startScreenShare: async () => {
       throw Object.assign(new Error('Screen sharing is unavailable'), {

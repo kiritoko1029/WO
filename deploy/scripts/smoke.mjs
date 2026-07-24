@@ -236,19 +236,35 @@ set -eu
 username="$1"
 credential="$2"
 transport="$3"
-turnutils_peer -L 127.0.0.1 -p 3480 >/tmp/wo-turn-peer.log 2>&1 &
+peer_log="/run/wo-turn/wo-turn-peer-$$.log"
+turnutils_peer -L 127.0.0.1 -p 3480 >"$peer_log" 2>&1 &
 peer_pid=$!
 cleanup() {
   kill "$peer_pid" 2>/dev/null || true
-  rm -f /tmp/wo-turn-peer.log
+  wait "$peer_pid" 2>/dev/null || true
+  rm -f "$peer_log"
 }
 trap cleanup EXIT
 sleep 1
-if [ "$transport" = tls ]; then
-  turnutils_uclient -u "$username" -w "$credential" -S -t -E /run/secrets/turn_tls_cert -c -n 3 -e 127.0.0.1 -r 3480 -p 5349 127.0.0.1
-else
-  turnutils_uclient -u "$username" -w "$credential" -c -n 3 -e 127.0.0.1 -r 3480 -p 3478 127.0.0.1
+if ! kill -0 "$peer_pid" 2>/dev/null; then
+  cat "$peer_log" >&2
+  exit 1
 fi
+case "$transport" in
+  tls)
+    turnutils_uclient -u "$username" -w "$credential" -S -t -E /run/secrets/turn_tls_cert -c -n 3 -e 127.0.0.1 -r 3480 -p 5349 127.0.0.1
+    ;;
+  tcp)
+    turnutils_uclient -u "$username" -w "$credential" -t -c -n 3 -e 127.0.0.1 -r 3480 -p 3478 127.0.0.1
+    ;;
+  udp)
+    turnutils_uclient -u "$username" -w "$credential" -c -n 3 -e 127.0.0.1 -r 3480 -p 3478 127.0.0.1
+    ;;
+  *)
+    printf '%s\n' 'Unsupported TURN proof transport' >&2
+    exit 2
+    ;;
+esac
 `;
 
 function runTurnClient(envFile, credentials, transport, shouldPass) {
@@ -258,6 +274,8 @@ function runTurnClient(envFile, credentials, transport, shouldPass) {
       envFile,
       'exec',
       '-T',
+      '--user',
+      '65534:65533',
       'coturn',
       'sh',
       '-ec',
@@ -285,12 +303,16 @@ function runTurnClient(envFile, credentials, transport, shouldPass) {
     const receivedCounts = [...output.matchAll(/tot_recv_msgs=([0-9]+)/gu)].map(
       (match) => Number(match[1]),
     );
+    const maximumReceived =
+      receivedCounts.length === 0 ? undefined : Math.max(...receivedCounts);
     if (
       result.status !== 0 ||
-      receivedCounts.length === 0 ||
-      Math.max(...receivedCounts) < 1
+      maximumReceived === undefined ||
+      maximumReceived < 1
     ) {
-      throw new Error('Authenticated TURN client exchanged no relay data');
+      throw new Error(
+        `Authenticated TURN client exchanged no relay data (status=${result.status}, max-received=${maximumReceived ?? 'missing'})`,
+      );
     }
   } else if (
     result.status === 0 ||
@@ -345,6 +367,9 @@ async function verifyTurnProof(envFile, environment, session) {
   const credentials = turnCredentials(session, environment);
   runTurnClient(envFile, credentials, 'udp', true);
   process.stdout.write('Smoke: TURN relay data passed\n');
+
+  runTurnClient(envFile, credentials, 'tcp', true);
+  process.stdout.write('Smoke: authenticated TURN TCP relay data passed\n');
 
   await verifyTurnTls(environment);
   runTurnClient(envFile, credentials, 'tls', true);

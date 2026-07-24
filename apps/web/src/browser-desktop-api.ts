@@ -16,6 +16,7 @@ import {
   authResponseSchema,
   authVerifyEmailBodySchema,
   opaqueTokenSchema,
+  parseAuthenticatedAuthResponse,
   signalTicketResponseSchema,
   type AuthResponse,
 } from '@wo/protocol';
@@ -267,8 +268,6 @@ export function createBrowserDesktopApi(
     storage.setItem(REFRESH_TOKEN_KEY, response.refreshToken);
     return publicSession(response, now());
   };
-  const asAuthResponse = (value: unknown): AuthResponse =>
-    authResponseSchema.parse(value);
 
   const refresh = (): Promise<PublicAuthSession> => {
     if (refreshInFlight !== null) return refreshInFlight;
@@ -342,7 +341,9 @@ export function createBrowserDesktopApi(
             email: response.email,
           });
         }
-        const session = persistResponse(asAuthResponse(response));
+        const session = persistResponse(
+          parseAuthenticatedAuthResponse(response),
+        );
         return Object.freeze({ kind: 'session' as const, session });
       }),
     login: (input) =>
@@ -458,6 +459,9 @@ export function createBrowserDesktopApi(
       Object.freeze({
         status: displayCaptureSupported ? 'not-determined' : 'restricted',
         canOpenSettings: false,
+        systemAudioMode: displayCaptureSupported
+          ? ('native-picker' as const)
+          : ('unsupported' as const),
       }),
     openSettings: async () => undefined,
   });

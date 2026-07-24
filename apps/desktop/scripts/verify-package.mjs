@@ -151,10 +151,13 @@ const trustedSevenZipSha256 = Object.freeze({
     'bd5765978a541323758d82ad1d30df76a2e3c86341f12d6b0524d837411e9b4a',
 });
 const macBundleIdentifier = 'cn.wo.desktop';
+const packageSmokeApiOrigin = 'https://127.0.0.1:1';
 const macUsageDescriptions = Object.freeze({
   NSMicrophoneUsageDescription: 'WO uses the microphone for voice calls.',
   NSScreenCaptureUsageDescription:
     'WO uses screen capture when you share your desktop.',
+  NSAudioCaptureUsageDescription:
+    'WO captures system audio only when you explicitly enable it while sharing.',
 });
 const requiredMacEntitlements = Object.freeze([
   'com.apple.security.cs.allow-jit',
@@ -417,7 +420,7 @@ function scanText(source, displayPath, runtimePath) {
     {
       label: 'certificate verification bypass',
       pattern:
-        /setCertificateVerifyProc|certificate-error|ignore-certificate-errors|allowInsecureLocalhost|NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized\s*[:=]\s*false|certificateVerifier/iu,
+        /certificate-error|ignore-certificate-errors|setIgnoreCertificateErrors|allowInsecureLocalhost|NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized\s*[:=]\s*false|integrationCertificateVerifier|setCertificateVerifyProc\s*\([\s\S]{0,256}?(?:=>\s*(?:0|true)\b|(?:callback|done)\s*\(\s*(?:0|true)\s*\))/iu,
     },
     {
       label: 'source map reference',
@@ -432,6 +435,20 @@ function scanText(source, displayPath, runtimePath) {
     if (rule.pattern.test(source)) {
       fail(`Package contains ${rule.label}: ${displayPath}`);
     }
+  }
+  if (
+    /setCertificateVerifyProc/u.test(source) &&
+    ![
+      /WO_EXTRA_CA_CERTS/u,
+      /explicit extra CA/iu,
+      /fixed extra CA hostname/iu,
+      /ERR_CERT_AUTHORITY_INVALID/u,
+      /\.checkHost\s*\(/u,
+      /\.checkIssued\s*\(/u,
+      /\.verify\s*\(/u,
+    ].every((contract) => contract.test(source))
+  ) {
+    fail(`Package contains an unbounded certificate verifier: ${displayPath}`);
   }
   if (
     isRendererPath(runtimePath) &&
@@ -540,9 +557,10 @@ async function findAsarArchives(packageDirectory) {
 }
 
 async function verifyAsarArchives(packageDirectory, platform) {
-  const archives = await findAsarArchives(packageDirectory);
+  const root = await realpath(packageDirectory);
+  const archives = await findAsarArchives(root);
   const actualPaths = archives
-    .map((path) => relative(packageDirectory, path).replaceAll('\\', '/'))
+    .map((path) => relative(root, path).replaceAll('\\', '/'))
     .sort();
   const expectedPaths = expectedArchivePaths(platform).sort();
   if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
@@ -944,6 +962,32 @@ function runNativeCommand(executable, args, environment) {
   });
 }
 
+export async function detachMacDiskImage(
+  mountPoint,
+  runner,
+  environment,
+  wait = delay,
+) {
+  const normalAttempts = 4;
+  for (let attempt = 1; attempt <= normalAttempts; attempt += 1) {
+    try {
+      await runner(macNativeTools.hdiutil, ['detach', mountPoint], environment);
+      return;
+    } catch (error) {
+      const resourceBusy =
+        error instanceof Error &&
+        /^hdiutil exited with code 16$/u.test(error.message);
+      if (!resourceBusy) throw error;
+      if (attempt < normalAttempts) await wait(250);
+    }
+  }
+  await runner(
+    macNativeTools.hdiutil,
+    ['detach', '-force', mountPoint],
+    environment,
+  );
+}
+
 async function verifyWindowsSignatures(
   executablePaths,
   runner,
@@ -1057,7 +1101,9 @@ async function readMacInfoPlist(path, runner, environment) {
     value.NSMicrophoneUsageDescription !==
       macUsageDescriptions.NSMicrophoneUsageDescription ||
     value.NSScreenCaptureUsageDescription !==
-      macUsageDescriptions.NSScreenCaptureUsageDescription
+      macUsageDescriptions.NSScreenCaptureUsageDescription ||
+    value.NSAudioCaptureUsageDescription !==
+      macUsageDescriptions.NSAudioCaptureUsageDescription
   ) {
     fail(
       `macOS application Info.plist has invalid bundle or usage metadata: ${path}`,
@@ -1449,11 +1495,7 @@ async function verifyMacArtifacts(
       }
     } finally {
       if (attached) {
-        await runner(
-          macNativeTools.hdiutil,
-          ['detach', mountPoint],
-          environment,
-        );
+        await detachMacDiskImage(mountPoint, runner, environment);
       }
       await rm(mountPoint, { recursive: true, force: true });
     }
@@ -1517,7 +1559,7 @@ export function createSmokeEnvironment(baseEnvironment, smoke) {
   }
   return Object.freeze({
     ...environment,
-    WO_API_ORIGIN: 'https://localhost',
+    WO_API_ORIGIN: packageSmokeApiOrigin,
     WO_PACKAGE_SMOKE: '1',
     WO_PACKAGE_SMOKE_NONCE: smoke.nonce,
     WO_PACKAGE_SMOKE_PATH: smoke.readyPath,
