@@ -2,10 +2,16 @@ name: wo
 
 services:
   caddy:
-    image: wo-caddy:2.11.4-web.1
+    image: 'wo-caddy:${BUILD_VERSION:-unresolved}'
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: deploy/caddy/Dockerfile
+      args:
+        BUILD_CREATED: '${BUILD_CREATED:-}'
+        BUILD_REVISION: '${BUILD_REVISION:-}'
+        BUILD_VERSION: '${BUILD_VERSION:-}'
+        SOURCE_DATE_EPOCH: '${SOURCE_DATE_EPOCH:-}'
     restart: unless-stopped
     depends_on:
       server:
@@ -39,9 +45,16 @@ services:
       - caddy_config:/config
 
   server:
+    image: 'wo-server:${BUILD_VERSION:-unresolved}'
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: apps/server/Dockerfile
+      args:
+        BUILD_CREATED: '${BUILD_CREATED:-}'
+        BUILD_REVISION: '${BUILD_REVISION:-}'
+        BUILD_VERSION: '${BUILD_VERSION:-}'
+        SOURCE_DATE_EPOCH: '${SOURCE_DATE_EPOCH:-}'
     restart: unless-stopped
     user: '0:0'
     read_only: true
@@ -119,6 +132,7 @@ services:
 
   postgres:
     image: postgres:17.10-alpine3.23
+    platform: linux/amd64
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
@@ -142,10 +156,16 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   coturn:
-    image: wo-coturn:4.14.0-r0-alpine
+    image: 'wo-coturn:${BUILD_VERSION:-unresolved}'
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: deploy/coturn/Dockerfile
+      args:
+        BUILD_CREATED: '${BUILD_CREATED:-}'
+        BUILD_REVISION: '${BUILD_REVISION:-}'
+        BUILD_VERSION: '${BUILD_VERSION:-}'
+        SOURCE_DATE_EPOCH: '${SOURCE_DATE_EPOCH:-}'
     restart: unless-stopped
     user: '0:0'
     read_only: true
@@ -167,6 +187,7 @@ services:
         max-file: '5'
     environment:
       TURN_EXTERNAL_IP: ${PUBLIC_IPV4:?PUBLIC_IPV4 is required}
+      TURN_INTERNAL_IP: ${TURN_INTERNAL_IP:-}
       TURN_LISTEN_PORT: '3478'
       TURN_TLS_LISTEN_PORT: '5349'
       TURN_REALM: ${TURN_REALM:?TURN_REALM is required}
@@ -177,7 +198,7 @@ services:
       test:
         [
           'CMD-SHELL',
-          'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" >/dev/null 2>&1',
+          'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" "$${TURN_INTERNAL_IP:-127.0.0.1}" >/dev/null 2>&1',
         ]
       interval: 60s
       timeout: 5s
@@ -196,10 +217,6 @@ services:
         published: ${TURN_TLS_PORT:-5349}
         protocol: tcp
         host_ip: 0.0.0.0
-      - target: 5349
-        published: ${TURN_TLS_PORT:-5349}
-        protocol: udp
-        host_ip: 0.0.0.0
       - 0.0.0.0:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
     networks:
       - turn_edge
@@ -208,10 +225,7 @@ services:
       - turn_tls_cert
       - turn_tls_key
     tmpfs:
-      - /run/wo-turn:uid=0,gid=0,mode=0700,noexec,nosuid,nodev
-    volumes:
-      - ./coturn/entrypoint.sh:/opt/wo/turn-entrypoint.sh:ro
-      - ./coturn/turnserver.conf:/etc/coturn/turnserver.wo.conf:ro
+      - /run/wo-turn:uid=0,gid=0,mode=0700,size=4m,noexec,nosuid,nodev
 
 networks:
   edge: {}

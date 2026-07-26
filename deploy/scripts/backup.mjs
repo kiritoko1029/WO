@@ -6,25 +6,25 @@ import {
   argumentValue,
   composeArguments,
   deployDirectory,
+  failureMessage,
   hasArgument,
   integrationComposeArguments,
   loadDeploymentEnvironment,
   pipeCommandToFile,
   run,
   sha256File,
+  withDeploymentOperationLock,
 } from './ops.mjs';
+import {
+  requiresRuntimeComposeImageOverride,
+  withRuntimeComposeImageOverride,
+} from './runtime-compose-override.mjs';
 
 function backupTimestamp(now = new Date()) {
   return now.toISOString().replace(/[:.]/gu, '-');
 }
 
-export async function runBackup() {
-  const envFile = resolve(
-    argumentValue('--env-file', resolve(deployDirectory, '.env')),
-  );
-  const environment = loadDeploymentEnvironment(envFile);
-  const integration = hasArgument('--integration');
-  const compose = integration ? integrationComposeArguments : composeArguments;
+async function createBackup(environment, integration, compose) {
   const root = resolve(deployDirectory, environment.BACKUP_DIR);
   const directory = resolve(root, backupTimestamp());
   await mkdir(directory, { recursive: false, mode: 0o700 });
@@ -35,7 +35,6 @@ export async function runBackup() {
     run(
       'docker',
       compose(
-        envFile,
         'exec',
         '-T',
         'postgres',
@@ -59,7 +58,6 @@ export async function runBackup() {
   await pipeCommandToFile(
     'docker',
     compose(
-      envFile,
       'exec',
       '-T',
       'postgres',
@@ -79,7 +77,6 @@ export async function runBackup() {
   await pipeCommandToFile(
     'docker',
     compose(
-      envFile,
       'run',
       '--rm',
       '--no-deps',
@@ -123,12 +120,41 @@ export async function runBackup() {
   return directory;
 }
 
+export async function runBackup({ operationLockToken } = {}) {
+  const envFile = resolve(
+    argumentValue('--env-file', resolve(deployDirectory, '.env')),
+  );
+  const environment = loadDeploymentEnvironment(envFile);
+  const integration = hasArgument('--integration');
+  const composeArgumentsForMode = integration
+    ? integrationComposeArguments
+    : composeArguments;
+  const compose = (...arguments_) =>
+    composeArgumentsForMode(envFile, ...arguments_);
+  return withDeploymentOperationLock(
+    deployDirectory,
+    () => {
+      const operation = (selectedCompose) =>
+        createBackup(environment, integration, selectedCompose);
+      if (!requiresRuntimeComposeImageOverride({ integration })) {
+        return operation(compose);
+      }
+      return withRuntimeComposeImageOverride({
+        compose,
+        operation,
+        service: 'caddy',
+      });
+    },
+    { token: operationLockToken },
+  );
+}
+
 if (
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   runBackup().catch((error) => {
-    process.stderr.write(`Backup failed (${error.name ?? 'Error'})\n`);
+    process.stderr.write(`Backup failed (${failureMessage(error)})\n`);
     process.exitCode = 1;
   });
 }

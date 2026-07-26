@@ -4,6 +4,7 @@ import {
   X509Certificate,
 } from 'node:crypto';
 import { isIPv4 } from 'node:net';
+import { posix } from 'node:path';
 import { rootCertificates } from 'node:tls';
 
 const requiredFields = Object.freeze([
@@ -66,6 +67,25 @@ export function isPublicIpv4(value) {
       inIpv4Range(value, first, last),
     )
   );
+}
+
+export function isPrivateIpv4(value) {
+  return (
+    isIPv4(value) &&
+    [
+      ['10.0.0.0', '10.255.255.255'],
+      ['172.16.0.0', '172.31.255.255'],
+      ['192.168.0.0', '192.168.255.255'],
+    ].some(([first, last]) => inIpv4Range(value, first, last))
+  );
+}
+
+export function turnNetworkMode(environment) {
+  return environment.TURN_NETWORK_MODE?.trim() || 'bridge';
+}
+
+export function turnRelayPortLimit(environment) {
+  return turnNetworkMode(environment) === 'host' ? 512 : 200;
 }
 
 export function parseDotEnv(source) {
@@ -157,8 +177,30 @@ export function validateDeploymentEnvironment(
   { platform = process.platform, integration = false } = {},
 ) {
   const issues = [];
+  const networkMode = turnNetworkMode(environment);
   if (!integration && platform !== 'linux') {
     issues.push('Production deployment requires a Linux Docker host');
+  }
+  if (!['bridge', 'host'].includes(networkMode)) {
+    issues.push('TURN_NETWORK_MODE must be bridge or host');
+  }
+  if (integration && networkMode !== 'bridge') {
+    issues.push('The integration profile requires TURN_NETWORK_MODE=bridge');
+  }
+  if (networkMode === 'host') {
+    if (!isPrivateIpv4(environment.TURN_INTERNAL_IP ?? '')) {
+      issues.push(
+        'TURN_INTERNAL_IP must be a private RFC1918 IPv4 address in host mode',
+      );
+    }
+    if (
+      typeof environment.TURN_STATE_EMPTY_DIR !== 'string' ||
+      !posix.isAbsolute(environment.TURN_STATE_EMPTY_DIR)
+    ) {
+      issues.push('TURN_STATE_EMPTY_DIR must be an absolute path in host mode');
+    }
+  } else if ((environment.TURN_INTERNAL_IP ?? '').trim().length > 0) {
+    issues.push('TURN_INTERNAL_IP is only allowed in host mode');
   }
   for (const field of requiredFields) {
     const value = environment[field];
@@ -221,10 +263,11 @@ export function validateDeploymentEnvironment(
   if (
     Number.isInteger(relayMinimum) &&
     Number.isInteger(relayMaximum) &&
-    (relayMinimum > relayMaximum || relayMaximum - relayMinimum + 1 > 200)
+    (relayMinimum > relayMaximum ||
+      relayMaximum - relayMinimum + 1 > turnRelayPortLimit(environment))
   ) {
     issues.push(
-      'TURN relay range must be ascending and contain at most 200 ports',
+      `TURN relay range must be ascending and contain at most ${turnRelayPortLimit(environment)} ports in ${networkMode} mode`,
     );
   }
   if (
@@ -294,7 +337,7 @@ export function semverAtLeast(actual, minimum) {
 export function firewallSummary(environment) {
   return [
     `TCP 80,443,${environment.TURN_PORT},${environment.TURN_TLS_PORT}`,
-    `UDP ${environment.TURN_PORT},${environment.TURN_TLS_PORT},${environment.TURN_RELAY_MIN_PORT}-${environment.TURN_RELAY_MAX_PORT}`,
+    `UDP ${environment.TURN_PORT},${environment.TURN_RELAY_MIN_PORT}-${environment.TURN_RELAY_MAX_PORT}`,
   ];
 }
 

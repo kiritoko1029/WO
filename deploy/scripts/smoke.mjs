@@ -7,6 +7,7 @@ import * as tls from 'node:tls';
 
 import {
   argumentValue,
+  composeProcessEnvironment,
   deployDirectory,
   hasArgument,
   integrationComposeArguments,
@@ -14,6 +15,73 @@ import {
 } from './ops.mjs';
 
 const timeoutMilliseconds = 8_000;
+const smokeAccountCount = 3;
+const smokeEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+export const smokeP2pMediaPlan = 'mic-system-screen-v1';
+
+export function productionSmokeAccounts(environment) {
+  const emails = (environment.DEPLOY_SMOKE_EMAILS ?? '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter((email) => email.length > 0);
+  if (
+    emails.length !== smokeAccountCount ||
+    new Set(emails).size !== smokeAccountCount
+  ) {
+    throw new Error(
+      'DEPLOY_SMOKE_EMAILS must contain exactly three unique accounts',
+    );
+  }
+
+  const allowlist = new Set(
+    (environment.EMAIL_DOMAIN_ALLOWLIST ?? '')
+      .split(',')
+      .map((domain) => domain.trim().toLowerCase())
+      .filter((domain) => domain.length > 0),
+  );
+  for (const email of emails) {
+    const domain = email.slice(email.lastIndexOf('@') + 1);
+    if (
+      !smokeEmailPattern.test(email) ||
+      domain === 'invalid' ||
+      domain.endsWith('.invalid')
+    ) {
+      throw new Error('DEPLOY_SMOKE_EMAILS contains an invalid account');
+    }
+    if (allowlist.size > 0 && !allowlist.has(domain)) {
+      throw new Error(
+        'DEPLOY_SMOKE_EMAILS contains an account outside EMAIL_DOMAIN_ALLOWLIST',
+      );
+    }
+  }
+
+  const password = environment.DEPLOY_SMOKE_PASSWORD ?? '';
+  if (password.length < 10 || password.length > 128) {
+    throw new Error('DEPLOY_SMOKE_PASSWORD must contain 10 to 128 characters');
+  }
+  return emails.map((email) => ({ email, password }));
+}
+
+export function smokeAuthenticationRequests(environment, integration = false) {
+  if (!integration) {
+    return productionSmokeAccounts(environment).map((account) => ({
+      body: account,
+      expectedStatus: 200,
+      path: '/v1/auth/login',
+    }));
+  }
+  const runId = randomBytes(8).toString('hex');
+  const password = randomBytes(24).toString('base64url');
+  return Array.from({ length: smokeAccountCount }, (_, index) => ({
+    body: {
+      email: `smoke-${runId}-${index}@example.invalid`,
+      password,
+      displayName: `Smoke ${index + 1}`,
+    },
+    expectedStatus: 201,
+    path: '/v1/auth/register',
+  }));
+}
 
 async function responseJson(response, expectedStatus, operation) {
   if (response.status !== expectedStatus) {
@@ -268,29 +336,27 @@ esac
 `;
 
 function runTurnClient(envFile, credentials, transport, shouldPass) {
-  const result = spawnSync(
-    'docker',
-    integrationComposeArguments(
-      envFile,
-      'exec',
-      '-T',
-      '--user',
-      '65534:65533',
-      'coturn',
-      'sh',
-      '-ec',
-      turnClientScript,
-      'wo-turn-proof',
-      credentials.username,
-      credentials.credential,
-      transport,
-    ),
-    {
-      cwd: deployDirectory,
-      encoding: 'utf8',
-      timeout: 30_000,
-    },
+  const composeCommand = integrationComposeArguments(
+    envFile,
+    'exec',
+    '-T',
+    '--user',
+    '65534:65533',
+    'coturn',
+    'sh',
+    '-ec',
+    turnClientScript,
+    'wo-turn-proof',
+    credentials.username,
+    credentials.credential,
+    transport,
   );
+  const result = spawnSync('docker', composeCommand, {
+    cwd: deployDirectory,
+    encoding: 'utf8',
+    env: composeProcessEnvironment(composeCommand),
+    timeout: 30_000,
+  });
   if (
     result.error !== undefined ||
     result.signal !== null ||
@@ -369,7 +435,9 @@ async function verifyTurnProof(envFile, environment, session) {
   process.stdout.write('Smoke: TURN relay data passed\n');
 
   runTurnClient(envFile, credentials, 'tcp', true);
-  process.stdout.write('Smoke: authenticated TURN TCP relay data passed\n');
+  process.stdout.write(
+    'Smoke: authenticated TURN-over-TCP UDP relay data passed\n',
+  );
 
   await verifyTurnTls(environment);
   runTurnClient(envFile, credentials, 'tls', true);
@@ -389,29 +457,28 @@ export async function runSmoke() {
     argumentValue('--env-file', resolve(deployDirectory, '.env')),
   );
   const environment = loadDeploymentEnvironment(envFile);
+  const integration = hasArgument('--integration');
+  const authenticationRequests = smokeAuthenticationRequests(
+    environment,
+    integration,
+  );
   const baseUrl = argumentValue(
     '--base-url',
     `https://${environment.APP_DOMAIN}`,
   );
   await waitUntilReady(baseUrl);
 
-  const runId = randomBytes(8).toString('hex');
-  const password = randomBytes(24).toString('base64url');
   const sessions = [];
   const clients = [];
   try {
-    for (let index = 0; index < 3; index += 1) {
+    for (const request of authenticationRequests) {
       sessions.push(
         await postJson(
           baseUrl,
-          '/v1/auth/register',
-          {
-            email: `smoke-${runId}-${index}@example.invalid`,
-            password,
-            displayName: `Smoke ${index + 1}`,
-          },
+          request.path,
+          request.body,
           undefined,
-          201,
+          request.expectedStatus,
         ),
       );
     }
@@ -441,11 +508,13 @@ export async function runSmoke() {
     await successfulRequest(creator, 'peer.ready', {
       roomId: created.roomId,
       connectionEpoch: created.connectionEpoch,
+      mediaPlan: smokeP2pMediaPlan,
     });
     await joiner.next(isBroadcast('peer.ready'), 'creator peer.ready');
     await successfulRequest(joiner, 'peer.ready', {
       roomId: created.roomId,
       connectionEpoch: joined.connectionEpoch,
+      mediaPlan: smokeP2pMediaPlan,
     });
     await creator.next(isBroadcast('peer.ready'), 'joiner peer.ready');
 

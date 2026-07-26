@@ -9,13 +9,26 @@ import {
   argumentValue,
   composeArguments,
   deployDirectory,
+  failureMessage,
   hasArgument,
   integrationComposeArguments,
   loadDeploymentEnvironment,
   pipeFileToCommand,
   run,
   sha256File,
+  withDeploymentOperationLock,
 } from './ops.mjs';
+import {
+  requiresRuntimeComposeImageOverride,
+  withRuntimeComposeImageOverride,
+} from './runtime-compose-override.mjs';
+
+const restoreRuntimeServices = Object.freeze([
+  'caddy',
+  'server',
+  'postgres',
+  'coturn',
+]);
 
 function tarText(block, offset, length) {
   const end = block.indexOf(0, offset);
@@ -426,31 +439,7 @@ function caddyHelperArguments(compose, script, transactionId) {
   );
 }
 
-export async function runRestore() {
-  if (!hasArgument('--confirm-restore')) {
-    throw new Error('Restore requires --confirm-restore');
-  }
-  const backupDirectory = argumentValue('--backup-dir');
-  if (backupDirectory === undefined) {
-    throw new Error('Restore requires --backup-dir=/absolute/path');
-  }
-  const integration = hasArgument('--integration');
-  const envFile = resolve(
-    argumentValue(
-      '--env-file',
-      resolve(deployDirectory, integration ? '.env.integration' : '.env'),
-    ),
-  );
-  const environment = loadDeploymentEnvironment(envFile);
-  const compose = selectedCompose(
-    envFile,
-    integration,
-    argumentValue('--compose-override'),
-  );
-  const backup = await verifiedBackup(
-    resolve(backupDirectory),
-    integration ? 'integration' : 'production',
-  );
+async function restoreBackup(compose, environment, backup) {
   const transactionId = randomBytes(12).toString('hex');
   const stagingDatabase = `wo_restore_stage_${transactionId}`;
   const previousDatabase = `wo_restore_old_${transactionId}`;
@@ -503,7 +492,7 @@ export async function runRestore() {
       dropDatabase(compose, environment, previousDatabase);
     } catch (cleanupError) {
       process.stderr.write(
-        `Restore warning: previous database cleanup failed (${cleanupError.message})\n`,
+        `Restore warning: previous database cleanup failed (${failureMessage(cleanupError)})\n`,
       );
     }
     try {
@@ -514,7 +503,7 @@ export async function runRestore() {
       );
     } catch (cleanupError) {
       process.stderr.write(
-        `Restore warning: previous Caddy state cleanup failed (${cleanupError.message})\n`,
+        `Restore warning: previous Caddy state cleanup failed (${failureMessage(cleanupError)})\n`,
       );
     }
   } catch (error) {
@@ -581,12 +570,72 @@ export async function runRestore() {
   }
 }
 
+export async function withRestoreRuntimeImageOverrides({
+  compose,
+  operation,
+  services = restoreRuntimeServices,
+  withOverride = withRuntimeComposeImageOverride,
+}) {
+  const pinService = (index, selectedCompose) => {
+    if (index === services.length) {
+      return operation(selectedCompose);
+    }
+    return withOverride({
+      compose: selectedCompose,
+      operation: (nextCompose) => pinService(index + 1, nextCompose),
+      service: services[index],
+    });
+  };
+  return pinService(0, compose);
+}
+
+export async function runRestore({ operationLockToken } = {}) {
+  if (!hasArgument('--confirm-restore')) {
+    throw new Error('Restore requires --confirm-restore');
+  }
+  const backupDirectory = argumentValue('--backup-dir');
+  if (backupDirectory === undefined) {
+    throw new Error('Restore requires --backup-dir=/absolute/path');
+  }
+  const integration = hasArgument('--integration');
+  const envFile = resolve(
+    argumentValue(
+      '--env-file',
+      resolve(deployDirectory, integration ? '.env.integration' : '.env'),
+    ),
+  );
+  const environment = loadDeploymentEnvironment(envFile);
+  const composeOverride = argumentValue('--compose-override');
+  const compose = selectedCompose(envFile, integration, composeOverride);
+  return withDeploymentOperationLock(
+    deployDirectory,
+    async () => {
+      const backup = await verifiedBackup(
+        resolve(backupDirectory),
+        integration ? 'integration' : 'production',
+      );
+      const operation = (selectedCompose) =>
+        restoreBackup(selectedCompose, environment, backup);
+      if (
+        !requiresRuntimeComposeImageOverride({
+          composeOverride,
+          integration,
+        })
+      ) {
+        return operation(compose);
+      }
+      return withRestoreRuntimeImageOverrides({ compose, operation });
+    },
+    { token: operationLockToken },
+  );
+}
+
 if (
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   runRestore().catch((error) => {
-    process.stderr.write(`Restore failed (${error.message})\n`);
+    process.stderr.write(`Restore failed (${failureMessage(error)})\n`);
     process.exitCode = 1;
   });
 }

@@ -2,6 +2,14 @@ name: wo-integration
 
 services:
   caddy:
+    image: wo-caddy:integration
+    platform: !reset null
+    build:
+      args:
+        BUILD_CREATED: '1970-01-01T00:00:01Z'
+        BUILD_REVISION: '0000000000000000000000000000000000000000'
+        BUILD_VERSION: integration
+        SOURCE_DATE_EPOCH: '1'
     environment:
       ACME_EMAIL: integration@localhost.invalid
       APP_DOMAIN: rtc.localhost
@@ -20,6 +28,14 @@ services:
       - caddy_integration_config:/config
 
   server:
+    image: wo-server:integration
+    platform: !reset null
+    build:
+      args:
+        BUILD_CREATED: '1970-01-01T00:00:01Z'
+        BUILD_REVISION: '0000000000000000000000000000000000000000'
+        BUILD_VERSION: integration
+        SOURCE_DATE_EPOCH: '1'
     environment:
       NODE_ENV: test
       PUBLIC_URL: https://rtc.localhost
@@ -37,10 +53,19 @@ services:
       SMTP_FROM: ''
 
   postgres:
+    platform: !reset null
     volumes: !override
       - postgres_integration_data:/var/lib/postgresql/data
 
   coturn:
+    image: wo-coturn:integration
+    platform: !reset null
+    build:
+      args:
+        BUILD_CREATED: '1970-01-01T00:00:01Z'
+        BUILD_REVISION: '0000000000000000000000000000000000000000'
+        BUILD_VERSION: integration
+        SOURCE_DATE_EPOCH: '1'
     environment:
       TURN_EXTERNAL_IP: 127.0.0.1
       TURN_LISTEN_PORT: '3478'
@@ -59,10 +84,6 @@ services:
         published: '5349'
         host_ip: 127.0.0.1
         protocol: tcp
-      - target: 5349
-        published: '5349'
-        host_ip: 127.0.0.1
-        protocol: udp
       - 127.0.0.1:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
     volumes: !override
       - ./coturn/entrypoint.sh:/opt/wo/turn-entrypoint.sh:ro

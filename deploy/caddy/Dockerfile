@@ -27,4 +27,22 @@ RUN mkdir -p apps/desktop \
 
 FROM caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 
+ARG BUILD_CREATED
+ARG BUILD_REVISION
+ARG BUILD_VERSION
+ARG SOURCE_DATE_EPOCH
+
+COPY --chmod=0755 deploy/scripts/validate-build-metadata.sh /tmp/validate-build-metadata
+RUN /tmp/validate-build-metadata \
+  "${BUILD_CREATED}" \
+  "${BUILD_REVISION}" \
+  "${BUILD_VERSION}" \
+  "${SOURCE_DATE_EPOCH}" \
+  && rm -f /tmp/validate-build-metadata
+
+LABEL org.opencontainers.image.created="${BUILD_CREATED}" \
+  org.opencontainers.image.revision="${BUILD_REVISION}" \
+  org.opencontainers.image.source="https://github.com/kiritoko1029/WO" \
+  org.opencontainers.image.version="${BUILD_VERSION}"
+
 COPY --from=web-builder /workspace/apps/web/dist /srv

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
@@ -55,8 +56,15 @@ static int valid_port(const char *value) {
          port <= 65535;
 }
 
+static int valid_ipv4(const char *value) {
+  struct in_addr address;
+  return inet_pton(AF_INET, value, &address) == 1;
+}
+
 int main(int argc, char **argv) {
-  if (argc != 3 || !valid_port(argv[2])) {
+  const char *host = argc == 4 ? argv[3] : "127.0.0.1";
+  if ((argc != 3 && argc != 4) || !valid_port(argv[2]) ||
+      !valid_ipv4(host)) {
     return 2;
   }
 
@@ -98,7 +106,7 @@ int main(int argc, char **argv) {
       "turnutils_uclient", "-u", username, "-w", credential,
       "-Y",                "alloc", "-I", "-c", "--no-even-port",
       "-m",                "1",     "-n", "1",  "-p",
-      argv[2],             "127.0.0.1",
+      argv[2],             (char *)host,
       NULL};
   execv("/usr/bin/turnutils_uclient", client_arguments);
   OPENSSL_cleanse(credential, sizeof(credential));

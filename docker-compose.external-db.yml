@@ -2,7 +2,16 @@ name: wo
 
 services:
   server:
-    image: 195658/wo-server:${WO_IMAGE_TAG:-2026.07.19}
+    image: 'wo-server:${BUILD_VERSION:-unresolved}'
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+      args:
+        BUILD_CREATED: '${BUILD_CREATED:-}'
+        BUILD_REVISION: '${BUILD_REVISION:-}'
+        BUILD_VERSION: '${BUILD_VERSION:-}'
+        SOURCE_DATE_EPOCH: '${SOURCE_DATE_EPOCH:-}'
     restart: unless-stopped
     user: '0:0'
     read_only: true
@@ -75,7 +84,16 @@ services:
       - ./downloads:/app/downloads:ro
 
   coturn:
-    image: 195658/wo-coturn:${WO_IMAGE_TAG:-2026.07.19}
+    image: 'wo-coturn:${BUILD_VERSION:-unresolved}'
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: deploy/coturn/Dockerfile
+      args:
+        BUILD_CREATED: '${BUILD_CREATED:-}'
+        BUILD_REVISION: '${BUILD_REVISION:-}'
+        BUILD_VERSION: '${BUILD_VERSION:-}'
+        SOURCE_DATE_EPOCH: '${SOURCE_DATE_EPOCH:-}'
     restart: unless-stopped
     user: '0:0'
     read_only: true
@@ -97,6 +115,7 @@ services:
         max-file: '5'
     environment:
       TURN_EXTERNAL_IP: ${PUBLIC_IPV4:?PUBLIC_IPV4 is required}
+      TURN_INTERNAL_IP: ${TURN_INTERNAL_IP:-}
       TURN_LISTEN_PORT: '3478'
       TURN_TLS_LISTEN_PORT: '5349'
       TURN_REALM: ${TURN_REALM:?TURN_REALM is required}
@@ -106,7 +125,7 @@ services:
       test:
         [
           'CMD-SHELL',
-          'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" >/dev/null 2>&1',
+          'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" "$${TURN_INTERNAL_IP:-127.0.0.1}" >/dev/null 2>&1',
         ]
       interval: 60s
       timeout: 5s
@@ -116,7 +135,6 @@ services:
       - 0.0.0.0:${TURN_PORT:-3478}:3478/tcp
       - 0.0.0.0:${TURN_PORT:-3478}:3478/udp
       - 0.0.0.0:${TURN_TLS_PORT:-5349}:5349/tcp
-      - 0.0.0.0:${TURN_TLS_PORT:-5349}:5349/udp
       - 0.0.0.0:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}:${TURN_RELAY_MIN_PORT:-49160}-${TURN_RELAY_MAX_PORT:-49200}/udp
     networks:
       - turn_edge
@@ -125,7 +143,7 @@ services:
       - turn_tls_cert
       - turn_tls_key
     tmpfs:
-      - /run/wo-turn:uid=0,gid=0,mode=0700,noexec,nosuid,nodev
+      - /run/wo-turn:uid=0,gid=0,mode=0700,size=4m,noexec,nosuid,nodev
 
 networks:
   edge: {}
@@ -133,12 +151,12 @@ networks:
 
 secrets:
   jwt_access_secret:
-    file: ${DEPLOY_SECRET_DIR:-./secrets}/jwt_access_secret
+    file: ${DEPLOY_SECRET_DIR:?DEPLOY_SECRET_DIR is required}/jwt_access_secret
   postgres_password:
-    file: ${DEPLOY_SECRET_DIR:-./secrets}/postgres_password
+    file: ${DEPLOY_SECRET_DIR:?DEPLOY_SECRET_DIR is required}/postgres_password
   turn_shared_secret:
-    file: ${DEPLOY_SECRET_DIR:-./secrets}/turn_shared_secret
+    file: ${DEPLOY_SECRET_DIR:?DEPLOY_SECRET_DIR is required}/turn_shared_secret
   turn_tls_cert:
-    file: ${TURN_TLS_CERT_FILE:-./turn_tls_cert.pem}
+    file: ${DEPLOY_SECRET_DIR:?DEPLOY_SECRET_DIR is required}/turn_tls_cert.pem
   turn_tls_key:
-    file: ${TURN_TLS_KEY_FILE:-./turn_tls_key.pem}
+    file: ${DEPLOY_SECRET_DIR:?DEPLOY_SECRET_DIR is required}/turn_tls_key.pem

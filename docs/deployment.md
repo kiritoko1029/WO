@@ -26,7 +26,8 @@ token 只写入当前标签页的 `sessionStorage`；关闭标签页后需要重
 
 ## 主机准备
 
-- 生产环境使用 Linux x86_64/arm64 主机、Docker Engine 和 Docker Compose 2.24.4 或更高版本。
+- 当前生产镜像只认证 Linux x86_64 主机，要求 Docker Engine 26 或更高版本和
+  Docker Compose 2.24.4 或更高版本；arm64 尚无 release bundle 和运行态证据。
 - 为 `APP_DOMAIN` 和 `TURN_HOST` 配置指向同一公网 IPv4 的 DNS A 记录。
 - Caddy 通过 ACME 管理 HTTPS 证书；coturn 使用单独的证书和私钥，Caddy 不代理 TURN。
 - 中国大陆主机需先确认 Docker 镜像源、DNS 和证书颁发机构可达。媒体流本身不会经过这些下载或证书服务。
@@ -35,12 +36,17 @@ token 只写入当前标签页的 `sessionStorage`；关闭标签页后需要重
 
 - `80/TCP`、`443/TCP`：Caddy；
 - `3478/TCP+UDP`：STUN/TURN；
-- `5349/TCP+UDP`：TURN TLS/DTLS；
-- `49160-49200/UDP`：TURN relay；范围可在 `.env` 中缩小或平移，但最多 200 个端口。
+- `5349/TCP`：TURN TLS；
+- `49160-49200/UDP`：TURN relay；bridge 模式可在 `.env` 中缩小或平移，
+  但最多 200 个端口。
 
 PostgreSQL 和 server 没有宿主机映射端口。
 
-`TURN_PORT` 和 `TURN_TLS_PORT` 是宿主机公开端口；coturn 容器内始终监听 `3478` 和 `5349`。`TURN_URLS` 中的 `stun:`/`turn:` 端口必须等于 `TURN_PORT`，`turns:` 端口必须等于 `TURN_TLS_PORT`。两个端口不能相同，也不能占用 Caddy 的 `80/443`。
+`TURN_PORT` 和 `TURN_TLS_PORT` 是宿主机公开端口。bridge 模式下 coturn
+容器内固定监听 `3478` 和 `5349`；host 模式直接监听这两个公开端口。
+`TURN_URLS` 中的 `stun:`/`turn:` 端口必须等于 `TURN_PORT`，`turns:` 端口
+必须等于 `TURN_TLS_PORT`。两个端口不能相同，也不能占用 Caddy 的 `80/443`。
+当前部署只认证 TURN TLS over TCP，不启用 DTLS 或 RFC 6062 TCP relay。
 
 ## 生产启动
 
@@ -71,13 +77,21 @@ node deploy/scripts/preflight.mjs --env-file=deploy/.env
 预检会验证 Linux 主机意图、Docker/Compose 版本、DNS、公网 IPv4、端口占用、磁盘、目录、secret、TURN 证书以及最终 Compose 渲染。通过后，一条命令启动并等待四个服务健康：
 
 ```bash
-docker compose --project-name wo --env-file deploy/.env -f deploy/compose.yaml up -d --build --wait
+node deploy/scripts/compose.mjs --env-file=deploy/.env up -d --build --wait
 ```
+
+`compose.mjs` 会从 clean Git HEAD 派生 commit、commit UTC 时间、对应
+`SOURCE_DATE_EPOCH` 和版本号，并传给 caddy、server、coturn 构建。生产
+`preflight`、`build` 和可能触发构建的 `up` 都要求发布目录包含 `.git` 且工作树
+干净；shell 或 env-file 中的 `BUILD_*` 不能覆盖该身份。`ps`、`down`、备份和
+恢复等不构建命令不依赖 Git。`upgrade.mjs` 在停服前核验三张镜像的 image ID、
+架构和 OCI labels，以 image ID override 启动，再核对运行容器实际使用的
+`.Image`，避免可变 tag 在核验与启动之间被替换。
 
 server 会在监听前执行带校验和和数据库锁的迁移；Caddy 只在 server 健康后对外服务。可用下面的命令查看状态和运行完整冒烟流程：
 
 ```bash
-docker compose --project-name wo --env-file deploy/.env -f deploy/compose.yaml ps
+node deploy/scripts/compose.mjs --env-file=deploy/.env ps
 node deploy/scripts/smoke.mjs --env-file=deploy/.env
 ```
 
@@ -86,6 +100,62 @@ node deploy/scripts/smoke.mjs --env-file=deploy/.env
 部署完成后访问 `https://${APP_DOMAIN}`。房间页可复制
 `https://${APP_DOMAIN}/join/<6位房间码>` 或 `wo://` 客户端邀请；HTTPS 邀请
 既能继续使用 Web，也能通过显式按钮唤起桌面客户端。
+
+## TURN host-network 模式
+
+默认 bridge 模式适合小规模部署，并保留最多 200 个 relay 端口的保护。若 relay
+范围较大，Docker 会为每个发布端口创建代理/NAT 状态；经测量确认它成为主机内存
+瓶颈后，才使用 `deploy/compose.turn-host.yaml`。host 模式不改变 TURN 的公网
+协议，但取消 coturn 的 Docker 端口发布和网络地址转换，relay 范围最多 512 个
+UDP 端口。
+
+host 模式要求云主机只有一个稳定的 RFC1918 IPv4 作为默认出口，并由云 EIP
+一对一映射到 `PUBLIC_IPV4`。先创建一个专用于覆盖镜像状态卷的空目录：
+
+```bash
+sudo install -d -o root -g root -m 0755 /opt/wo/coturn-empty
+```
+
+在 `deploy/.env` 中显式设置：
+
+```dotenv
+TURN_NETWORK_MODE=host
+TURN_INTERNAL_IP=172.16.0.10
+TURN_STATE_EMPTY_DIR=/opt/wo/coturn-empty
+TURN_RELAY_MIN_PORT=49160
+TURN_RELAY_MAX_PORT=49509
+```
+
+`TURN_INTERNAL_IP` 必须替换为本机默认路由实际使用的私网地址。coturn 只监听该
+地址，向客户端报告 `PUBLIC_IPV4/TURN_INTERNAL_IP` 映射，并拒绝 relay 回
+公网 IP、本机、私网、链路本地、CGNAT 和元数据地址。
+
+若 relay 范围与 `net.ipv4.ip_local_port_range` 重叠，必须把完整重叠范围合并
+进 `net.ipv4.ip_local_reserved_ports`。先读取现值，保留所有已有范围，再通过
+配置管理写入独立的 `/etc/sysctl.d/60-wo-turn-relay.conf`；不得用新范围覆盖
+现值。例如现值为空时：
+
+```text
+net.ipv4.ip_local_reserved_ports=49160-49509
+```
+
+应用后运行生产预检。预检会验证私网 IP 已分配、保留端口完整覆盖、空目录整条
+路径无符号链接且不可由非 root 用户写入，并检查最终 coturn 拓扑为 host network、
+零 `ports`、零 Compose `networks`：
+
+```bash
+node deploy/scripts/preflight.mjs --env-file=deploy/.env
+node deploy/scripts/compose.mjs --env-file=deploy/.env up -d --build --wait
+```
+
+`backup.mjs`、`restore.mjs` 和 `upgrade.mjs` 会根据 env file 自动选择该 overlay。
+host 模式下 `docker compose port coturn ...` 没有映射结果是正常现象；使用
+进程级 `ss` 和外部 TURN allocation/data 探针验收实际 listener。
+
+回滚时先把 `TURN_NETWORK_MODE` 改回 `bridge`，将 relay 范围恢复到不超过
+200 个端口，再只使用基础 Compose 文件重建 coturn。保留
+`ip_local_reserved_ports` 不会影响 bridge 模式；若要删除，必须恢复变更前完整
+值，不能清空其他服务已有的保留范围。
 
 ## 桌面客户端配置
 
@@ -233,8 +303,56 @@ proxy_set_header Connection "upgrade";
 - 网站 WebSocket 支持：**开启**
 - `APP_DOMAIN` 证书使用**完整链**（fullchain），不要只挂叶子证书
 - `TURN_HOST` **不要**建 HTTP 反向代理站点；DNS A 记录指向同一公网 IP 即可
-- 防火墙 / 安全组放行：`80/443`（HTTPS）、`3478` TCP+UDP、`5349` TCP+UDP、
+- 防火墙 / 安全组放行：`80/443`（HTTPS）、`3478` TCP+UDP、`5349` TCP、
   `49160-49200/UDP`（或你在 `.env` 中配置的 relay 范围）
+
+root profile 不能通过 `compose.mjs` 执行 `build` 或 `up`。这两类命令会改变
+生产镜像选择，必须先生成并校验 release bundle，再由 release apply 入口使用
+不可变 image ID 激活。`TURN_NETWORK_MODE=host` 时，该入口会自动追加
+`deploy/compose.turn-host.yaml`；不要手工绕过 bundle gate。
+
+### root profile release bundle
+
+在 clean Git checkout 中生成 release bundle。输出目录的父目录必须已存在，
+输出目录本身必须不存在；本机 Docker 中也不能已有该 commit 对应的
+`wo-caddy`、`wo-server` 或 `wo-coturn` release tag：
+
+```bash
+node deploy/scripts/build-release.mjs \
+  --output-dir=/opt/wo/releases/<release-version>
+```
+
+构建入口从 clean HEAD 派生 release identity，再用该完整 commit 创建隔离源码
+快照。三张镜像各执行两次无缓存构建，要求 image ID 和全部 rootfs layer 相同；
+每轮校验后删除临时 Docker tag。manifest、源码清单、三份 Docker archive 和
+checksum 全部自校验通过后，才把临时目录原子发布为指定输出目录。
+
+首次部署前创建权限受限的 rollback root，并从
+`release-manifest.sha256` 读取 64 位 manifest SHA-256：
+
+```bash
+sudo install -d -o root -g root -m 0700 /opt/wo/rollback
+
+node deploy/scripts/apply-release.mjs \
+  --manifest=/opt/wo/releases/<release-version>/release-manifest.json \
+  --expected-manifest-sha256=<manifest-sha256> \
+  --env-file=deploy/.env \
+  --rollback-root=/opt/wo/rollback \
+  --profile=external-db \
+  --mode=initial \
+  --confirm-apply
+```
+
+使用仓库内 PostgreSQL 时将 profile 改为 `root-managed-db`。该 profile 要求
+Compose 中配置的 PostgreSQL 镜像已在本机存在；apply 会先解析其 image ID，
+再通过 `pull_policy: never` 的临时 override 启动，不会在激活过程中拉取可变
+tag。已有 PostgreSQL 只做 Running/healthy 检查，不会重建。
+
+`initial` 要求 server 和 coturn 都不存在。当前 `apply-release.mjs` 明确拒绝
+`upgrade`，因为 root profile 尚未具备与镜像回滚绑定的事务性数据库
+preflight/restore；拒绝发生在读取 env、bundle 或调用 Docker 之前。不要用
+`initial` 绕过此限制。external-db root profile 的 Caddy archive 会完成校验，
+但不会替换由 1Panel/OpenResty 管理的公开入口。
 
 ### 验收
 
@@ -289,10 +407,10 @@ Web E2E 自动启动并清理 `wo-integration`，使用两个隔离 Chromium 会
 
 ```bash
 node deploy/scripts/preflight.mjs --env-file=deploy/.env.integration --integration --allow-non-linux
-docker compose --project-name wo-integration --env-file deploy/.env.integration -f deploy/compose.yaml -f deploy/compose.integration.yaml up -d --build --wait
+node deploy/scripts/compose.mjs --integration --env-file=deploy/.env.integration up -d --build --wait
 node deploy/scripts/export-local-ca.mjs --env-file=deploy/.env.integration
 node deploy/scripts/smoke.mjs --env-file=deploy/.env.integration --base-url=https://rtc.localhost --ca-file=deploy/.certs/caddy-authority/root.crt --integration --turn-proof
-docker compose --project-name wo-integration --env-file deploy/.env.integration -f deploy/compose.yaml -f deploy/compose.integration.yaml down -v
+node deploy/scripts/compose.mjs --integration --env-file=deploy/.env.integration down -v
 ```
 
 如果本机的 `80/443` 已被其他栈占用，可仅覆盖 integration 的宿主发布端口，
@@ -349,7 +467,46 @@ node deploy/scripts/restore.mjs --env-file=deploy/.env --backup-dir=/absolute/ba
 node deploy/scripts/upgrade.mjs --env-file=deploy/.env
 ```
 
+升级前会在已经预检的 `BACKUP_DIR` 下创建权限受限的回滚工作区。升级成功时该
+目录自动删除；如果旧 coturn 通过回滚 override 恢复，目录会被保留，因为旧
+容器的配置 bind mount 仍依赖其中的快照。确认回滚后的容器已被后续正式版本
+替换且再次重启通过后，才可手工清理对应的 `wo-upgrade-*` 目录。
+
 跨 PostgreSQL 大版本升级不在该脚本范围内，必须按 PostgreSQL 官方升级流程单独演练。
+
+## 只读监控探测
+
+`monitor.mjs` 对生产栈做只读健康探测：caddy/server/coturn/postgres 四个容器
+必须唯一、running、healthcheck 已配置且 healthy、无 OOM、restart 次数不超
+阈值；server/coturn/postgres 还必须配置 json-file 日志轮转与内存限制；根分区
+与 `/var/lib/docker` 使用率不超过 85%；TURN 证书文件与 `APP_DOMAIN` 的
+HTTPS 证书剩余有效期不少于 21 天。docker/df 子进程探测有 20 秒超时，daemon
+卡死会转为明确失败而不是挂起。任一违规输出 `MONITOR_ISSUE` 并以非零码
+退出：
+
+```bash
+node deploy/scripts/monitor.mjs --env-file=deploy/.env
+node deploy/scripts/monitor.mjs --env-file=deploy/.env --json
+```
+
+告警接入以退出码为准，宿主机用 cron/systemd timer 周期执行并在非零退出时
+发送通知（邮件、webhook 均可）。探测不修改任何状态，也不输出 secret。无外网
+TLS 访问的主机可用 `--skip-web-probe` 跳过 HTTPS 探测。
+
+## 镜像与工件保留策略
+
+- release bundle：保留最近 2 个已部署版本的完整 bundle（含 manifest 与三份
+  Docker archive），用于快速回切；更早版本只保留 `release-manifest.json` 与
+  checksum 供审计追溯。
+- 生产镜像：当前 revision 与上一 revision 的三镜像必须保留；再早的
+  `wo-caddy/wo-server/wo-coturn` 版本标签在确认无容器引用后删除。
+- 备份：按 `backup.mjs` 产物保留最近 7 份每日备份加 4 份周备份；异地加密
+  副本至少保留最近 2 份，删除前必须先验证更新副本可解密。
+- 回滚工作区：`wo-upgrade-*`、`wo-release-apply-*` 目录在对应版本被后续
+  正式版本替换并重启验证后手工清理。
+- Docker 构建缓存：宿主机磁盘使用率超过 85%（与监控阈值一致）时执行
+  `docker builder prune` 与悬空镜像清理；不得使用会删除有标签镜像的
+  `docker system prune -a`。
 
 ## TURN 上线验收
 
@@ -363,5 +520,5 @@ node deploy/scripts/upgrade.mjs --env-file=deploy/.env
 
 ```bash
 pnpm exec vitest run --config vitest.root.contract.config.ts
-docker compose --project-name wo --env-file deploy/.env -f deploy/compose.yaml config --quiet
+node deploy/scripts/compose.mjs --env-file=deploy/.env config --quiet
 ```

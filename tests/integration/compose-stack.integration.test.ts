@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
+import { composeProcessEnvironment } from '../../deploy/scripts/ops.mjs';
+
 const root = resolve(import.meta.dirname, '..', '..');
 const deploy = resolve(root, 'deploy');
 const envFile = resolve(
@@ -10,14 +12,15 @@ const envFile = resolve(
 );
 const integrationEnabled = process.env.WO_RUN_COMPOSE_INTEGRATION === '1';
 const keepStack = process.env.WO_KEEP_COMPOSE_INTEGRATION === '1';
-const smokeBaseUrl =
-  process.env.WO_INTEGRATION_SMOKE_BASE_URL ?? 'https://rtc.localhost';
 const integrationHttpPort = Number(
   process.env.WO_INTEGRATION_HTTP_PORT ?? '80',
 );
 const integrationHttpsPort = Number(
   process.env.WO_INTEGRATION_HTTPS_PORT ?? '443',
 );
+const smokeBaseUrl =
+  process.env.WO_INTEGRATION_SMOKE_BASE_URL ??
+  `https://rtc.localhost${integrationHttpsPort === 443 ? '' : `:${integrationHttpsPort}`}`;
 
 const composeFiles = [
   '--project-name',
@@ -34,6 +37,10 @@ function run(command: string, arguments_: string[], timeout = 600_000): string {
   const result = spawnSync(command, arguments_, {
     cwd: root,
     encoding: 'utf8',
+    env:
+      command === 'docker' && arguments_[0] === 'compose'
+        ? composeProcessEnvironment(arguments_)
+        : process.env,
     timeout,
   });
   if (result.status !== 0) {
@@ -60,6 +67,7 @@ describe.skipIf(!integrationEnabled)('four-service Compose integration', () => {
       'up',
       '-d',
       '--build',
+      '--force-recreate',
       '--wait',
     ]);
     stackStarted = true;

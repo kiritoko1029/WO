@@ -42,8 +42,12 @@ deploy/server/*
 !deploy/coturn/
 deploy/coturn/*
 !deploy/coturn/health-probe.c
+!deploy/coturn/drop-privileges.c
 !deploy/coturn/entrypoint.sh
 !deploy/coturn/turnserver.conf
+!deploy/scripts/
+deploy/scripts/*
+!deploy/scripts/validate-build-metadata.sh
 
 **/test/
 **/coverage/

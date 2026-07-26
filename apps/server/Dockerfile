@@ -4,10 +4,14 @@ ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 WORKDIR /workspace
 
-RUN corepack enable \
+RUN sed -i \
+      -e 's|^# http://snapshot.debian.org/|URIs: http://snapshot.debian.org/|' \
+      -e '/^URIs: http:\/\/deb.debian.org\//d' \
+      /etc/apt/sources.list.d/debian.sources \
+  && corepack enable \
   && corepack prepare pnpm@10.32.1 --activate \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends build-essential ca-certificates python3 \
+  && apt-get -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false update \
+  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends build-essential ca-certificates python3 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -45,9 +49,18 @@ RUN pnpm --filter @wo/config build \
 
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS runtime
 
-ARG BUILD_CREATED=unknown
-ARG BUILD_REVISION=unknown
-ARG BUILD_VERSION=dev
+ARG BUILD_CREATED
+ARG BUILD_REVISION
+ARG BUILD_VERSION
+ARG SOURCE_DATE_EPOCH
+
+COPY --chmod=0755 deploy/scripts/validate-build-metadata.sh /tmp/validate-build-metadata
+RUN /tmp/validate-build-metadata \
+  "${BUILD_CREATED}" \
+  "${BUILD_REVISION}" \
+  "${BUILD_VERSION}" \
+  "${SOURCE_DATE_EPOCH}" \
+  && rm -f /tmp/validate-build-metadata
 
 LABEL org.opencontainers.image.created="${BUILD_CREATED}" \
   org.opencontainers.image.revision="${BUILD_REVISION}" \
@@ -58,8 +71,12 @@ ENV NODE_ENV=production
 ENV DOWNLOADS_ROOT=/app/downloads
 WORKDIR /app
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+RUN sed -i \
+      -e 's|^# http://snapshot.debian.org/|URIs: http://snapshot.debian.org/|' \
+      -e '/^URIs: http:\/\/deb.debian.org\//d' \
+      /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false update \
+  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && rm -rf /var/log/apt/* \
   && rm -f /var/cache/ldconfig/aux-cache /var/log/alternatives.log /var/log/dpkg.log \

@@ -7,11 +7,11 @@ const root = resolve(import.meta.dirname, '..', '..');
 const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
 
 describe('Web deployment contract', () => {
-  test('builds the Web app into the pinned Caddy image', () => {
+  test('builds the Web app into the release-versioned Caddy image', () => {
     const compose = read('deploy/compose.yaml');
     const dockerfile = read('deploy/caddy/Dockerfile');
 
-    expect(compose).toContain('image: wo-caddy:2.11.4-web.1');
+    expect(compose).toContain("image: 'wo-caddy:${BUILD_VERSION:-unresolved}'");
     expect(compose).toContain('dockerfile: deploy/caddy/Dockerfile');
     expect(dockerfile).toContain('pnpm --filter @wo/web build');
     expect(dockerfile).toContain(

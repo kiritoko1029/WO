@@ -6,13 +6,32 @@ import { describe, expect, test } from 'vitest';
 
 import {
   firewallSummary,
+  isPrivateIpv4,
   isPublicIpv4,
   parseDotEnv,
   semverAtLeast,
+  turnNetworkMode,
+  turnRelayPortLimit,
   validateTurnTlsIdentity,
   validateDeploymentEnvironment,
   validateGeneratedSecret,
 } from '../../deploy/scripts/lib.mjs';
+import {
+  deploymentProcessEnvironment,
+  productionComposeFiles,
+} from '../../deploy/scripts/ops.mjs';
+import {
+  assertProductionComposeCommand,
+  classifyComposeCommand,
+  composeCommandNeedsReleaseProvenance,
+  composeCommandRequiresReleaseBundle,
+} from '../../deploy/scripts/compose.mjs';
+import {
+  integrationReleaseProvenance,
+  releaseProvenanceEnvironment,
+  releaseProvenanceFromGitMetadata,
+  validateReleaseProvenance,
+} from '../../deploy/scripts/provenance.mjs';
 
 const root = resolve(import.meta.dirname, '..', '..');
 
@@ -71,6 +90,21 @@ describe('deployment preflight validation', () => {
     }
   });
 
+  test('accepts only RFC1918 addresses for TURN host networking', () => {
+    for (const address of ['10.0.0.1', '172.24.52.219', '192.168.1.1']) {
+      expect(isPrivateIpv4(address), address).toBe(true);
+    }
+    for (const address of [
+      '8.8.8.8',
+      '100.64.0.1',
+      '127.0.0.1',
+      '169.254.169.254',
+      'not-an-ip',
+    ]) {
+      expect(isPrivateIpv4(address), address).toBe(false);
+    }
+  });
+
   test('rejects unsafe production intent and accepts a bounded relay range', () => {
     expect(
       validateDeploymentEnvironment(validEnvironment, { platform: 'linux' }),
@@ -114,6 +148,58 @@ describe('deployment preflight validation', () => {
     expect(
       validateDeploymentEnvironment(local, { platform: 'linux' }).join('\n'),
     ).toMatch(/public/i);
+  });
+
+  test('keeps bridge bounded while allowing an explicit bounded host profile', () => {
+    const bridgeTooWide = {
+      ...validEnvironment,
+      TURN_RELAY_MIN_PORT: '49160',
+      TURN_RELAY_MAX_PORT: '49360',
+    };
+    expect(
+      validateDeploymentEnvironment(bridgeTooWide, {
+        platform: 'linux',
+      }).join('\n'),
+    ).toMatch(/at most 200/i);
+
+    const host = {
+      ...validEnvironment,
+      TURN_NETWORK_MODE: 'host',
+      TURN_INTERNAL_IP: '172.24.52.219',
+      TURN_STATE_EMPTY_DIR: '/var/empty/wo-turn',
+      TURN_RELAY_MIN_PORT: '49160',
+      TURN_RELAY_MAX_PORT: '49509',
+    };
+    expect(validateDeploymentEnvironment(host, { platform: 'linux' })).toEqual(
+      [],
+    );
+    expect(turnNetworkMode(host)).toBe('host');
+    expect(turnRelayPortLimit(host)).toBe(512);
+    expect(
+      validateDeploymentEnvironment(
+        { ...host, TURN_RELAY_MAX_PORT: '49672' },
+        { platform: 'linux' },
+      ).join('\n'),
+    ).toMatch(/at most 512/i);
+
+    for (const invalidHost of [
+      { ...host, TURN_INTERNAL_IP: '' },
+      { ...host, TURN_INTERNAL_IP: '8.8.8.8' },
+      { ...host, TURN_STATE_EMPTY_DIR: 'relative/path' },
+      { ...host, TURN_NETWORK_MODE: 'invalid' },
+    ]) {
+      expect(
+        validateDeploymentEnvironment(invalidHost, {
+          platform: 'linux',
+        }).length,
+      ).toBeGreaterThan(0);
+    }
+    expect(
+      validateDeploymentEnvironment(
+        { ...validEnvironment, TURN_INTERNAL_IP: '172.24.52.219' },
+        { platform: 'linux' },
+      ).join('\n'),
+    ).toMatch(/only allowed in host mode/i);
   });
 
   test('requires TURN URLs to use their configured public listener ports', () => {
@@ -163,8 +249,165 @@ describe('deployment preflight validation', () => {
     expect(semverAtLeast('2.24.3', '2.24.4')).toBe(false);
     expect(firewallSummary(validEnvironment)).toEqual([
       'TCP 80,443,3478,5349',
-      'UDP 3478,5349,49160-49200',
+      'UDP 3478,49160-49200',
     ]);
+    expect(
+      productionComposeFiles(validEnvironment).map((file) =>
+        file.replaceAll('\\', '/'),
+      ),
+    ).toEqual([expect.stringMatching(/\/deploy\/compose\.yaml$/u)]);
+    expect(
+      productionComposeFiles({
+        ...validEnvironment,
+        TURN_NETWORK_MODE: 'host',
+      })
+        .map((file) => file.replaceAll('\\', '/'))
+        .at(-1),
+    ).toMatch(/\/deploy\/compose\.turn-host\.yaml$/u);
+  });
+
+  test('passes only controlled Docker and integration fields to Compose', () => {
+    const childEnvironment = deploymentProcessEnvironment(
+      {
+        DEPLOY_SECRET_DIR: './secrets',
+        BUILD_CREATED: 'forged-env-file-created',
+        BUILD_REVISION: 'forged-env-file-revision',
+        BUILD_VERSION: 'forged-env-file-version',
+        DOCKER_HOST: 'tcp://untrusted-env-file.invalid:2376',
+        LD_PRELOAD: '/tmp/untrusted.so',
+        NODE_OPTIONS: '--require=/tmp/untrusted.js',
+        PATH: '/untrusted/env-file/bin',
+        SMTP_PASS: 'env-file-secret',
+        TURN_PORT: '3478',
+        TURN_RELAY_MAX_PORT: '49200',
+        TURN_RELAY_MIN_PORT: '49160',
+        WO_INTEGRATION_HTTP_PORT: '18080',
+      },
+      {
+        DEPLOY_SECRET_DIR: '/tmp/unvalidated-secrets',
+        BUILD_CREATED: 'forged-shell-created',
+        BUILD_REVISION: 'forged-shell-revision',
+        BUILD_VERSION: 'forged-shell-version',
+        DOCKER_HOST: 'unix:///var/run/docker.sock',
+        PATH: '/usr/bin',
+        SMTP_PASS: 'shell-injected',
+        TURN_PORT: '19999',
+        TURN_RELAY_MAX_PORT: '65535',
+        TURN_RELAY_MIN_PORT: '1',
+        UNRELATED_SHELL_VALUE: 'must-not-leak',
+        WO_INTEGRATION_HTTP_PORT: '19080',
+      },
+    );
+    expect(childEnvironment).toEqual(
+      expect.objectContaining({
+        DOCKER_HOST: 'unix:///var/run/docker.sock',
+        PATH: '/usr/bin',
+        WO_INTEGRATION_HTTP_PORT: '19080',
+      }),
+    );
+    expect(childEnvironment).not.toHaveProperty('DEPLOY_SECRET_DIR');
+    expect(childEnvironment).not.toHaveProperty('TURN_PORT');
+    expect(childEnvironment).not.toHaveProperty('TURN_RELAY_MAX_PORT');
+    expect(childEnvironment).not.toHaveProperty('TURN_RELAY_MIN_PORT');
+    expect(childEnvironment).not.toHaveProperty('SMTP_PASS');
+    expect(childEnvironment).not.toHaveProperty('LD_PRELOAD');
+    expect(childEnvironment).not.toHaveProperty('NODE_OPTIONS');
+    expect(childEnvironment).not.toHaveProperty('UNRELATED_SHELL_VALUE');
+    expect(childEnvironment).not.toHaveProperty('BUILD_CREATED');
+    expect(childEnvironment).not.toHaveProperty('BUILD_REVISION');
+    expect(childEnvironment).not.toHaveProperty('BUILD_VERSION');
+  });
+
+  test('accepts only deterministic clean-Git or fixed integration provenance', () => {
+    const production = releaseProvenanceFromGitMetadata({
+      commitEpoch: '1784917907',
+      revision: 'b88a10f0867cfe349689269407145e8c7ff6afe5',
+      status: '',
+    });
+    expect(production).toEqual({
+      BUILD_CREATED: '2026-07-24T18:31:47Z',
+      BUILD_REVISION: 'b88a10f0867cfe349689269407145e8c7ff6afe5',
+      BUILD_VERSION: '2026.07.24-b88a10f0867c',
+      SOURCE_DATE_EPOCH: '1784917907',
+    });
+    expect(releaseProvenanceEnvironment(production)).toEqual(production);
+    expect(() =>
+      releaseProvenanceFromGitMetadata({
+        commitEpoch: '1784917907',
+        revision: production.BUILD_REVISION,
+        status: ' M deploy/compose.yaml',
+      }),
+    ).toThrow(/clean Git worktree/i);
+    expect(
+      validateReleaseProvenance(
+        {
+          ...integrationReleaseProvenance,
+          BUILD_REVISION: production.BUILD_REVISION,
+        },
+        { production: false },
+      ),
+    ).toContain(
+      'BUILD_REVISION must use the fixed integration release sentinel',
+    );
+    expect(
+      validateReleaseProvenance({ ...production, BUILD_VERSION: 5 }).join('\n'),
+    ).toMatch(/BUILD_VERSION is required/i);
+    expect(
+      validateReleaseProvenance({ ...production, BUILD_VERSION: null }).join(
+        '\n',
+      ),
+    ).toMatch(/BUILD_VERSION is required/i);
+  });
+
+  test('routes production image selection through the release bundle gate', () => {
+    expect(composeCommandNeedsReleaseProvenance(['config', '--quiet'])).toBe(
+      true,
+    );
+    for (const command of [
+      'build',
+      'commit',
+      'create',
+      'publish',
+      'pull',
+      'push',
+      'run',
+      'scale',
+      'up',
+      'watch',
+    ]) {
+      expect(
+        composeCommandRequiresReleaseBundle([command, 'server']),
+        command,
+      ).toBe(true);
+      expect(
+        composeCommandNeedsReleaseProvenance([command, 'server']),
+        command,
+      ).toBe(true);
+    }
+    expect(composeCommandRequiresReleaseBundle(['ps'])).toBe(false);
+    expect(composeCommandRequiresReleaseBundle(['down'])).toBe(false);
+    expect(assertProductionComposeCommand(['up', '-d'], undefined)).toBe(
+      'release-bundle',
+    );
+    expect(assertProductionComposeCommand(['build'], undefined)).toBe(
+      'release-bundle',
+    );
+    for (const command of ['commit', 'publish', 'pull', 'push', 'scale']) {
+      expect(
+        () => assertProductionComposeCommand([command], undefined),
+        command,
+      ).toThrow(/build-release\.mjs and apply-release\.mjs/i);
+    }
+    expect(() =>
+      assertProductionComposeCommand(['up', '-d'], 'docker-compose.yml'),
+    ).toThrow(/build-release\.mjs and apply-release\.mjs/i);
+    expect(assertProductionComposeCommand(['ps'], 'docker-compose.yml')).toBe(
+      'operational',
+    );
+    expect(() => classifyComposeCommand(['--profile', 'unsafe', 'up'])).toThrow(
+      /first argument/i,
+    );
+    expect(() => classifyComposeCommand(['unknown'])).toThrow(/unsupported/i);
   });
 
   test('validates TURN certificate identity, lifetime, key match, and trust intent', () => {
@@ -284,7 +527,9 @@ describe('operational script contract', () => {
     expect(example).not.toMatch(
       /^(?:JWT_ACCESS_SECRET|POSTGRES_PASSWORD|TURN_SHARED_SECRET)=/mu,
     );
-    expect(example).toContain('DEPLOY_SECRET_DIR=./secrets');
+    expect(example).toContain('DEPLOY_SECRET_DIR=/opt/wo/deploy/secrets');
+    expect(example).toContain('DEPLOY_SMOKE_EMAILS=');
+    expect(example).toContain('DEPLOY_SMOKE_PASSWORD=');
     expect(example).toContain('turns:');
     const initializer = read('init-secrets.mjs');
     expect(initializer).toContain('randomBytes(32)');
@@ -307,8 +552,16 @@ describe('operational script contract', () => {
 
   test('all Compose callers select an explicit production or integration project', () => {
     const operations = read('ops.mjs');
+    const compose = read('compose.mjs');
     expect(operations).toContain("productionProject = 'wo'");
     expect(operations).toContain("integrationProject = 'wo-integration'");
+    expect(operations).toContain("'--project-name'");
+    expect(operations).toContain("'--env-file'");
+    expect(operations).toContain("'.wo-release-apply.lock'");
+    expect(compose).toContain('composeArguments');
+    expect(compose).toContain('integrationComposeArguments');
+    expect(compose).toContain('rootComposeArguments');
+    expect(operations).toContain('docker-compose.external-db.yml');
     const integrationTest = readFileSync(
       resolve(
         root,
@@ -331,6 +584,7 @@ describe('operational script contract', () => {
   });
 
   test('backup, restore, and upgrade preserve PostgreSQL and Caddy state safely', () => {
+    const applyRelease = read('apply-release.mjs');
     const backup = read('backup.mjs');
     const restore = read('restore.mjs');
     const upgrade = read('upgrade.mjs');
@@ -357,18 +611,42 @@ describe('operational script contract', () => {
     expect(upgrade).toMatch(
       /composeArguments\(\s*envFile,\s*'build',\s*'--pull',\s*'caddy',\s*'server',\s*'coturn',?\s*\)/u,
     );
+    for (const script of [backup, restore, upgrade]) {
+      expect(script).toMatch(
+        /withDeploymentOperationLock\(\s*deployDirectory,/u,
+      );
+    }
+    expect(applyRelease).toContain('operationLockRoot = deployDirectory');
+    expect(applyRelease).toContain(
+      'acquireReleaseApplyLock(operationLockRoot)',
+    );
+    for (const service of ['caddy', 'server', 'postgres', 'coturn']) {
+      expect(restore).toContain(`'${service}'`);
+    }
+    expect(upgrade).toContain('deploymentOperationProcessEnvironment');
     const pullIndex = upgrade.indexOf("'pull'");
     const quiesceIndex = upgrade.indexOf("'stop', 'caddy', 'server'");
-    const backupIndex = upgrade.lastIndexOf('runBackup()');
+    const backupIndex = upgrade.lastIndexOf(
+      'runBackup({ operationLockToken })',
+    );
     expect(pullIndex).toBeGreaterThan(-1);
     expect(quiesceIndex).toBeGreaterThan(pullIndex);
     expect(backupIndex).toBeGreaterThan(quiesceIndex);
-    const internalSmokeIndex = upgrade.lastIndexOf('runInternalSmoke(envFile)');
-    const caddyActivationIndex = upgrade.indexOf(
-      "composeArguments(envFile, 'up', '-d', '--wait', 'caddy')",
+    const provenanceInspectionIndex = upgrade.lastIndexOf(
+      'inspectBuiltReleaseImages(envFile, provenance)',
     );
+    const internalSmokeIndex = upgrade.lastIndexOf(
+      'runInternalSmoke(envFile, provenance, releaseOverride)',
+    );
+    const caddyActivationIndex = upgrade.lastIndexOf(
+      "'Public edge activation'",
+    );
+    expect(provenanceInspectionIndex).toBeGreaterThan(pullIndex);
+    expect(quiesceIndex).toBeGreaterThan(provenanceInspectionIndex);
     expect(internalSmokeIndex).toBeGreaterThan(backupIndex);
     expect(caddyActivationIndex).toBeGreaterThan(internalSmokeIndex);
+    expect(upgrade).toContain("'--no-build'");
+    expect(upgrade.match(/retainRollbackWorkspace = true/gu)).toHaveLength(3);
     expect(upgrade).toContain('publicExposureAttempted');
     expect(upgrade).toContain('without data rollback');
     for (const script of [backup, restore, upgrade]) {
@@ -380,6 +658,7 @@ describe('operational script contract', () => {
     const smoke = read('smoke.mjs');
     for (const marker of [
       '/v1/auth/register',
+      '/v1/auth/login',
       '/v1/realtime/ticket',
       'room.create',
       'room.join',
@@ -404,7 +683,9 @@ describe('operational script contract', () => {
     expect(smoke).toContain('TURN rejected invalid credentials');
     expect(smoke).toContain('TURN relay data passed');
     expect(smoke).toContain("runTurnClient(envFile, credentials, 'tcp', true)");
-    expect(smoke).toContain('Smoke: authenticated TURN TCP relay data passed');
+    expect(smoke).toContain(
+      'Smoke: authenticated TURN-over-TCP UDP relay data passed',
+    );
     expect(smoke).toContain(
       'turnutils_uclient -u "$username" -w "$credential" -t -c',
     );
@@ -436,8 +717,13 @@ describe('operational script contract', () => {
       'docker compose',
       'export-local-ca.mjs',
       'backup.mjs',
+      'monitor.mjs',
       'restore.mjs',
       'upgrade.mjs',
+      'compose.turn-host.yaml',
+      'TURN_NETWORK_MODE=host',
+      'ip_local_reserved_ports',
+      '5349/TCP',
       '49160-49200/UDP',
       'external host',
       'RustFS',
@@ -447,5 +733,6 @@ describe('operational script contract', () => {
     expect(guide).not.toMatch(
       /NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*0|ignore-certificate-errors/,
     );
+    expect(guide).not.toContain('5349/TCP+UDP');
   });
 });

@@ -9,12 +9,17 @@ const deploy = resolve(root, 'deploy');
 
 const contractEnvironment = Object.freeze({
   ...process.env,
+  BUILD_CREATED: '2026-07-24T18:31:47Z',
+  BUILD_REVISION: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  BUILD_VERSION: '2026.07.24-aaaaaaaaaaaa',
+  SOURCE_DATE_EPOCH: '1784917907',
   APP_DOMAIN: 'rtc.example.test',
   ACME_EMAIL: 'operator@example.test',
   POSTGRES_DB: 'wo',
   POSTGRES_USER: 'wo',
   PUBLIC_IPV4: '203.0.113.10',
   TURN_HOST: 'turn.example.test',
+  TURN_INTERNAL_IP: '',
   TURN_REALM: 'turn.example.test',
   TURN_PORT: '3478',
   TURN_TLS_PORT: '5349',
@@ -22,7 +27,7 @@ const contractEnvironment = Object.freeze({
   TURN_RELAY_MAX_PORT: '49200',
   TURN_URLS:
     'stun:turn.example.test:3478,turn:turn.example.test:3478?transport=udp,turn:turn.example.test:3478?transport=tcp,turns:turn.example.test:5349?transport=tcp',
-  DEPLOY_SECRET_DIR: './secrets',
+  DEPLOY_SECRET_DIR: resolve(deploy, 'secrets'),
   WO_INTEGRATION_HTTP_PORT: '',
   WO_INTEGRATION_HTTPS_PORT: '',
 });
@@ -39,7 +44,9 @@ type ComposePort = Readonly<{
 }>;
 
 type ComposeService = Readonly<{
-  build?: unknown;
+  build?: {
+    args?: Record<string, string>;
+  };
   cap_add?: string[];
   cap_drop?: string[];
   command?: unknown;
@@ -53,6 +60,7 @@ type ComposeService = Readonly<{
     options?: Record<string, string>;
   };
   mem_limit?: number | string;
+  network_mode?: string;
   networks?: Record<string, unknown> | string[];
   pids_limit?: number;
   ports?: ComposePort[];
@@ -85,6 +93,7 @@ function renderCompose(
   integration = false,
   environment: NodeJS.ProcessEnv = {},
 ): ComposeConfiguration {
+  const effectiveEnvironment = { ...contractEnvironment, ...environment };
   const arguments_ = [
     'compose',
     '--project-name',
@@ -94,12 +103,14 @@ function renderCompose(
   ];
   if (integration) {
     arguments_.push('-f', resolve(deploy, 'compose.integration.yaml'));
+  } else if (effectiveEnvironment.TURN_NETWORK_MODE === 'host') {
+    arguments_.push('-f', resolve(deploy, 'compose.turn-host.yaml'));
   }
   arguments_.push('config', '--format', 'json');
   const result = spawnSync('docker', arguments_, {
     cwd: deploy,
     encoding: 'utf8',
-    env: { ...contractEnvironment, ...environment },
+    env: effectiveEnvironment,
   });
   if (result.status !== 0) {
     throw new Error(`docker compose config failed: ${result.stderr.trim()}`);
@@ -107,15 +118,26 @@ function renderCompose(
   return JSON.parse(result.stdout) as ComposeConfiguration;
 }
 
-function renderRootCompose(fileName: string): ComposeConfiguration {
+function renderRootCompose(
+  fileName: string,
+  environment: NodeJS.ProcessEnv = {},
+): ComposeConfiguration {
+  const effectiveEnvironment = {
+    ...contractEnvironment,
+    POSTGRES_HOST: 'postgres.external.test',
+    ...environment,
+  };
+  const composeFiles = ['-f', resolve(root, fileName)];
+  if (effectiveEnvironment.TURN_NETWORK_MODE === 'host') {
+    composeFiles.push('-f', resolve(deploy, 'compose.turn-host.yaml'));
+  }
   const result = spawnSync(
     'docker',
     [
       'compose',
       '--project-name',
       'wo-root-contract',
-      '-f',
-      resolve(root, fileName),
+      ...composeFiles,
       'config',
       '--format',
       'json',
@@ -123,10 +145,7 @@ function renderRootCompose(fileName: string): ComposeConfiguration {
     {
       cwd: root,
       encoding: 'utf8',
-      env: {
-        ...contractEnvironment,
-        POSTGRES_HOST: 'postgres.external.test',
-      },
+      env: effectiveEnvironment,
     },
   );
   if (result.status !== 0) {
@@ -173,6 +192,67 @@ function read(relativePath: string): string {
 }
 
 describe('production Compose contract', () => {
+  test('renders every root secret from the exact absolute deploy directory', () => {
+    const expected = {
+      jwt_access_secret: resolve(deploy, 'secrets', 'jwt_access_secret'),
+      postgres_password: resolve(deploy, 'secrets', 'postgres_password'),
+      turn_shared_secret: resolve(deploy, 'secrets', 'turn_shared_secret'),
+      turn_tls_cert: resolve(deploy, 'secrets', 'turn_tls_cert.pem'),
+      turn_tls_key: resolve(deploy, 'secrets', 'turn_tls_key.pem'),
+    };
+    for (const configuration of [
+      renderRootCompose('docker-compose.yml'),
+      renderRootCompose('docker-compose.external-db.yml'),
+    ]) {
+      expect(
+        Object.fromEntries(
+          Object.entries(configuration.secrets ?? {}).map(([name, secret]) => [
+            name,
+            secret.file,
+          ]),
+        ),
+      ).toEqual(expected);
+    }
+  });
+
+  test('injects complete reproducible build metadata into application images', () => {
+    const expected = {
+      BUILD_CREATED: contractEnvironment.BUILD_CREATED,
+      BUILD_REVISION: contractEnvironment.BUILD_REVISION,
+      BUILD_VERSION: contractEnvironment.BUILD_VERSION,
+      SOURCE_DATE_EPOCH: contractEnvironment.SOURCE_DATE_EPOCH,
+    };
+    const deployment = renderCompose();
+    for (const service of ['caddy', 'server', 'coturn']) {
+      expect(deployment.services[service]?.build?.args).toMatchObject(expected);
+    }
+    for (const configuration of [
+      renderRootCompose('docker-compose.yml'),
+      renderRootCompose('docker-compose.external-db.yml'),
+    ]) {
+      expect(configuration.services.server?.build?.args).toMatchObject(
+        expected,
+      );
+      expect(configuration.services.coturn?.build?.args).toMatchObject(
+        expected,
+      );
+    }
+
+    const integration = renderCompose(true);
+    const integrationExpected = {
+      BUILD_CREATED: '1970-01-01T00:00:01Z',
+      BUILD_REVISION: '0000000000000000000000000000000000000000',
+      BUILD_VERSION: 'integration',
+      SOURCE_DATE_EPOCH: '1',
+    };
+    for (const service of ['caddy', 'server', 'coturn']) {
+      expect(integration.services[service]?.build?.args).toMatchObject(
+        integrationExpected,
+      );
+      expect(integration.services[service]?.image).toMatch(/:integration$/u);
+    }
+  });
+
   test('runs exactly the four self-hosted long-lived services', () => {
     const configuration = renderCompose();
     expect(Object.keys(configuration.services).sort()).toEqual([
@@ -204,7 +284,6 @@ describe('production Compose contract', () => {
         '3478-3478:3478-3478/udp',
         ...relayPorts,
         '5349-5349:5349-5349/tcp',
-        '5349-5349:5349-5349/udp',
       ].sort(),
     );
     for (const port of services.coturn?.ports ?? []) {
@@ -243,7 +322,6 @@ describe('production Compose contract', () => {
         '13478-13478:3478-3478/tcp',
         '13478-13478:3478-3478/udp',
         '15349-15349:5349-5349/tcp',
-        '15349-15349:5349-5349/udp',
       ]),
     );
   });
@@ -254,6 +332,7 @@ describe('production Compose contract', () => {
     );
     expect(healthcheck).toContain('/usr/local/bin/turn-healthcheck');
     expect(healthcheck).toContain('/run/secrets/turn_shared_secret');
+    expect(healthcheck).toContain('TURN_INTERNAL_IP:-127.0.0.1');
     expect(healthcheck).not.toContain('cat /run/secrets');
     expect(healthcheck).not.toContain(' -W ');
     expect(healthcheck).not.toContain('turnutils_stunclient');
@@ -261,8 +340,40 @@ describe('production Compose contract', () => {
     expect(healthcheck).toContain('"retries":3');
     const probe = read('deploy/coturn/health-probe.c');
     expect(probe).toContain('HMAC(EVP_sha1()');
+    expect(probe).toContain('(argc != 3 && argc != 4)');
+    expect(probe).toContain('inet_pton(AF_INET, value, &address)');
     expect(probe).toContain('execv("/usr/bin/turnutils_uclient"');
     expect(probe).toContain('"--no-even-port"');
+    expect(probe).toContain('argc == 4 ? argv[3] : "127.0.0.1"');
+  });
+
+  test('supports a fail-closed single-IPv4 TURN host-network mapping', () => {
+    for (const configuration of [
+      renderCompose(),
+      renderRootCompose('docker-compose.yml'),
+      renderRootCompose('docker-compose.external-db.yml'),
+    ]) {
+      expect(configuration.services.coturn?.environment?.TURN_INTERNAL_IP).toBe(
+        '',
+      );
+    }
+
+    const entrypoint = read('deploy/coturn/entrypoint.sh');
+    for (const boundary of [
+      'valid_ipv4 "${TURN_EXTERNAL_IP:-}"',
+      'valid_ipv4 "$TURN_INTERNAL_IP"',
+      'for (octet_index = 1; octet_index <= 4; octet_index += 1)',
+      'ip -4 -o address show',
+      'TURN_INTERNAL_IP is not assigned to a local interface',
+      '"denied-peer-ip=$TURN_EXTERNAL_IP-$TURN_EXTERNAL_IP"',
+      '"listening-ip=$TURN_INTERNAL_IP"',
+      '"relay-ip=$TURN_INTERNAL_IP"',
+      '"external-ip=$TURN_EXTERNAL_IP/$TURN_INTERNAL_IP"',
+    ]) {
+      expect(entrypoint).toContain(boundary);
+    }
+    expect(entrypoint).not.toContain('for (index =');
+    expect(entrypoint).not.toContain('listening-ip=127.0.0.1');
   });
 
   test('isolates PostgreSQL and TURN from unrelated services', () => {
@@ -282,6 +393,50 @@ describe('production Compose contract', () => {
     expect(serviceNetworks(configuration.services.coturn!)).toEqual([
       'turn_edge',
     ]);
+  });
+
+  test('renders the explicit TURN host-network profile without Docker NAT', () => {
+    const hostEnvironment = {
+      TURN_NETWORK_MODE: 'host',
+      TURN_INTERNAL_IP: '172.24.52.219',
+      TURN_STATE_EMPTY_DIR: '/var/empty/wo-turn',
+      TURN_RELAY_MIN_PORT: '49160',
+      TURN_RELAY_MAX_PORT: '49509',
+    };
+    for (const configuration of [
+      renderCompose(false, hostEnvironment),
+      renderRootCompose('docker-compose.yml', hostEnvironment),
+      renderRootCompose('docker-compose.external-db.yml', hostEnvironment),
+    ]) {
+      const coturn = configuration.services.coturn!;
+      expect(coturn.network_mode).toBe('host');
+      expect(coturn.ports ?? []).toEqual([]);
+      expect(serviceNetworks(coturn)).toEqual([]);
+      expect(coturn.environment).toMatchObject({
+        TURN_INTERNAL_IP: '172.24.52.219',
+        TURN_LISTEN_PORT: '3478',
+        TURN_NETWORK_MODE: 'host',
+        TURN_RELAY_MAX_PORT: '49509',
+        TURN_RELAY_MIN_PORT: '49160',
+        TURN_TLS_LISTEN_PORT: '5349',
+      });
+      expect(serviceSecrets(coturn).sort()).toEqual([
+        'turn_shared_secret',
+        'turn_tls_cert',
+        'turn_tls_key',
+      ]);
+      expect(coturn.volumes).toEqual([
+        expect.objectContaining({
+          read_only: true,
+          source: '/var/empty/wo-turn',
+          target: '/var/lib/coturn',
+          type: 'bind',
+        }),
+      ]);
+      expect(coturn.read_only).toBe(true);
+      expect(coturn.cap_drop).toEqual(['ALL']);
+      expect(coturn.security_opt).toContain('no-new-privileges:true');
+    }
   });
 
   test('uses health gates, restart policies, and reviewed patch image tags', () => {
@@ -353,15 +508,20 @@ describe('production Compose contract', () => {
       'chmod 600 "$runtime_config" "$runtime_tls_key"',
     );
     const turnEntrypoint = read('deploy/coturn/entrypoint.sh');
+    expect(turnEntrypoint).toContain(
+      'exec /usr/local/bin/wo-drop-privileges \\\n  65534 \\\n  65533 \\\n  /usr/bin/turnserver',
+    );
+    const turnPrivilegeDropper = read('deploy/coturn/drop-privileges.c');
     for (const privilegeBoundary of [
-      '/bin/setpriv',
-      '--reuid=65534',
-      '--regid=65533',
-      '--clear-groups',
-      '--no-new-privs',
-      '--bounding-set=-all',
+      'prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)',
+      'prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)',
+      'prctl(PR_CAPBSET_DROP, capability, 0, 0, 0)',
+      'setgroups(0, NULL)',
+      'setresgid(gid, gid, gid)',
+      'setresuid(uid, uid, uid)',
+      'verify_capabilities_cleared(last)',
     ]) {
-      expect(turnEntrypoint).toContain(privilegeBoundary);
+      expect(turnPrivilegeDropper).toContain(privilegeBoundary);
     }
     expect(configuration.services.server?.user).toBe('0:0');
     const serverEntrypoint = read('deploy/server/entrypoint.sh');
@@ -407,23 +567,23 @@ describe('production Compose contract', () => {
       });
     }
 
-    expect(read('deploy/coturn/Dockerfile')).toContain(
-      'apk add --no-cache setpriv libcap',
+    const turnDockerfile = read('deploy/coturn/Dockerfile');
+    expect(turnDockerfile).toContain(
+      'cc -O2 -Wall -Wextra -static /tmp/drop-privileges.c',
+    );
+    expect(turnDockerfile).toContain(
+      'COPY --from=probe-build /tmp/wo-drop-privileges /usr/local/bin/wo-drop-privileges',
     );
     expect(
-      read('deploy/coturn/Dockerfile').match(
-        /FROM coturn\/coturn:4\.14\.0-r0-alpine@sha256:/gu,
-      ),
-    ).toHaveLength(2);
-    expect(read('deploy/coturn/Dockerfile')).toContain(
+      turnDockerfile.match(/FROM coturn\/coturn:4\.14\.0-r0-alpine@sha256:/gu),
+    ).toHaveLength(1);
+    expect(turnDockerfile).toContain(
       'coturn/coturn:4.14.0-r0-alpine@sha256:d3a11e8f6d9e1b0454531e307684a072bdd36c36b28daafb4f082aa1e5ebd2e4',
     );
-    expect(read('deploy/coturn/Dockerfile')).toContain(
-      'setcap -r /usr/bin/turnserver',
+    expect(turnDockerfile).toContain(
+      'cp -p /usr/bin/turnserver /tmp/turnserver \\\n  && rm -f /usr/bin/turnserver \\\n  && mv /tmp/turnserver /usr/bin/turnserver',
     );
-    expect(read('deploy/coturn/Dockerfile')).toContain(
-      'rm -f /var/log/apk.log',
-    );
+    expect(turnDockerfile).toContain('rm -f /var/log/apk.log');
   });
 
   test('blocks local and special-use TURN peer destinations', () => {
@@ -455,8 +615,21 @@ describe('production Compose contract', () => {
       turnConfig,
       read('deploy/coturn/turnserver.integration.conf'),
     ]) {
+      for (const boundary of [
+        'allocation-default-address-family=ipv4',
+        'no-dtls',
+        'no-rfc5780',
+        'no-tcp-relay',
+        'no-auth-pings',
+        'no-dynamic-ip-list',
+        'no-dynamic-realms',
+        'userdb=/run/wo-turn/turndb',
+      ]) {
+        expect(config).toContain(boundary);
+      }
+      expect(config).not.toMatch(/^cli(?:=|$)/mu);
       expect(config).not.toMatch(
-        /^(?:no-loopback-peers|no-cli|no-tlsv1|no-tlsv1_1)$/mu,
+        /^(?:no-loopback-peers|no-tlsv1|no-tlsv1_1)$/mu,
       );
     }
   });
@@ -481,6 +654,10 @@ describe('external database Compose contract', () => {
     ]);
 
     const server = configuration.services.server!;
+    expect(server.build).toMatchObject({
+      context: root,
+      dockerfile: 'apps/server/Dockerfile',
+    });
     expect(server.ports).toHaveLength(1);
     expect(server.ports?.[0]).toMatchObject({
       host_ip: '127.0.0.1',
@@ -504,7 +681,11 @@ describe('external database Compose contract', () => {
     );
 
     const coturn = configuration.services.coturn!;
-    expect(coturn.ports).toHaveLength(45);
+    expect(coturn.build).toMatchObject({
+      context: root,
+      dockerfile: 'deploy/coturn/Dockerfile',
+    });
+    expect(coturn.ports).toHaveLength(44);
     for (const port of coturn.ports ?? []) {
       expect(port.host_ip).toBe('0.0.0.0');
     }
@@ -535,7 +716,7 @@ describe('external database Compose contract', () => {
       '/tmp:uid=1000,gid=1000,mode=0700,noexec,nosuid,nodev',
     );
     expect(coturn.tmpfs).toContain(
-      '/run/wo-turn:uid=0,gid=0,mode=0700,noexec,nosuid,nodev',
+      '/run/wo-turn:uid=0,gid=0,mode=0700,size=4m,noexec,nosuid,nodev',
     );
     for (const [secretName, fileName] of [
       ['jwt_access_secret', 'jwt_access_secret'],
@@ -544,8 +725,8 @@ describe('external database Compose contract', () => {
       ['turn_tls_cert', 'turn_tls_cert.pem'],
       ['turn_tls_key', 'turn_tls_key.pem'],
     ]) {
-      expect(configuration.secrets?.[secretName]?.file).toMatch(
-        new RegExp(`/${fileName}$`, 'u'),
+      expect(configuration.secrets?.[secretName]?.file).toBe(
+        resolve(deploy, 'secrets', fileName),
       );
     }
   });

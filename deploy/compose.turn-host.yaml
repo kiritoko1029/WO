@@ -1,0 +1,23 @@
+services:
+  coturn:
+    network_mode: host
+    ports: !override []
+    networks: !override []
+    environment:
+      TURN_NETWORK_MODE: host
+      TURN_INTERNAL_IP: ${TURN_INTERNAL_IP:?TURN_INTERNAL_IP is required}
+      TURN_LISTEN_PORT: ${TURN_PORT:-3478}
+      TURN_TLS_LISTEN_PORT: ${TURN_TLS_PORT:-5349}
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'exec /usr/local/bin/turn-healthcheck /run/secrets/turn_shared_secret "$$TURN_LISTEN_PORT" "$$TURN_INTERNAL_IP" >/dev/null 2>&1',
+        ]
+    volumes: !override
+      - type: bind
+        source: ${TURN_STATE_EMPTY_DIR:?TURN_STATE_EMPTY_DIR is required}
+        target: /var/lib/coturn
+        read_only: true
+        bind:
+          create_host_path: false

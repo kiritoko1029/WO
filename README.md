@@ -24,7 +24,8 @@ Docker Compose 提供账号、房间信令、Web、PostgreSQL 和 TURN；媒体�
 
 ## 中心模式快速开始
 
-要求 Node.js 24、pnpm 10.32.1、Docker Engine 和 Docker Compose 2.24.4+。
+要求 Node.js 24、pnpm 10.32.1、Linux x86_64、Docker Engine 26+ 和
+Docker Compose 2.24.4+。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -36,7 +37,7 @@ node deploy/scripts/init-secrets.mjs
 
 ```bash
 node deploy/scripts/preflight.mjs --env-file=deploy/.env
-docker compose --project-name wo --env-file deploy/.env -f deploy/compose.yaml up -d --build --wait
+node deploy/scripts/compose.mjs --env-file=deploy/.env up -d --build --wait
 node deploy/scripts/smoke.mjs --env-file=deploy/.env
 ```
 
