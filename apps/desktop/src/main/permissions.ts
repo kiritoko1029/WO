@@ -32,11 +32,23 @@ export function systemAudioModeForPlatform(
 ): SystemAudioMode {
   if (platform === 'win32') return 'loopback';
   if (platform !== 'darwin') return 'unsupported';
-  const match = /^(0|[1-9]\d*)(?:\.|$)/u.exec(platformRelease);
+  const match = /^(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?$/u.exec(
+    platformRelease,
+  );
   if (match === null) return 'unsupported';
   const darwinMajor = Number(match[1]);
-  return Number.isSafeInteger(darwinMajor) && darwinMajor >= 24
-    ? 'native-picker'
+  const darwinMinor = match[2] === undefined ? null : Number(match[2]);
+  const darwinPatch = match[3] === undefined ? null : Number(match[3]);
+  if (
+    !Number.isSafeInteger(darwinMajor) ||
+    (darwinMinor !== null && !Number.isSafeInteger(darwinMinor)) ||
+    (darwinPatch !== null && !Number.isSafeInteger(darwinPatch))
+  ) {
+    return 'unsupported';
+  }
+  if (darwinMajor >= 24) return 'native-picker';
+  return darwinMajor === 23 && darwinMinor !== null && darwinMinor >= 2
+    ? 'loopback'
     : 'unsupported';
 }
 

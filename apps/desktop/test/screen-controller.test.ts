@@ -483,6 +483,47 @@ describe('single screen controller', () => {
     expect(harness.controller.getSnapshot().state).toBe('sharing');
   });
 
+  test.each([
+    ['missing', undefined],
+    ['already ended', 'ended'],
+  ] as const)(
+    'fails closed when opted-in system audio is %s',
+    async (_label, audioState) => {
+      const videoTrack = new FakeTrack();
+      const audioTrack =
+        audioState === undefined ? undefined : new FakeTrack('audio');
+      audioTrack?.end();
+      const harness = createHarness({
+        capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+      });
+      await harness.controller.prepare();
+      await harness.controller.selectSource(
+        '00000000-0000-4000-8000-000000000001',
+      );
+      harness.controller.setSystemAudioEnabled(true);
+
+      await expect(
+        harness.controller.startSelectedCapture(),
+      ).rejects.toMatchObject({
+        code: 'SYSTEM_AUDIO_UNAVAILABLE',
+      });
+
+      expect(videoTrack.stop).toHaveBeenCalledOnce();
+      if (audioTrack !== undefined) {
+        expect(audioTrack.stop).toHaveBeenCalledOnce();
+      }
+      expect(harness.sender.replaceTrack).not.toHaveBeenCalledWith(videoTrack);
+      expect(harness.audioSender.replaceTrack).not.toHaveBeenCalledWith(
+        audioTrack,
+      );
+      expect(harness.controller.getSnapshot()).toMatchObject({
+        state: 'error',
+        systemAudioEnabled: false,
+        error: '未获取到系统音频，请关闭系统音频后重试',
+      });
+    },
+  );
+
   test('routes macOS native capture directly to the system picker authority', async () => {
     const videoTrack = new FakeTrack();
     const audioTrack = new FakeTrack('audio');

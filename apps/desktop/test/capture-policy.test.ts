@@ -309,55 +309,61 @@ describe('desktop capture source policy', () => {
     );
   });
 
-  test('grants a selected source once through the independently checked handler', () => {
-    const broker = createCaptureSourceBroker({
-      randomToken: () => '00000000-0000-4000-8000-000000000001',
-    });
-    const [summary] = broker.replaceAvailable(12, [sources[0]]);
-    broker.select(12, summary!.token);
-    const mainFrame = { url: 'https://app.example.test/index.html' };
-    let handler:
-      | ((
-          request: Record<string, unknown>,
-          callback: (value: unknown) => void,
-        ) => void)
-      | undefined;
-    const session = {
-      setDisplayMediaRequestHandler: vi.fn((next) => {
-        handler = next;
-      }),
-    };
-    installDisplayMediaHandler({
-      session,
-      webContents: { id: 12, mainFrame },
-      rendererEntry: mainFrame.url,
-      broker,
-      platform: 'win32',
-      platformRelease: '10.0.26100',
-    });
-    const callback = vi.fn();
-    const request = {
-      frame: mainFrame,
-      securityOrigin: 'https://app.example.test',
-      videoRequested: true,
-      audioRequested: false,
-      userGesture: true,
-    };
+  test.each([
+    ['win32', '10.0.26100'],
+    ['darwin', '23.2.0'],
+  ] as const)(
+    'grants a selected source once with loopback on %s %s',
+    (platform, platformRelease) => {
+      const broker = createCaptureSourceBroker({
+        randomToken: () => '00000000-0000-4000-8000-000000000001',
+      });
+      const [summary] = broker.replaceAvailable(12, [sources[0]]);
+      broker.select(12, summary!.token);
+      const mainFrame = { url: 'https://app.example.test/index.html' };
+      let handler:
+        | ((
+            request: Record<string, unknown>,
+            callback: (value: unknown) => void,
+          ) => void)
+        | undefined;
+      const session = {
+        setDisplayMediaRequestHandler: vi.fn((next) => {
+          handler = next;
+        }),
+      };
+      installDisplayMediaHandler({
+        session,
+        webContents: { id: 12, mainFrame },
+        rendererEntry: mainFrame.url,
+        broker,
+        platform,
+        platformRelease,
+      });
+      const callback = vi.fn();
+      const request = {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: false,
+        userGesture: true,
+      };
 
-    handler?.({ ...request, audioRequested: true }, callback);
-    // Audio is now allowed — handler provides loopback audio alongside video.
-    expect(callback).toHaveBeenLastCalledWith({
-      video: sources[0],
-      audio: 'loopback',
-    });
-    // Second call: source already consumed, callback falls back gracefully.
-    handler?.(request, callback);
-    expect(callback).toHaveBeenLastCalledWith({});
-    expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
-      expect.any(Function),
-      { useSystemPicker: false },
-    );
-  });
+      handler?.({ ...request, audioRequested: true }, callback);
+      // Audio is now allowed — handler provides loopback audio alongside video.
+      expect(callback).toHaveBeenLastCalledWith({
+        video: sources[0],
+        audio: 'loopback',
+      });
+      // Second call: source already consumed, callback falls back gracefully.
+      handler?.(request, callback);
+      expect(callback).toHaveBeenLastCalledWith({});
+      expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
+        expect.any(Function),
+        { useSystemPicker: false },
+      );
+    },
+  );
 
   test('fails closed for unsupported system audio without consuming the selected source', () => {
     const broker = createCaptureSourceBroker({
@@ -383,7 +389,7 @@ describe('desktop capture source policy', () => {
       rendererEntry: mainFrame.url,
       broker,
       platform: 'darwin',
-      platformRelease: '23.6.0',
+      platformRelease: '23.1.0',
     });
     const callback = vi.fn();
     const request = {
@@ -602,10 +608,16 @@ describe('desktop capture source policy', () => {
 describe('screen permission policy', () => {
   test.each([
     ['win32', '10.0.26100', 'loopback'],
-    ['darwin', '23.6.0', 'unsupported'],
+    ['darwin', '23.1.0', 'unsupported'],
+    ['darwin', '23.2.0', 'loopback'],
+    ['darwin', '23.6.0', 'loopback'],
+    ['darwin', '23', 'unsupported'],
+    ['darwin', '23.2beta', 'unsupported'],
     ['darwin', '24.0.0', 'native-picker'],
     ['darwin', '25', 'native-picker'],
     ['darwin', '24beta', 'unsupported'],
+    ['darwin', '24.999999999999999999999', 'unsupported'],
+    ['darwin', '24.0.999999999999999999999', 'unsupported'],
     ['linux', '24.0.0', 'unsupported'],
   ] as const)(
     'maps %s release %s to %s system audio',
@@ -636,7 +648,7 @@ describe('screen permission policy', () => {
       expect(service.status()).toEqual({
         status,
         canOpenSettings: status === 'denied' || status === 'restricted',
-        systemAudioMode: 'unsupported',
+        systemAudioMode: 'loopback',
       });
       expect(getMediaAccessStatus).toHaveBeenCalledWith('screen');
     },

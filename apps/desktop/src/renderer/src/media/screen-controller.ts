@@ -306,6 +306,9 @@ export function createScreenController(
   const errorMessage = (error: unknown): string => {
     const code = errorCode(error);
     if (code === 'LEASE_LOST') return '屏幕共享权限已失效';
+    if (code === 'SYSTEM_AUDIO_UNAVAILABLE') {
+      return '未获取到系统音频，请关闭系统音频后重试';
+    }
     if (
       typeof error === 'object' &&
       error !== null &&
@@ -659,6 +662,18 @@ export function createScreenController(
         ) {
           stopStream(stream);
           return fail(new ScreenControllerError('INVALID_STATE'));
+        }
+        if (
+          systemAudioEnabled &&
+          (audioTracks.length !== 1 || trackEnded(audioTracks[0]!))
+        ) {
+          stopStream(stream);
+          return fail(
+            Object.assign(
+              new Error('System audio capture did not provide a live track'),
+              { code: 'SYSTEM_AUDIO_UNAVAILABLE' },
+            ),
+          );
         }
         const track = videoTracks[0]!;
         const audioTrack = audioTracks[0] ?? null;
