@@ -1,4 +1,5 @@
 import {
+  P2P_MEDIA_PLAN,
   p2pOutboundResponseSchema,
   signalTicketResponseSchema,
   type P2pOutboundResponse,
@@ -281,7 +282,16 @@ function sendRequest(
   requestId: string,
   payload: unknown,
 ): void {
-  client.socket.send(JSON.stringify({ version: 1, requestId, type, payload }));
+  const currentPayload =
+    type === 'peer.ready' &&
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload)
+      ? { ...payload, mediaPlan: P2P_MEDIA_PLAN }
+      : payload;
+  client.socket.send(
+    JSON.stringify({ version: 1, requestId, type, payload: currentPayload }),
+  );
 }
 
 function serverSockets(fixture: RunningFixture): WebSocket[] {
@@ -2166,6 +2176,26 @@ describe('authenticated signaling gateway', () => {
         (message) =>
           message.type === 'protocol.error' &&
           message.requestId === 'bad-version',
+      ),
+    ).toMatchObject({
+      payload: { error: { code: 'UNSUPPORTED_PROTOCOL' } },
+    });
+    malformed.socket.send(
+      JSON.stringify({
+        version: 1,
+        requestId: 'legacy-media-plan',
+        type: 'peer.ready',
+        payload: {
+          roomId: 'room-1',
+          connectionEpoch: 1,
+        },
+      }),
+    );
+    expect(
+      await malformed.next(
+        (message) =>
+          message.type === 'protocol.error' &&
+          message.requestId === 'legacy-media-plan',
       ),
     ).toMatchObject({
       payload: { error: { code: 'UNSUPPORTED_PROTOCOL' } },

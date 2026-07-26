@@ -1,4 +1,5 @@
 import {
+  P2P_MEDIA_PLAN,
   p2pAckEnvelopeSchema,
   p2pOutboundResponseSchema,
   p2pRoomJoinAckSchema,
@@ -158,11 +159,53 @@ describe('LAN room service', () => {
       version: 1,
       requestId: 'ready-1',
       type: 'peer.ready',
-      payload: { roomId: 'room-1', connectionEpoch: 1 },
+      payload: {
+        roomId: 'room-1',
+        connectionEpoch: 1,
+        mediaPlan: P2P_MEDIA_PLAN,
+      },
     });
     socket.send(rawRequest);
     expect(await rawResponse).toBe(JSON.stringify(expected));
     await app.close();
+  });
+
+  test('rejects incompatible media plans through the authenticated LAN gateway', async () => {
+    const service = await startLiteRoomService();
+    services.push(service);
+    const ticket = service.issueHostTicket().ticket;
+    const socket = await openSocket(service.invite.endpoint, ticket);
+    const codec = createLanFrameCodec(service.invite.inviteKey, 'client');
+    codec.bind('legacy-host', ticket);
+
+    for (const [requestId, payload] of [
+      ['missing-media-plan', { roomId: 'room-1', connectionEpoch: 1 }],
+      [
+        'legacy-media-plan',
+        {
+          roomId: 'room-1',
+          connectionEpoch: 1,
+          mediaPlan: 'mic-screen-v0',
+        },
+      ],
+    ] as const) {
+      expect(
+        await sendLanRequest(
+          socket,
+          codec,
+          'legacy-host',
+          'peer.ready',
+          requestId,
+          payload,
+        ),
+      ).toMatchObject({
+        requestId,
+        type: 'protocol.error',
+        payload: { error: { code: 'UNSUPPORTED_PROTOCOL' } },
+      });
+    }
+
+    await closeSocket(socket);
   });
 
   test('rejects an authenticated frame replayed with a fresh ticket', async () => {

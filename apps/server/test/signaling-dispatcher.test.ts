@@ -1,4 +1,5 @@
 import {
+  P2P_MEDIA_PLAN,
   p2pAckEnvelopeSchema,
   p2pRoomJoinAckSchema,
   p2pScreenAcquireAckSchema,
@@ -343,6 +344,7 @@ describe('P2P signaling dispatcher', () => {
       request('peer.ready', 'ready-creator', {
         roomId,
         connectionEpoch: creator.binding!.connectionEpoch,
+        mediaPlan: P2P_MEDIA_PLAN,
       }),
     );
     dispatch(
@@ -351,6 +353,7 @@ describe('P2P signaling dispatcher', () => {
       request('peer.ready', 'ready-joiner', {
         roomId,
         connectionEpoch: joiner.binding!.connectionEpoch,
+        mediaPlan: P2P_MEDIA_PLAN,
       }),
     );
 

@@ -1,4 +1,5 @@
 import {
+  P2P_MEDIA_PLAN,
   p2pRoomJoinAckSchema,
   p2pRoomLeaveAckSchema,
   peerReadyAckSchema,
@@ -466,7 +467,11 @@ export function createRealtimeRoomGateway(
       }
       const response = await signaling.request(
         'peer.ready',
-        { roomId, connectionEpoch: session.connectionEpoch },
+        {
+          roomId,
+          connectionEpoch: session.connectionEpoch,
+          mediaPlan: P2P_MEDIA_PLAN,
+        },
         peerReadyAckSchema,
       );
       successfulData(response);

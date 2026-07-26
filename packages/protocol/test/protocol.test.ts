@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  P2P_MEDIA_PLAN,
   PROTOCOL_VERSION,
   ackEnvelopeSchema,
   authLoginBodySchema,
@@ -1331,7 +1332,11 @@ describe('two-person room lifecycle contracts', () => {
       request('room.resume', { roomId: 'room-1' }),
       request('room.leave', { roomId: 'room-1' }),
       request('room.end', { roomId: 'room-1' }),
-      request('peer.ready', { roomId: 'room-1', connectionEpoch: 2 }),
+      request('peer.ready', {
+        roomId: 'room-1',
+        connectionEpoch: 2,
+        mediaPlan: P2P_MEDIA_PLAN,
+      }),
     ];
 
     for (const value of requests) {
@@ -1349,6 +1354,23 @@ describe('two-person room lifecycle contracts', () => {
     expect(
       p2pRequestEnvelopeSchema.safeParse(
         request('room.join', { roomCode: '012345', userId: 'spoofed-user' }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('peer.ready', {
+          roomId: 'room-1',
+          connectionEpoch: 2,
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      p2pRequestEnvelopeSchema.safeParse(
+        request('peer.ready', {
+          roomId: 'room-1',
+          connectionEpoch: 2,
+          mediaPlan: 'legacy-two-transceivers',
+        }),
       ).success,
     ).toBe(false);
   });

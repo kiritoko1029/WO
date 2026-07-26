@@ -1,4 +1,5 @@
 import {
+  P2P_MEDIA_PLAN,
   PROTOCOL_VERSION,
   type P2pBroadcastEnvelope,
   type P2pRequestEnvelope,
@@ -900,9 +901,13 @@ describe('realtime room gateway', () => {
     );
 
     expect(peer.factory).toHaveBeenCalledOnce();
-    expect(
-      client.request.mock.calls.filter(([type]) => type === 'peer.ready'),
-    ).toHaveLength(1);
+    const readyRequests = client.request.mock.calls.filter(
+      ([type]) => type === 'peer.ready',
+    );
+    expect(readyRequests).toHaveLength(1);
+    expect(readyRequests[0]?.[1]).toMatchObject({
+      mediaPlan: P2P_MEDIA_PLAN,
+    });
   });
 
   it('allows microphone permission retry without recreating the peer connection', async () => {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  P2P_MEDIA_PLAN,
   p2pAckEnvelopeSchema,
   p2pBroadcastEnvelopeSchema,
   p2pOutboundResponseSchema,
@@ -111,6 +112,15 @@ function parseMessage(text: string): ParsedMessage {
   }
   const candidate = decoded as Record<string, unknown>;
   if (candidate['version'] !== 1) {
+    return { ok: false, requestId, code: 'UNSUPPORTED_PROTOCOL' };
+  }
+  if (
+    candidate['type'] === 'peer.ready' &&
+    (typeof candidate['payload'] !== 'object' ||
+      candidate['payload'] === null ||
+      (candidate['payload'] as Record<string, unknown>)['mediaPlan'] !==
+        P2P_MEDIA_PLAN)
+  ) {
     return { ok: false, requestId, code: 'UNSUPPORTED_PROTOCOL' };
   }
   const parsed = p2pRequestEnvelopeSchema.safeParse(decoded);

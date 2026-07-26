@@ -15,6 +15,8 @@ import {
 } from './envelope.js';
 import { rtcConfigurationSchema } from './webrtc.js';
 
+export const P2P_MEDIA_PLAN = 'mic-system-screen-v1' as const;
+
 export const memberSchema = z
   .object({
     memberId: memberIdSchema,
@@ -279,6 +281,7 @@ export const peerReadyPayloadSchema = z
   .object({
     roomId: roomIdSchema,
     connectionEpoch: connectionEpochSchema,
+    mediaPlan: z.literal(P2P_MEDIA_PLAN),
   })
   .strict();
 export const peerReadyRequestSchema = createRequestEnvelopeSchema(
