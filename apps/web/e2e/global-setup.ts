@@ -83,8 +83,9 @@ export default async function globalSetup(): Promise<
       ],
       {
         cwd: repositoryDirectory,
+        maxBuffer: 64 * 1024 * 1024,
         windowsHide: true,
-        timeout: 180_000,
+        timeout: 600_000,
       },
     );
     if (!(await healthyStack())) {

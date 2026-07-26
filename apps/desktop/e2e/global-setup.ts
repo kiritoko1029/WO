@@ -23,6 +23,17 @@ const composeArguments = [
 ];
 const requiredServices = new Set(['caddy', 'coturn', 'postgres', 'server']);
 
+async function exportCaddyAuthority(): Promise<void> {
+  await execFileAsync(
+    process.execPath,
+    [
+      join(repositoryDirectory, 'deploy', 'scripts', 'export-local-ca.mjs'),
+      `--env-file=${join(repositoryDirectory, 'deploy', '.env.integration')}`,
+    ],
+    { cwd: repositoryDirectory, timeout: 60_000, windowsHide: true },
+  );
+}
+
 async function healthyStack(): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync(
@@ -49,51 +60,57 @@ async function healthyStack(): Promise<boolean> {
   }
 }
 
+async function downStack(): Promise<void> {
+  await execFileAsync(
+    docker,
+    [...composeArguments, 'down', '--remove-orphans'],
+    {
+      cwd: repositoryDirectory,
+      windowsHide: true,
+      timeout: 60_000,
+    },
+  );
+}
+
 export default async function globalSetup(): Promise<
   (() => Promise<void>) | undefined
 > {
-  await execFileAsync(pnpm, ['run', 'build:acceptance'], {
-    cwd: desktopDirectory,
-    windowsHide: true,
-  });
-
   const reuseStack = process.env.WO_E2E_REUSE_STACK === '1';
-  if (await healthyStack()) {
-    return async () => {
-      await rm(acceptanceOutput, { recursive: true, force: true });
-    };
-  }
-  if (reuseStack) {
-    await rm(acceptanceOutput, { recursive: true, force: true });
+  const existingStack = await healthyStack();
+  if (!existingStack && reuseStack) {
     throw new Error(
       'WO_E2E_REUSE_STACK=1 requires the existing wo-integration stack to be healthy',
     );
   }
 
+  let createdStack = false;
   try {
-    await execFileAsync(
-      docker,
-      [...composeArguments, 'up', '-d', '--build', '--wait'],
-      {
-        cwd: repositoryDirectory,
-        windowsHide: true,
-        timeout: 180_000,
-      },
-    );
-    if (!(await healthyStack())) {
-      throw new Error('wo-integration did not become healthy');
-    }
-  } catch (error) {
-    if (process.env.WO_E2E_REUSE_STACK !== '1') {
+    if (!existingStack) {
       await execFileAsync(
         docker,
-        [...composeArguments, 'down', '--remove-orphans'],
+        [...composeArguments, 'up', '-d', '--build', '--wait'],
         {
           cwd: repositoryDirectory,
+          maxBuffer: 64 * 1024 * 1024,
           windowsHide: true,
-          timeout: 60_000,
+          timeout: 600_000,
         },
-      ).catch(() => undefined);
+      );
+      createdStack = true;
+      if (!(await healthyStack())) {
+        throw new Error('wo-integration did not become healthy');
+      }
+    }
+    // The acceptance build inlines the current CA pin from root.crt, so the
+    // export must complete before the bundle is built.
+    await exportCaddyAuthority();
+    await execFileAsync(pnpm, ['run', 'build:acceptance'], {
+      cwd: desktopDirectory,
+      windowsHide: true,
+    });
+  } catch (error) {
+    if (createdStack) {
+      await downStack().catch(() => undefined);
     }
     await rm(acceptanceOutput, { recursive: true, force: true });
     throw error;
@@ -101,16 +118,8 @@ export default async function globalSetup(): Promise<
 
   return async () => {
     try {
-      if (process.env.WO_E2E_REUSE_STACK !== '1') {
-        await execFileAsync(
-          docker,
-          [...composeArguments, 'down', '--remove-orphans'],
-          {
-            cwd: repositoryDirectory,
-            windowsHide: true,
-            timeout: 60_000,
-          },
-        );
+      if (createdStack) {
+        await downStack();
       }
     } finally {
       await rm(acceptanceOutput, { recursive: true, force: true });
