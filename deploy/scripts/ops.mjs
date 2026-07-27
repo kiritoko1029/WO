@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { pipeline } from 'node:stream/promises';
 
 import { parseDotEnv, turnNetworkMode } from './lib.mjs';
 import { releaseProvenanceEnvironment } from './provenance.mjs';
@@ -345,32 +346,36 @@ export async function pipeFileToCommand(
   arguments_,
   options = {},
 ) {
-  await new Promise((resolvePromise, reject) => {
-    const environment = commandEnvironment(
-      command,
-      arguments_,
-      options.env ?? process.env,
-      options.composeProvenance,
-    );
-    const child = spawn(command, arguments_, {
-      cwd: options.cwd ?? deployDirectory,
-      env: environment,
-      stdio: ['pipe', 'inherit', 'inherit'],
-    });
-    createReadStream(file).pipe(child.stdin);
-    child.once('error', reject);
-    child.once('exit', (code) => {
-      if (code === 0) {
-        resolvePromise();
-      } else {
-        reject(
-          new Error(
-            `${options.label ?? command} failed with exit code ${code}`,
-          ),
-        );
-      }
-    });
+  const environment = commandEnvironment(
+    command,
+    arguments_,
+    options.env ?? process.env,
+    options.composeProvenance,
+  );
+  const child = spawn(command, arguments_, {
+    cwd: options.cwd ?? deployDirectory,
+    env: environment,
+    stdio: ['pipe', 'inherit', 'inherit'],
   });
+  const transfer = pipeline(createReadStream(file), child.stdin);
+  const completion = waitForPipedChild(child, options.label ?? command);
+  const [transferResult, completionResult] = await Promise.allSettled([
+    transfer,
+    completion,
+  ]);
+  if (completionResult.status === 'rejected') {
+    if (transferResult.status === 'rejected') {
+      throw new AggregateError(
+        [completionResult.reason, transferResult.reason],
+        `${options.label ?? command} failed while reading piped input`,
+        { cause: completionResult.reason },
+      );
+    }
+    throw completionResult.reason;
+  }
+  if (transferResult.status === 'rejected') {
+    throw transferResult.reason;
+  }
 }
 
 export async function pipeCommandToFile(
@@ -379,32 +384,58 @@ export async function pipeCommandToFile(
   file,
   options = {},
 ) {
-  await new Promise((resolvePromise, reject) => {
-    const output = createWriteStream(file, { mode: 0o600 });
-    const environment = commandEnvironment(
-      command,
-      arguments_,
-      options.env ?? process.env,
-      options.composeProvenance,
-    );
-    const child = spawn(command, arguments_, {
-      cwd: options.cwd ?? deployDirectory,
-      env: environment,
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-    child.stdout.pipe(output);
+  const environment = commandEnvironment(
+    command,
+    arguments_,
+    options.env ?? process.env,
+    options.composeProvenance,
+  );
+  const child = spawn(command, arguments_, {
+    cwd: options.cwd ?? deployDirectory,
+    env: environment,
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const transfer = pipeline(
+    child.stdout,
+    createWriteStream(file, { mode: 0o600 }),
+  );
+  const completion = waitForPipedChild(child, options.label ?? command);
+  const [transferResult, completionResult] = await Promise.allSettled([
+    transfer,
+    completion,
+  ]);
+  if (transferResult.status === 'rejected') {
+    if (completionResult.status === 'rejected') {
+      throw new AggregateError(
+        [transferResult.reason, completionResult.reason],
+        `${options.label ?? command} failed while writing piped output`,
+        { cause: transferResult.reason },
+      );
+    }
+    throw transferResult.reason;
+  }
+  if (completionResult.status === 'rejected') {
+    throw completionResult.reason;
+  }
+}
+
+function waitForPipedChild(child, label) {
+  return new Promise((resolvePromise, reject) => {
     child.once('error', reject);
-    output.once('error', reject);
-    child.once('exit', (code) => {
-      if (code !== 0) {
-        reject(
-          new Error(
-            `${options.label ?? command} failed with exit code ${code}`,
-          ),
-        );
+    child.once('close', (code, signal) => {
+      if (code === 0) {
+        resolvePromise();
         return;
       }
-      output.end(() => resolvePromise());
+      reject(
+        new Error(
+          `${label} failed${
+            code === null
+              ? ` after signal ${signal ?? 'unknown'}`
+              : ` with exit code ${code}`
+          }`,
+        ),
+      );
     });
   });
 }

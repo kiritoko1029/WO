@@ -29,10 +29,26 @@ import {
   readAndVerifyReleaseBundle,
   releaseImageOverrideSource,
 } from './release.mjs';
+import {
+  assertExternalIngressUpgradeArguments,
+  assertExternalPostgresUpgradeArguments,
+  retainExternalUpgradeRollbackResources,
+  runExternalDatabaseUpgrade,
+} from './external-db-upgrade.mjs';
 import { turnNetworkMode } from './lib.mjs';
 import { validateRootOwnedDirectoryAncestors } from './preflight.mjs';
 import { runtimeComposeImageOverrideSource } from './runtime-compose-override.mjs';
 import { productionSmokeAccounts } from './smoke.mjs';
+import {
+  acquireRollbackImageLeases,
+  assertRollbackComposeRuntimeEquivalent,
+  captureRollbackImages,
+  createRollbackWorkspace,
+  releaseRollbackImageLeases,
+  releaseRollbackResources,
+  rollbackComposeEquivalenceOverrideSource,
+  restoreImageTags,
+} from './upgrade.mjs';
 
 const maximumBackupAgeMilliseconds = 4 * 60 * 60 * 1_000;
 const applyServices = Object.freeze(['server', 'coturn']);
@@ -486,7 +502,15 @@ function assertRunningImages(
   }
 }
 
-function applyImages(envFile, profile, provenance, overrides, execute, label) {
+function applyImages(
+  envFile,
+  profile,
+  provenance,
+  overrides,
+  execute,
+  label,
+  services = applyServices,
+) {
   execute(
     'docker',
     composeFor(
@@ -501,7 +525,7 @@ function applyImages(envFile, profile, provenance, overrides, execute, label) {
       '--no-build',
       '--pull',
       'never',
-      ...applyServices,
+      ...services,
     ),
     {
       composeProvenance: provenance,
@@ -509,6 +533,86 @@ function applyImages(envFile, profile, provenance, overrides, execute, label) {
       stdio: 'inherit',
     },
   );
+}
+
+function stopImages(
+  envFile,
+  profile,
+  provenance,
+  execute,
+  label,
+  services,
+  expectedImages,
+) {
+  const containerIds = runningContainerIds(
+    envFile,
+    profile,
+    provenance,
+    execute,
+    { label: `${label} target lookup`, services },
+  );
+  for (const service of services) {
+    const containerId = containerIds[service];
+    if (!/^[a-f0-9]{64}$/u.test(containerId)) {
+      throw new Error(`${service} exact stop target is unavailable`);
+    }
+    let runningInspection;
+    try {
+      runningInspection = JSON.parse(
+        execute('docker', ['inspect', '--format', '{{json .}}', containerId], {
+          label: `${label}: ${service} target inspection`,
+        }),
+      );
+    } catch (error) {
+      throw new Error(`${service} stop target inspection is invalid`, {
+        cause: error,
+      });
+    }
+    if (
+      runningInspection?.Id !== containerId ||
+      (expectedImages?.[service]?.containerId !== undefined &&
+        expectedImages[service].containerId !== containerId) ||
+      (expectedImages?.[service]?.imageId !== undefined &&
+        expectedImages[service].imageId !== runningInspection.Image)
+    ) {
+      throw new Error(`${service} exact stop target identity changed`);
+    }
+    execute('docker', ['stop', '--time', '30', containerId], {
+      label: `${label}: ${service}`,
+      stdio: 'inherit',
+    });
+  }
+  const stoppedContainerIds = runningContainerIds(
+    envFile,
+    profile,
+    provenance,
+    execute,
+    { label: `${label} verification lookup`, services },
+  );
+  for (const service of services) {
+    const containerId = containerIds[service];
+    if (stoppedContainerIds[service] !== containerId) {
+      throw new Error(`${service} exact stop target changed during quiesce`);
+    }
+    let inspection;
+    try {
+      inspection = JSON.parse(
+        execute('docker', ['inspect', '--format', '{{json .}}', containerId], {
+          label: `${label}: ${service} stopped inspection`,
+        }),
+      );
+    } catch (error) {
+      throw new Error(`${service} stopped container inspection is invalid`, {
+        cause: error,
+      });
+    }
+    if (
+      inspection?.Id !== containerId ||
+      inspection?.State?.Running !== false
+    ) {
+      throw new Error(`${service} exact container did not stop`);
+    }
+  }
 }
 
 function bootstrapPostgres(envFile, profile, provenance, overrides, execute) {
@@ -551,7 +655,12 @@ function runProductionPreflight(envFile, execute) {
   );
 }
 
-function runInternalSmoke(envFile, environment, execute) {
+function runInternalSmoke(
+  envFile,
+  environment,
+  execute,
+  label = 'Post-apply internal smoke',
+) {
   const port = environment.WO_HTTP_PORT?.trim() || '18080';
   if (!/^[0-9]+$/u.test(port)) {
     throw new Error('WO_HTTP_PORT is invalid');
@@ -565,7 +674,7 @@ function runInternalSmoke(envFile, environment, execute) {
     ],
     {
       env: deploymentProcessEnvironment({}, process.env),
-      label: 'Post-apply internal smoke',
+      label,
       stdio: 'inherit',
     },
   );
@@ -681,18 +790,230 @@ function combineApplyCleanupFailures(primaryError, cleanupError, message) {
   });
 }
 
+export async function applyExternalDatabaseRelease(
+  {
+    canonicalRollbackRoot,
+    environment,
+    execute,
+    expectedIngressImageId,
+    expectedManifestSha256,
+    expectedPostgresMajor,
+    expectedPostgresSystemIdentifier,
+    ingressContainerId,
+    manifestFile,
+    postgresAdmin,
+    postgresContainerId,
+    profile,
+    provenance,
+    resolvedEnvFile,
+  },
+  {
+    acquireImageLeases = acquireRollbackImageLeases,
+    assertRollbackRuntimeEquivalent = assertRollbackComposeRuntimeEquivalent,
+    captureImages = captureRollbackImages,
+    createWorkspace = createRollbackWorkspace,
+    loadReleaseBundle = loadAndVerifyReleaseBundle,
+    releaseImageLeases = releaseRollbackImageLeases,
+    releaseResources = releaseRollbackResources,
+    removeDirectory = rm,
+    restoreTags = restoreImageTags,
+    runDatabaseUpgrade = runExternalDatabaseUpgrade,
+  } = {},
+) {
+  const selectedServices = applyServices;
+  const composeArgumentsForProfile = (selectedEnvFile, ...arguments_) =>
+    composeFor(selectedEnvFile, profile, ...arguments_);
+  const capturedImages = captureImages(resolvedEnvFile, {
+    composeArgumentsForProfile,
+    execute,
+    selectedServices,
+  });
+  const rollbackImages = acquireImageLeases(capturedImages, {
+    execute,
+    selectedServices,
+  });
+  let rollbackWorkspace;
+  try {
+    rollbackWorkspace = await createWorkspace(rollbackImages, {
+      selectedServices,
+      workspaceRoot: canonicalRollbackRoot,
+    });
+  } catch (error) {
+    let cleanupFailed = false;
+    let cleanupError;
+    try {
+      releaseImageLeases(rollbackImages, false, {
+        execute,
+        selectedServices,
+      });
+    } catch (caughtCleanupError) {
+      cleanupFailed = true;
+      cleanupError = caughtCleanupError;
+    }
+    if (cleanupFailed) {
+      throw combineApplyCleanupFailures(
+        error,
+        cleanupError,
+        'External database rollback workspace preparation failed and image lease cleanup was incomplete',
+      );
+    }
+    throw error;
+  }
+
+  const { directory: workspace, override: rollbackOverride } =
+    rollbackWorkspace;
+  let operationFailed = false;
+  let operationError;
+  let result;
+  let retainRollbackResources = false;
+  try {
+    const rollbackEquivalenceOverride = await writeOverride(
+      workspace,
+      'rollback-equivalence.compose.yaml',
+      rollbackComposeEquivalenceOverrideSource(rollbackImages),
+    );
+    assertRollbackRuntimeEquivalent(
+      resolvedEnvFile,
+      rollbackOverride,
+      rollbackImages,
+      {
+        composeArgumentsForProfile,
+        composeProvenance: provenance,
+        equivalenceOverride: rollbackEquivalenceOverride,
+        execute,
+      },
+    );
+    const loadedBundle = await loadReleaseBundle(manifestFile, {
+      execute,
+      expectedManifestSha256,
+    });
+    const releaseOverride = await writeOverride(
+      workspace,
+      'release.compose.yaml',
+      releaseImageOverrideSource(loadedBundle.images, selectedServices),
+    );
+    renderAndValidateRootCompose(
+      resolvedEnvFile,
+      profile,
+      provenance,
+      [releaseOverride],
+      environment,
+      loadedBundle.images,
+      execute,
+    );
+    result = await runDatabaseUpgrade({
+      activateServices: ({ label, overrides, services }) =>
+        applyImages(
+          resolvedEnvFile,
+          profile,
+          provenance,
+          overrides,
+          execute,
+          label,
+          services,
+        ),
+      assertRunningServices: (images, services) =>
+        assertRunningImages(
+          resolvedEnvFile,
+          profile,
+          provenance,
+          images,
+          execute,
+          services,
+        ),
+      backupRoot: canonicalRollbackRoot,
+      applicationRole: environment.POSTGRES_USER,
+      databaseName: environment.POSTGRES_DB,
+      execute,
+      expectedIngressImageId,
+      expectedPostgresMajor,
+      expectedPostgresSystemIdentifier,
+      ingressContainerId,
+      postgresAdmin,
+      postgresContainerId,
+      releaseImages: loadedBundle.images,
+      releaseOverride,
+      restoreImageTags: (images, services) =>
+        restoreTags(images, services, { execute }),
+      rollbackImages,
+      rollbackOverride,
+      runSmoke: (label) =>
+        runInternalSmoke(resolvedEnvFile, environment, execute, label),
+      stopServices: ({ expectedImages, label, services }) =>
+        stopImages(
+          resolvedEnvFile,
+          profile,
+          provenance,
+          execute,
+          label,
+          services,
+          expectedImages,
+        ),
+      workspace,
+    });
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+    retainRollbackResources = retainExternalUpgradeRollbackResources(error);
+  }
+
+  let cleanupFailed = false;
+  let cleanupError;
+  try {
+    const removed = await releaseResources(
+      workspace,
+      rollbackImages,
+      retainRollbackResources,
+      {
+        execute,
+        removeDirectory,
+        selectedServices,
+      },
+    );
+    if (!removed) {
+      process.stderr.write(
+        `External database rollback workspace retained: ${workspace}\n`,
+      );
+    }
+  } catch (error) {
+    cleanupFailed = true;
+    cleanupError = error;
+  }
+  if (operationFailed) {
+    if (cleanupFailed) {
+      throw combineApplyCleanupFailures(
+        operationError,
+        cleanupError,
+        'External database release failed and rollback resource cleanup was incomplete',
+      );
+    }
+    throw operationError;
+  }
+  if (cleanupFailed) {
+    throw cleanupError;
+  }
+  return result;
+}
+
 export async function applyRelease(
   {
     confirmApply,
     envFile,
     execute = run,
+    expectedIngressImageId,
     expectedManifestSha256,
+    expectedPostgresMajor,
+    expectedPostgresSystemIdentifier,
+    externalPostgresAdmin,
+    externalPostgresContainerId,
+    externalIngressContainerId,
     manifestFile,
     mode,
     profileName,
     rollbackRoot,
   } = {},
   {
+    applyExternalRelease = applyExternalDatabaseRelease,
     assertRollbackRoot = assertSecureRootDirectory,
     loadEnvironment = loadDeploymentEnvironment,
     loadReleaseBundle = loadAndVerifyReleaseBundle,
@@ -704,12 +1025,7 @@ export async function applyRelease(
   if (!confirmApply) {
     throw new Error('--confirm-apply is required');
   }
-  if (mode === 'upgrade') {
-    throw new Error(
-      'Upgrade apply is disabled until transactional database preflight and rollback are implemented; image restoration alone is not a safe rollback',
-    );
-  }
-  if (mode !== 'initial') {
+  if (!['initial', 'upgrade'].includes(mode)) {
     throw new Error('--mode must be initial or upgrade');
   }
   if (
@@ -723,6 +1039,27 @@ export async function applyRelease(
     );
   }
   const profile = releaseProfile(profileName);
+  if (mode === 'upgrade' && profile.managesPostgres) {
+    throw new Error(
+      'Upgrade apply is supported only for the external-db profile; root-managed-db must use the separately verified upgrade workflow',
+    );
+  }
+  const normalizedExpectedPostgresMajor =
+    typeof expectedPostgresMajor === 'number'
+      ? expectedPostgresMajor
+      : Number(expectedPostgresMajor);
+  if (
+    mode === 'upgrade' &&
+    (typeof externalPostgresAdmin !== 'string' ||
+      typeof externalPostgresContainerId !== 'string' ||
+      typeof externalIngressContainerId !== 'string' ||
+      typeof expectedIngressImageId !== 'string' ||
+      typeof expectedPostgresSystemIdentifier !== 'string')
+  ) {
+    throw new Error(
+      'External database upgrade requires --external-postgres-container-id, --external-postgres-admin, --expected-postgres-major, --expected-postgres-system-id, --external-ingress-container-id, and --expected-ingress-image-id',
+    );
+  }
   const resolvedEnvFile = resolve(envFile);
   const environment = loadEnvironment(resolvedEnvFile);
   if (!isAbsolute(environment.DEPLOY_SECRET_DIR?.trim() ?? '')) {
@@ -731,6 +1068,20 @@ export async function applyRelease(
     );
   }
   productionSmokeAccounts(environment);
+  if (mode === 'upgrade') {
+    assertExternalPostgresUpgradeArguments({
+      applicationRole: environment.POSTGRES_USER,
+      databaseName: environment.POSTGRES_DB,
+      expectedPostgresMajor: normalizedExpectedPostgresMajor,
+      expectedPostgresSystemIdentifier,
+      postgresAdmin: externalPostgresAdmin,
+      postgresContainerId: externalPostgresContainerId,
+    });
+    assertExternalIngressUpgradeArguments({
+      expectedIngressImageId,
+      ingressContainerId: externalIngressContainerId,
+    });
+  }
   const canonicalRollbackRoot = await assertRollbackRoot(
     resolve(rollbackRoot),
     'Rollback root',
@@ -752,51 +1103,54 @@ export async function applyRelease(
       { label: 'existing container lookup' },
     );
     validateApplyModeState(mode, previousContainerIds);
-    const postgresExisted = profile.managesPostgres
-      ? runningContainerIds(resolvedEnvFile, profile, provenance, execute, {
-          label: 'existing container lookup',
-          services: ['postgres'],
-        }).postgres.length > 0
-      : false;
-    const loadedBundle = await loadReleaseBundle(manifestFile, {
-      execute,
-      expectedManifestSha256,
-    });
-
-    const workspace = await mkdtemp(
-      resolve(canonicalRollbackRoot, 'wo-release-apply-'),
-    );
-    let activationAttempted = false;
-    let overrides = [];
-    try {
-      await chmod(workspace, 0o700);
-      const releaseOverride = await writeOverride(
-        workspace,
-        'release.compose.yaml',
-        releaseImageOverrideSource(loadedBundle.images, applyServices),
+    let backupEvidence;
+    if (mode === 'upgrade') {
+      const upgradeResult = await applyExternalRelease(
+        {
+          canonicalRollbackRoot,
+          environment,
+          execute,
+          expectedIngressImageId,
+          expectedManifestSha256,
+          expectedPostgresMajor: normalizedExpectedPostgresMajor,
+          expectedPostgresSystemIdentifier,
+          ingressContainerId: externalIngressContainerId,
+          manifestFile,
+          postgresAdmin: externalPostgresAdmin,
+          postgresContainerId: externalPostgresContainerId,
+          profile,
+          provenance,
+          resolvedEnvFile,
+        },
+        { loadReleaseBundle, removeDirectory },
       );
-      overrides = [releaseOverride];
-      const rootConfiguration = renderAndValidateRootCompose(
-        resolvedEnvFile,
-        profile,
-        provenance,
-        overrides,
-        environment,
-        loadedBundle.images,
+      backupEvidence = upgradeResult.backupDirectory;
+    } else {
+      const postgresExisted = profile.managesPostgres
+        ? runningContainerIds(resolvedEnvFile, profile, provenance, execute, {
+            label: 'existing container lookup',
+            services: ['postgres'],
+          }).postgres.length > 0
+        : false;
+      const loadedBundle = await loadReleaseBundle(manifestFile, {
         execute,
+        expectedManifestSha256,
+      });
+
+      const workspace = await mkdtemp(
+        resolve(canonicalRollbackRoot, 'wo-release-apply-'),
       );
-      const postgresImageId =
-        profile.managesPostgres && !postgresExisted
-          ? localPostgresImageId(rootConfiguration, execute)
-          : undefined;
-      if (postgresImageId !== undefined) {
-        const postgresOverride = await writeOverride(
+      let activationAttempted = false;
+      let overrides = [];
+      try {
+        await chmod(workspace, 0o700);
+        const releaseOverride = await writeOverride(
           workspace,
-          'postgres.compose.yaml',
-          runtimeComposeImageOverrideSource('postgres', postgresImageId),
+          'release.compose.yaml',
+          releaseImageOverrideSource(loadedBundle.images, applyServices),
         );
-        overrides.push(postgresOverride);
-        renderAndValidateRootCompose(
+        overrides = [releaseOverride];
+        const rootConfiguration = renderAndValidateRootCompose(
           resolvedEnvFile,
           profile,
           provenance,
@@ -804,88 +1158,109 @@ export async function applyRelease(
           environment,
           loadedBundle.images,
           execute,
-          postgresImageId,
         );
-      }
-
-      if (profile.managesPostgres) {
-        if (!postgresExisted) {
-          activationAttempted = true;
-          bootstrapPostgres(
+        const postgresImageId =
+          profile.managesPostgres && !postgresExisted
+            ? localPostgresImageId(rootConfiguration, execute)
+            : undefined;
+        if (postgresImageId !== undefined) {
+          const postgresOverride = await writeOverride(
+            workspace,
+            'postgres.compose.yaml',
+            runtimeComposeImageOverrideSource('postgres', postgresImageId),
+          );
+          overrides.push(postgresOverride);
+          renderAndValidateRootCompose(
             resolvedEnvFile,
             profile,
             provenance,
             overrides,
+            environment,
+            loadedBundle.images,
             execute,
+            postgresImageId,
           );
         }
+
+        if (profile.managesPostgres) {
+          if (!postgresExisted) {
+            activationAttempted = true;
+            bootstrapPostgres(
+              resolvedEnvFile,
+              profile,
+              provenance,
+              overrides,
+              execute,
+            );
+          }
+          assertRunningImages(
+            resolvedEnvFile,
+            profile,
+            provenance,
+            postgresImageId === undefined
+              ? undefined
+              : { postgres: { imageId: postgresImageId } },
+            execute,
+            ['postgres'],
+          );
+        }
+        activationAttempted = true;
+        applyImages(
+          resolvedEnvFile,
+          profile,
+          provenance,
+          overrides,
+          execute,
+          'Release activation',
+        );
         assertRunningImages(
           resolvedEnvFile,
           profile,
           provenance,
-          postgresImageId === undefined
-            ? undefined
-            : { postgres: { imageId: postgresImageId } },
+          loadedBundle.images,
           execute,
-          ['postgres'],
         );
-      }
-      activationAttempted = true;
-      applyImages(
-        resolvedEnvFile,
-        profile,
-        provenance,
-        overrides,
-        execute,
-        'Release activation',
-      );
-      assertRunningImages(
-        resolvedEnvFile,
-        profile,
-        provenance,
-        loadedBundle.images,
-        execute,
-      );
-      runInternalSmoke(resolvedEnvFile, environment, execute);
-    } catch (error) {
-      if (!activationAttempted) {
-        try {
-          await removeDirectory(workspace, { force: true, recursive: true });
-        } catch (cleanupError) {
-          throw combineApplyCleanupFailures(
-            error,
-            cleanupError,
-            `Initial release apply failed before activation and workspace cleanup was incomplete: ${workspace}`,
+        runInternalSmoke(resolvedEnvFile, environment, execute);
+      } catch (error) {
+        if (!activationAttempted) {
+          try {
+            await removeDirectory(workspace, { force: true, recursive: true });
+          } catch (cleanupError) {
+            throw combineApplyCleanupFailures(
+              error,
+              cleanupError,
+              `Initial release apply failed before activation and workspace cleanup was incomplete: ${workspace}`,
+            );
+          }
+          throw error;
+        }
+        const cleanupErrors = cleanupInitialActivation(
+          resolvedEnvFile,
+          profile,
+          provenance,
+          overrides,
+          postgresExisted,
+          execute,
+        );
+        if (cleanupErrors.length > 0) {
+          await recordFailure(workspace, 'cleanup-incomplete');
+          throw new AggregateError(
+            [error, ...cleanupErrors],
+            `Initial release apply failed and cleanup was incomplete; workspace retained at ${workspace}`,
+            { cause: error },
           );
         }
-        throw error;
-      }
-      const cleanupErrors = cleanupInitialActivation(
-        resolvedEnvFile,
-        profile,
-        provenance,
-        overrides,
-        postgresExisted,
-        execute,
-      );
-      if (cleanupErrors.length > 0) {
-        await recordFailure(workspace, 'cleanup-incomplete');
-        throw new AggregateError(
-          [error, ...cleanupErrors],
-          `Initial release apply failed and cleanup was incomplete; workspace retained at ${workspace}`,
+        await recordFailure(workspace, 'initial-apply-cleaned');
+        throw new Error(
+          `Initial release apply failed; activated containers were removed and workspace retained at ${workspace}: ${failureMessage(error)}`,
           { cause: error },
         );
       }
-      await recordFailure(workspace, 'initial-apply-cleaned');
-      throw new Error(
-        `Initial release apply failed; activated containers were removed and workspace retained at ${workspace}: ${failureMessage(error)}`,
-        { cause: error },
-      );
-    }
 
-    await removeDirectory(workspace, { force: true, recursive: true });
+      await removeDirectory(workspace, { force: true, recursive: true });
+    }
     process.stdout.write(
-      `RELEASE_APPLIED version=${provenance.BUILD_VERSION} revision=${provenance.BUILD_REVISION} profile=${profileName} mode=${mode} activated=${applyServices.join(',')} verified_not_activated=caddy\n`,
+      `RELEASE_APPLIED version=${provenance.BUILD_VERSION} revision=${provenance.BUILD_REVISION} profile=${profileName} mode=${mode} activated=${applyServices.join(',')} verified_not_activated=caddy${backupEvidence === undefined ? '' : ` backup=${backupEvidence}`}\n`,
     );
   } catch (error) {
     applyFailed = true;
@@ -916,6 +1291,18 @@ if (
     confirmApply: hasArgument('--confirm-apply'),
     envFile: argumentValue('--env-file'),
     expectedManifestSha256: argumentValue('--expected-manifest-sha256'),
+    expectedIngressImageId: argumentValue('--expected-ingress-image-id'),
+    expectedPostgresMajor: argumentValue('--expected-postgres-major'),
+    expectedPostgresSystemIdentifier: argumentValue(
+      '--expected-postgres-system-id',
+    ),
+    externalPostgresAdmin: argumentValue('--external-postgres-admin'),
+    externalPostgresContainerId: argumentValue(
+      '--external-postgres-container-id',
+    ),
+    externalIngressContainerId: argumentValue(
+      '--external-ingress-container-id',
+    ),
     manifestFile: argumentValue('--manifest'),
     mode: argumentValue('--mode'),
     profileName: argumentValue('--profile'),

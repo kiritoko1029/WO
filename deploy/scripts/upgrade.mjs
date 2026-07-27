@@ -59,6 +59,25 @@ const immutableImageReferencePattern =
 const rollbackImageLeasePattern =
   /^wo-rollback-lease:[a-z0-9][a-z0-9_.-]{0,127}$/u;
 
+function rollbackServiceSelection(selectedServices) {
+  if (!Array.isArray(selectedServices) || selectedServices.length === 0) {
+    throw new Error('Rollback service selection must not be empty');
+  }
+  const selected = [];
+  const seen = new Set();
+  for (const service of selectedServices) {
+    if (!services.includes(service)) {
+      throw new Error(`Rollback service selection includes ${service}`);
+    }
+    if (seen.has(service)) {
+      throw new Error(`Rollback service selection repeats ${service}`);
+    }
+    seen.add(service);
+    selected.push(service);
+  }
+  return selected;
+}
+
 export function postgresMajorFromImage(image) {
   const match = /^postgres:([0-9]+)(?:[.-]|$)/u.exec(image);
   if (match === null) {
@@ -108,34 +127,68 @@ export function assertPostgresMajorUnchanged(envFile) {
   }
 }
 
-export function captureRollbackImages(envFile, { execute = run } = {}) {
+export function captureRollbackImages(
+  envFile,
+  {
+    composeArgumentsForProfile = composeArguments,
+    execute = run,
+    selectedServices = services,
+  } = {},
+) {
+  const rollbackServices = rollbackServiceSelection(selectedServices);
   return Object.fromEntries(
-    services.map((service) => {
+    rollbackServices.map((service) => {
       const containerId = execute(
         'docker',
-        composeArguments(envFile, 'ps', '-q', service),
+        composeArgumentsForProfile(envFile, 'ps', '-q', service),
         { label: `${service} container lookup` },
       ).trim();
-      if (containerId.length === 0) {
+      if (!/^[a-f0-9]{64}$/u.test(containerId)) {
         throw new Error(`${service} must be running before upgrade`);
       }
-      const imageId = execute(
-        'docker',
-        ['inspect', '--format', '{{.Image}}', containerId],
-        { label: `${service} image inspection` },
-      ).trim();
-      const imageReference = execute(
-        'docker',
-        ['inspect', '--format', '{{.Config.Image}}', containerId],
-        { label: `${service} image reference inspection` },
-      ).trim();
-      if (
-        !/^sha256:[a-f0-9]{64}$/u.test(imageId) ||
-        imageReference.length === 0
-      ) {
-        throw new Error(`${service} rollback image cannot be pinned safely`);
+      let inspection;
+      try {
+        inspection = JSON.parse(
+          execute(
+            'docker',
+            ['inspect', '--format', '{{json .}}', containerId],
+            { label: `${service} rollback container inspection` },
+          ),
+        );
+      } catch (error) {
+        throw new Error(`${service} rollback container inspection is invalid`, {
+          cause: error,
+        });
       }
-      return [service, { containerId, imageId, imageReference }];
+      const labels = inspection?.Config?.Labels;
+      const imageId = inspection?.Image;
+      const imageReference = inspection?.Config?.Image;
+      const composeConfigHash = labels?.['com.docker.compose.config-hash'];
+      if (
+        inspection?.Id !== containerId ||
+        inspection?.State?.Running !== true ||
+        !/^sha256:[a-f0-9]{64}$/u.test(imageId) ||
+        typeof imageReference !== 'string' ||
+        imageReference.length === 0 ||
+        labels?.['com.docker.compose.project'] !== 'wo' ||
+        labels?.['com.docker.compose.service'] !== service ||
+        labels?.['com.docker.compose.oneoff'] !== 'False' ||
+        labels?.['com.docker.compose.container-number'] !== '1' ||
+        !/^[a-f0-9]{64}$/u.test(composeConfigHash ?? '')
+      ) {
+        throw new Error(
+          `${service} rollback container and Compose boundary cannot be pinned safely`,
+        );
+      }
+      return [
+        service,
+        {
+          composeConfigHash,
+          containerId,
+          imageId,
+          imageReference,
+        },
+      ];
     }),
   );
 }
@@ -171,14 +224,19 @@ function removeRollbackImageLeaseTags(images, selectedServices, execute) {
 
 export function acquireRollbackImageLeases(
   images,
-  { execute = run, leaseReferenceFactory = rollbackImageLeaseReference } = {},
+  {
+    execute = run,
+    leaseReferenceFactory = rollbackImageLeaseReference,
+    selectedServices = services,
+  } = {},
 ) {
+  const rollbackServices = rollbackServiceSelection(selectedServices);
   const acquiredServices = [];
   const leasedImages = {};
   const leaseReferences = new Set();
 
   try {
-    for (const service of services) {
+    for (const service of rollbackServices) {
       const image = images[service];
       if (
         image === undefined ||
@@ -224,12 +282,17 @@ export function acquireRollbackImageLeases(
 export function releaseRollbackImageLeases(
   images,
   retain,
-  { execute = run } = {},
+  { execute = run, selectedServices = services } = {},
 ) {
+  const rollbackServices = rollbackServiceSelection(selectedServices);
   if (retain) {
     return false;
   }
-  const cleanupErrors = removeRollbackImageLeaseTags(images, services, execute);
+  const cleanupErrors = removeRollbackImageLeaseTags(
+    images,
+    rollbackServices,
+    execute,
+  );
   if (cleanupErrors.length > 0) {
     throw new AggregateError(
       cleanupErrors,
@@ -247,22 +310,27 @@ export async function createRollbackOverride(
     boundaryCapture = captureCoturnRollbackBoundary,
     mountSnapshotter = snapshotCoturnRollbackMounts,
     mountValidator = validateCoturnRollbackMountSources,
+    selectedServices = services,
   } = {},
 ) {
-  const coturnBoundary = boundaryCapture(images.coturn.containerId);
-  await mountValidator(coturnBoundary.mounts, {
-    hostMode: coturnBoundary.hostMode,
-  });
-  const rollbackMounts = await mountSnapshotter(
-    directory,
-    coturnBoundary.mounts,
-  );
+  const rollbackServices = rollbackServiceSelection(selectedServices);
+  let coturnBoundary;
+  if (rollbackServices.includes('coturn')) {
+    coturnBoundary = boundaryCapture(images.coturn.containerId);
+    await mountValidator(coturnBoundary.mounts, {
+      hostMode: coturnBoundary.hostMode,
+    });
+    const rollbackMounts = await mountSnapshotter(
+      directory,
+      coturnBoundary.mounts,
+    );
+    coturnBoundary = { ...coturnBoundary, mounts: rollbackMounts };
+  }
   const file = resolve(directory, 'rollback.compose.yaml');
   await writeFile(
     file,
-    rollbackOverrideSource(images, {
-      ...coturnBoundary,
-      mounts: rollbackMounts,
+    rollbackOverrideSource(images, coturnBoundary, {
+      selectedServices: rollbackServices,
     }),
     {
       encoding: 'utf8',
@@ -382,16 +450,20 @@ export async function createRollbackWorkspace(
     createOverride = createRollbackOverride,
     makeTemporaryDirectory = mkdtemp,
     removeDirectory = rm,
+    selectedServices = services,
     workspaceRoot = tmpdir(),
   } = {},
 ) {
+  const rollbackServices = rollbackServiceSelection(selectedServices);
   const directory = await makeTemporaryDirectory(
     resolve(workspaceRoot, 'wo-upgrade-'),
   );
   try {
     return {
       directory,
-      override: await createOverride(directory, images),
+      override: await createOverride(directory, images, {
+        selectedServices: rollbackServices,
+      }),
     };
   } catch (error) {
     let cleanupFailed = false;
@@ -429,15 +501,19 @@ export async function releaseRollbackResources(
   directory,
   images,
   retain,
-  { execute = run, removeDirectory = rm } = {},
+  { execute = run, removeDirectory = rm, selectedServices = services } = {},
 ) {
+  const rollbackServices = rollbackServiceSelection(selectedServices);
   const removed = await releaseRollbackWorkspace(directory, retain, {
     removeDirectory,
   });
   if (!removed) {
     return false;
   }
-  releaseRollbackImageLeases(images, false, { execute });
+  releaseRollbackImageLeases(images, false, {
+    execute,
+    selectedServices: rollbackServices,
+  });
   return true;
 }
 
@@ -693,14 +769,25 @@ function appendRollbackVolumes(lines, mounts) {
   }
 }
 
-export function rollbackOverrideSource(images, coturnBoundary) {
+export function rollbackOverrideSource(
+  images,
+  coturnBoundary,
+  { selectedServices = services } = {},
+) {
+  const rollbackServices = rollbackServiceSelection(selectedServices);
+  if (rollbackServices.includes('coturn') && coturnBoundary === undefined) {
+    throw new Error('coturn rollback boundary is unavailable');
+  }
   const lines = ['services:'];
-  for (const service of services) {
+  for (const service of rollbackServices) {
     lines.push(`  ${service}:`);
     if (service === 'server' || service === 'coturn') {
       lines.push('    build: !reset null');
     }
-    lines.push(`    image: ${images[service].imageId}`);
+    lines.push(
+      `    image: ${images[service].imageId}`,
+      '    pull_policy: never',
+    );
     if (service !== 'coturn') {
       continue;
     }
@@ -741,9 +828,11 @@ export function rollbackOverrideSource(images, coturnBoundary) {
       appendRollbackVolumes(lines, coturnBoundary.mounts);
     }
   }
-  const stateVolume = coturnBoundary.mounts.find(
-    ({ type, target }) => type === 'volume' && target === '/var/lib/coturn',
-  );
+  const stateVolume = rollbackServices.includes('coturn')
+    ? coturnBoundary.mounts.find(
+        ({ type, target }) => type === 'volume' && target === '/var/lib/coturn',
+      )
+    : undefined;
   if (stateVolume !== undefined) {
     lines.push(
       'volumes:',
@@ -753,6 +842,71 @@ export function rollbackOverrideSource(images, coturnBoundary) {
     );
   }
   return `${lines.join('\n')}\n`;
+}
+
+export function rollbackComposeEquivalenceOverrideSource(images) {
+  const imageReference = images?.server?.imageReference;
+  if (typeof imageReference !== 'string' || imageReference.length === 0) {
+    throw new Error('Server rollback image reference is unavailable');
+  }
+  return [
+    'services:',
+    '  server:',
+    `    image: ${JSON.stringify(imageReference)}`,
+    '',
+  ].join('\n');
+}
+
+export function assertRollbackComposeRuntimeEquivalent(
+  envFile,
+  rollbackOverride,
+  images,
+  {
+    composeArgumentsForProfile = composeArguments,
+    composeProvenance,
+    equivalenceOverride,
+    execute = run,
+  } = {},
+) {
+  const capturedHash = images?.server?.composeConfigHash;
+  if (!/^[a-f0-9]{64}$/u.test(capturedHash ?? '')) {
+    throw new Error('Server rollback Compose config hash is unavailable');
+  }
+  if (
+    typeof equivalenceOverride !== 'string' ||
+    equivalenceOverride.length === 0
+  ) {
+    throw new Error(
+      'Server rollback Compose equivalence override is unavailable',
+    );
+  }
+  const rows = execute(
+    'docker',
+    composeArgumentsForProfile(
+      envFile,
+      '-f',
+      rollbackOverride,
+      '-f',
+      equivalenceOverride,
+      'config',
+      '--hash',
+      'server',
+    ),
+    {
+      composeProvenance,
+      label: 'Server rollback Compose runtime equivalence',
+    },
+  )
+    .split(/\r?\n/u)
+    .map((row) => row.trim())
+    .filter(Boolean);
+  const match =
+    rows.length === 1 ? /^server ([a-f0-9]{64})$/u.exec(rows[0]) : null;
+  if (match === null || match[1] !== capturedHash) {
+    throw new Error(
+      'Server rollback runtime configuration differs from the running Compose boundary',
+    );
+  }
 }
 
 export function restoreImageTags(

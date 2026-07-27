@@ -2,6 +2,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   rm,
   stat,
@@ -12,7 +13,11 @@ import { resolve } from 'node:path';
 
 import { afterEach, describe, expect, test } from 'vitest';
 
-import { applyRelease } from '../../deploy/scripts/apply-release.mjs';
+import {
+  applyExternalDatabaseRelease,
+  applyRelease,
+  releaseProfile,
+} from '../../deploy/scripts/apply-release.mjs';
 
 const provenance = Object.freeze({
   BUILD_CREATED: '2026-07-25T00:00:00Z',
@@ -32,6 +37,10 @@ const images = Object.freeze({
 const secretDirectory = '/opt/wo/deploy/secrets';
 const smokeEmails =
   'smoke-one@example.test,smoke-two@example.test,smoke-three@example.test';
+const postgresSystemIdentifier = '7490136767012577314';
+const ingressContainerId = 'e'.repeat(64);
+const ingressImageId = imageId('e');
+const serverComposeConfigHash = '9'.repeat(64);
 
 const applyDependencies = Object.freeze({
   assertRollbackRoot: async (directory: string) => directory,
@@ -62,6 +71,7 @@ type HarnessOptions = {
   inspections?: Partial<Record<Service, InspectionOverride>>;
   postgresImageMissing?: boolean;
   postgresExisted?: boolean;
+  releaseServicesExisted?: boolean;
   rootBoundaryInvalid?: boolean;
   rootSecretBoundaryInvalid?: boolean;
   smokeThrownValue?: unknown;
@@ -156,6 +166,7 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
     inspections = {},
     postgresImageMissing = false,
     postgresExisted = false,
+    releaseServicesExisted = false,
     rootBoundaryInvalid = false,
     rootSecretBoundaryInvalid = false,
     smokeThrownValue,
@@ -171,8 +182,11 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
     const service = label.split(' ')[0] as Service;
 
     if (label.endsWith('existing container lookup')) {
-      return service === 'postgres' && postgresExisted
-        ? 'postgres-existing'
+      if (service === 'postgres' && postgresExisted) {
+        return 'postgres-existing';
+      }
+      return releaseServicesExisted && ['server', 'coturn'].includes(service)
+        ? `${service}-existing`
         : '';
     }
     if (label.endsWith('activated container lookup')) {
@@ -218,6 +232,9 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
         throw new Error('configured PostgreSQL image is absent');
       }
       return imageId('c');
+    }
+    if (label === 'Server rollback Compose runtime equivalence') {
+      return `server ${serverComposeConfigHash}`;
     }
     if (label === 'Post-apply internal smoke' && failSmoke) {
       if (Object.hasOwn(harnessOptions, 'smokeThrownValue')) {
@@ -738,7 +755,7 @@ describe('release apply activation safety', () => {
     );
   });
 
-  test('rejects upgrade before accepting backup evidence or invoking Docker', async () => {
+  test('rejects root-managed upgrade before reading environment, bundle, or Docker', async () => {
     let commandExecuted = false;
 
     await expect(
@@ -755,10 +772,381 @@ describe('release apply activation safety', () => {
         profileName: 'root-managed-db',
         rollbackRoot: '/unused/rollback',
       }),
-    ).rejects.toThrow(
-      /transactional database preflight and rollback.*image restoration alone is not a safe rollback/i,
-    );
+    ).rejects.toThrow(/supported only for the external-db profile/i);
     expect(commandExecuted).toBe(false);
+  });
+
+  test('requires an explicitly pinned external PostgreSQL target before invoking Docker', async () => {
+    const harness = createHarness({ releaseServicesExisted: true });
+    const fixture = await createFixture('external-db', harness.execute);
+
+    await expect(
+      applyRelease(
+        { ...fixture.options, mode: 'upgrade' },
+        fixture.dependencies,
+      ),
+    ).rejects.toThrow(
+      /external database upgrade requires.*external-postgres-container-id/i,
+    );
+    expect(harness.calls).toEqual([]);
+  });
+
+  test('requires a pinned external ingress target before invoking Docker', async () => {
+    const harness = createHarness({ releaseServicesExisted: true });
+    const fixture = await createFixture('external-db', harness.execute);
+
+    await expect(
+      applyRelease(
+        {
+          ...fixture.options,
+          expectedPostgresMajor: 17,
+          expectedPostgresSystemIdentifier: postgresSystemIdentifier,
+          externalPostgresAdmin: 'release_admin',
+          externalPostgresContainerId: 'a'.repeat(64),
+          mode: 'upgrade',
+        },
+        fixture.dependencies,
+      ),
+    ).rejects.toThrow(
+      /external database upgrade requires.*external-ingress-container-id.*expected-ingress-image-id/i,
+    );
+    expect(harness.calls).toEqual([]);
+  });
+
+  test('rejects malformed external ingress identities before invoking Docker', async () => {
+    for (const [
+      externalIngressContainerId,
+      expectedIngressImageId,
+      pattern,
+    ] of [
+      [
+        'short-container-id',
+        ingressImageId,
+        /external-ingress-container-id must be a complete container ID/i,
+      ],
+      [
+        ingressContainerId,
+        'mutable-ingress-reference',
+        /expected-ingress-image-id is invalid/i,
+      ],
+    ] as const) {
+      const harness = createHarness({ releaseServicesExisted: true });
+      const fixture = await createFixture('external-db', harness.execute);
+
+      await expect(
+        applyRelease(
+          {
+            ...fixture.options,
+            expectedIngressImageId,
+            expectedPostgresMajor: 17,
+            expectedPostgresSystemIdentifier: postgresSystemIdentifier,
+            externalIngressContainerId,
+            externalPostgresAdmin: 'release_admin',
+            externalPostgresContainerId: 'a'.repeat(64),
+            mode: 'upgrade',
+          },
+          fixture.dependencies,
+        ),
+      ).rejects.toThrow(pattern);
+      expect(harness.calls).toEqual([]);
+    }
+  });
+
+  test('delegates a pinned external database upgrade after bundle and running-state preflight', async () => {
+    const harness = createHarness({ releaseServicesExisted: true });
+    const fixture = await createFixture('external-db', harness.execute);
+    let delegated:
+      Parameters<typeof applyExternalDatabaseRelease>[0] | undefined;
+
+    await applyRelease(
+      {
+        ...fixture.options,
+        expectedIngressImageId: ingressImageId,
+        expectedPostgresMajor: 17,
+        expectedPostgresSystemIdentifier: postgresSystemIdentifier,
+        externalIngressContainerId: ingressContainerId,
+        externalPostgresAdmin: 'release_admin',
+        externalPostgresContainerId: 'a'.repeat(64),
+        mode: 'upgrade',
+      },
+      {
+        ...fixture.dependencies,
+        applyExternalRelease: async (options) => {
+          delegated = options;
+          return { backupDirectory: '/safe/external-db-backup' };
+        },
+      },
+    );
+
+    expect(delegated).toMatchObject({
+      canonicalRollbackRoot: fixture.rollbackRoot,
+      expectedIngressImageId: ingressImageId,
+      expectedPostgresMajor: 17,
+      expectedPostgresSystemIdentifier: postgresSystemIdentifier,
+      ingressContainerId,
+      postgresAdmin: 'release_admin',
+      postgresContainerId: 'a'.repeat(64),
+      profile: { managesPostgres: false },
+      provenance,
+      resolvedEnvFile: fixture.envFile,
+    });
+    expect(
+      harness.calls
+        .filter(({ label }) => label.endsWith('existing container lookup'))
+        .map(({ arguments_, label }) => ({ arguments_, label })),
+    ).toEqual([
+      expect.objectContaining({
+        arguments_: expect.arrayContaining(['ps', '--all', '-q', 'server']),
+        label: 'server existing container lookup',
+      }),
+      expect.objectContaining({
+        arguments_: expect.arrayContaining(['ps', '--all', '-q', 'coturn']),
+        label: 'coturn existing container lookup',
+      }),
+    ]);
+    expect(
+      harness.calls.some(({ label }) => label === 'Production preflight'),
+    ).toBe(true);
+    await expect(
+      stat(resolve(fixture.rollbackRoot, '.wo-release-apply.lock')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  test('captures and leases old images before loading the external database release', async () => {
+    const harness = createHarness();
+    const fixture = await createFixture('external-db', harness.execute);
+    const workspace = resolve(fixture.rollbackRoot, 'upgrade-workspace');
+    await mkdir(workspace, { mode: 0o700 });
+    const order: string[] = [];
+    const capturedImages = {
+      coturn: {
+        composeConfigHash: '8'.repeat(64),
+        containerId: 'old-coturn',
+        imageId: imageId('2'),
+        imageReference: 'wo-coturn:old',
+      },
+      server: {
+        composeConfigHash: serverComposeConfigHash,
+        containerId: 'old-server',
+        imageId: imageId('1'),
+        imageReference: 'wo-server:old',
+      },
+    };
+    const leasedImages = {
+      coturn: {
+        ...capturedImages.coturn,
+        leaseReference: 'wo-rollback-lease:test-coturn',
+      },
+      server: {
+        ...capturedImages.server,
+        leaseReference: 'wo-rollback-lease:test-server',
+      },
+    };
+
+    const result = await applyExternalDatabaseRelease(
+      {
+        canonicalRollbackRoot: fixture.rollbackRoot,
+        environment: {
+          DEPLOY_SECRET_DIR: secretDirectory,
+          POSTGRES_DB: 'wo',
+          POSTGRES_HOST: 'db.example.test',
+          POSTGRES_PORT: '5432',
+          POSTGRES_USER: 'wo',
+          PUBLIC_IPV4: '203.0.113.10',
+          TURN_NETWORK_MODE: 'bridge',
+          TURN_REALM: 'turn.example.test',
+          TURN_RELAY_MAX_PORT: '49200',
+          TURN_RELAY_MIN_PORT: '49160',
+        },
+        execute: harness.execute,
+        expectedIngressImageId: ingressImageId,
+        expectedManifestSha256: 'd'.repeat(64),
+        expectedPostgresMajor: 17,
+        expectedPostgresSystemIdentifier: postgresSystemIdentifier,
+        ingressContainerId,
+        manifestFile: fixture.options.manifestFile,
+        postgresAdmin: 'release_admin',
+        postgresContainerId: 'a'.repeat(64),
+        profile: releaseProfile('external-db'),
+        provenance,
+        resolvedEnvFile: fixture.envFile,
+      },
+      {
+        acquireImageLeases: (captured, options) => {
+          order.push(`lease:${options.selectedServices?.join(',')}`);
+          expect(captured).toBe(capturedImages);
+          return leasedImages;
+        },
+        captureImages: (_envFile, options) => {
+          order.push(`capture:${options.selectedServices?.join(',')}`);
+          expect(
+            options.composeArgumentsForProfile?.(
+              fixture.envFile,
+              'ps',
+              '-q',
+              'server',
+            ),
+          ).toEqual(
+            expect.arrayContaining([
+              expect.stringMatching(/docker-compose\.external-db\.yml$/u),
+              'server',
+            ]),
+          );
+          return capturedImages;
+        },
+        createWorkspace: async (_images, options) => {
+          order.push(`workspace:${options.selectedServices?.join(',')}`);
+          return {
+            directory: workspace,
+            override: resolve(workspace, 'rollback.compose.yaml'),
+          };
+        },
+        loadReleaseBundle: async () => {
+          order.push('load-bundle');
+          return { images };
+        },
+        releaseResources: async (directory, rollback, retain, options) => {
+          order.push(
+            `release:${retain}:${options.selectedServices?.join(',')}`,
+          );
+          expect(directory).toBe(workspace);
+          expect(rollback).toBe(leasedImages);
+          return true;
+        },
+        runDatabaseUpgrade: async (options) => {
+          order.push('database-upgrade');
+          expect(options).toMatchObject({
+            applicationRole: 'wo',
+            backupRoot: fixture.rollbackRoot,
+            databaseName: 'wo',
+            expectedIngressImageId: ingressImageId,
+            ingressContainerId,
+            releaseImages: images,
+            rollbackImages: leasedImages,
+            workspace,
+          });
+          return { backupDirectory: '/safe/external-db-backup' };
+        },
+      },
+    );
+
+    expect(result).toEqual({
+      backupDirectory: '/safe/external-db-backup',
+    });
+    expect(order).toEqual([
+      'capture:server,coturn',
+      'lease:server,coturn',
+      'workspace:server,coturn',
+      'load-bundle',
+      'database-upgrade',
+      'release:false:server,coturn',
+    ]);
+    expect(
+      harness.calls.find(
+        ({ label }) => label === 'Server rollback Compose runtime equivalence',
+      ),
+    ).toMatchObject({
+      arguments_: expect.arrayContaining([
+        '-f',
+        resolve(workspace, 'rollback.compose.yaml'),
+        '-f',
+        resolve(workspace, 'rollback-equivalence.compose.yaml'),
+        'config',
+        '--hash',
+        'server',
+      ]),
+      command: 'docker',
+    });
+    expect(
+      await readFile(
+        resolve(workspace, 'rollback-equivalence.compose.yaml'),
+        'utf8',
+      ),
+    ).toBe(
+      [
+        'services:',
+        '  server:',
+        `    image: ${JSON.stringify(leasedImages.server.imageReference)}`,
+        '',
+      ].join('\n'),
+    );
+  });
+
+  test('retains workspace and image leases when external database rollback is incomplete', async () => {
+    const harness = createHarness();
+    const fixture = await createFixture('external-db', harness.execute);
+    const workspace = resolve(fixture.rollbackRoot, 'retained-workspace');
+    await mkdir(workspace, { mode: 0o700 });
+    const primary = Object.assign(new Error('rollback incomplete'), {
+      retainRollbackResources: true,
+    });
+    let retain: boolean | undefined;
+
+    await expect(
+      applyExternalDatabaseRelease(
+        {
+          canonicalRollbackRoot: fixture.rollbackRoot,
+          environment: {
+            DEPLOY_SECRET_DIR: secretDirectory,
+            POSTGRES_DB: 'wo',
+            POSTGRES_HOST: 'db.example.test',
+            POSTGRES_PORT: '5432',
+            POSTGRES_USER: 'wo',
+            PUBLIC_IPV4: '203.0.113.10',
+            TURN_NETWORK_MODE: 'bridge',
+            TURN_REALM: 'turn.example.test',
+            TURN_RELAY_MAX_PORT: '49200',
+            TURN_RELAY_MIN_PORT: '49160',
+          },
+          execute: harness.execute,
+          expectedIngressImageId: ingressImageId,
+          expectedManifestSha256: 'd'.repeat(64),
+          expectedPostgresMajor: 17,
+          expectedPostgresSystemIdentifier: postgresSystemIdentifier,
+          ingressContainerId,
+          manifestFile: fixture.options.manifestFile,
+          postgresAdmin: 'release_admin',
+          postgresContainerId: 'a'.repeat(64),
+          profile: releaseProfile('external-db'),
+          provenance,
+          resolvedEnvFile: fixture.envFile,
+        },
+        {
+          acquireImageLeases: (captured) => captured,
+          captureImages: () => ({
+            coturn: {
+              composeConfigHash: '8'.repeat(64),
+              containerId: 'old-coturn',
+              imageId: imageId('2'),
+              imageReference: 'wo-coturn:old',
+            },
+            server: {
+              composeConfigHash: serverComposeConfigHash,
+              containerId: 'old-server',
+              imageId: imageId('1'),
+              imageReference: 'wo-server:old',
+            },
+          }),
+          createWorkspace: async () => ({
+            directory: workspace,
+            override: resolve(workspace, 'rollback.compose.yaml'),
+          }),
+          loadReleaseBundle: async () => ({ images }),
+          releaseResources: async (_directory, _images, selectedRetain) => {
+            retain = selectedRetain;
+            return false;
+          },
+          runDatabaseUpgrade: async () => {
+            throw primary;
+          },
+        },
+      ),
+    ).rejects.toBe(primary);
+
+    expect(retain).toBe(true);
+    await expect(stat(workspace)).resolves.toMatchObject({
+      mode: expect.any(Number),
+    });
   });
 
   test('rejects a concurrent apply lock before reading the bundle or invoking Docker', async () => {

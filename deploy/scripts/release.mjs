@@ -30,6 +30,7 @@ export const releaseSourceFiles = Object.freeze([
   'deploy/scripts/backup.mjs',
   'deploy/scripts/build-release.mjs',
   'deploy/scripts/compose.mjs',
+  'deploy/scripts/external-db-upgrade.mjs',
   'deploy/scripts/lib.mjs',
   'deploy/scripts/monitor.mjs',
   'deploy/scripts/ops.mjs',

@@ -4,6 +4,7 @@ import {
   access,
   mkdtemp,
   mkdir,
+  readFile,
   readdir,
   realpath,
   rm,
@@ -29,6 +30,8 @@ import {
   deploymentOperationLockEnvironmentField,
   deploymentOperationProcessEnvironment,
   failureMessage,
+  pipeCommandToFile,
+  pipeFileToCommand,
   releaseApplyLockDirectoryName,
   withDeploymentOperationLock,
 } from '../../deploy/scripts/ops.mjs';
@@ -38,6 +41,7 @@ import {
 } from '../../deploy/scripts/restore.mjs';
 import {
   acquireRollbackImageLeases,
+  assertRollbackComposeRuntimeEquivalent,
   assertRunningReleaseImages,
   captureRollbackImages,
   combineUpgradeCleanupFailures,
@@ -48,9 +52,11 @@ import {
   normalizeCoturnRollbackMounts,
   postgresMajorFromImage,
   releaseImageOverrideSource,
+  releaseRollbackImageLeases,
   releaseRollbackResources,
   releaseRollbackWorkspace,
   restoreImageTags,
+  rollbackComposeEquivalenceOverrideSource,
   rollbackOverrideSource,
   throwUpgradeCleanupFailures,
   validateCoturnRollbackMountSources,
@@ -92,6 +98,39 @@ const releaseProvenance = Object.freeze({
   SOURCE_DATE_EPOCH: '1784917907',
 });
 
+function rollbackContainerInspection({
+  composeConfigHash,
+  containerId,
+  imageId,
+  imageReference,
+  labelOverrides = {},
+  service,
+}: {
+  composeConfigHash: string;
+  containerId: string;
+  imageId: string;
+  imageReference: string;
+  labelOverrides?: Readonly<Record<string, string>>;
+  service: string;
+}): string {
+  return JSON.stringify({
+    Config: {
+      Image: imageReference,
+      Labels: {
+        'com.docker.compose.config-hash': composeConfigHash,
+        'com.docker.compose.container-number': '1',
+        'com.docker.compose.oneoff': 'False',
+        'com.docker.compose.project': 'wo',
+        'com.docker.compose.service': service,
+        ...labelOverrides,
+      },
+    },
+    Id: containerId,
+    Image: imageId,
+    State: { Running: true },
+  });
+}
+
 function tarHeader(name: string, type: '0' | '2' | '5', size = 0): Buffer {
   const header = Buffer.alloc(512);
   header.write(name, 0, 100, 'utf8');
@@ -132,13 +171,17 @@ afterEach(async () => {
 async function renderRollback(
   coturnBoundary: Parameters<typeof rollbackOverrideSource>[1],
   targetHostMode: boolean,
+  selectedServices?: string[],
+  images = rollbackImages,
 ) {
   const directory = await mkdtemp(resolve(tmpdir(), 'wo-rollback-test-'));
   temporaryDirectories.push(directory);
   const rollbackFile = resolve(directory, 'rollback.compose.yaml');
   await writeFile(
     rollbackFile,
-    rollbackOverrideSource(rollbackImages, coturnBoundary),
+    rollbackOverrideSource(images, coturnBoundary, {
+      selectedServices,
+    }),
   );
   const composeFiles = ['-f', resolve(deployRoot, 'compose.yaml')];
   if (targetHostMode) {
@@ -881,6 +924,53 @@ describe('deployment filesystem safety', () => {
     expect(failureMessage(Object.create(null))).toBe('Unprintable error');
   });
 
+  test('waits for complete binary dump output and restore input streams', async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), 'wo-piped-io-test-'));
+    temporaryDirectories.push(directory);
+    const dump = resolve(directory, 'postgres.dump');
+    const restored = resolve(directory, 'restored.dump');
+    const expected = Buffer.alloc(2 * 1024 * 1024, 0x5a);
+
+    await pipeCommandToFile(
+      process.execPath,
+      [
+        '--eval',
+        `process.stdout.write(Buffer.alloc(${expected.length}, 0x5a))`,
+      ],
+      dump,
+      { label: 'Binary dump fixture' },
+    );
+    expect(await readFile(dump)).toEqual(expected);
+
+    await pipeFileToCommand(
+      dump,
+      process.execPath,
+      [
+        '--eval',
+        "const fs = require('node:fs'); process.stdin.pipe(fs.createWriteStream(process.argv[1]))",
+        restored,
+      ],
+      { label: 'Binary restore fixture' },
+    );
+    expect(await readFile(restored)).toEqual(expected);
+  }, 30_000);
+
+  test('rejects a missing piped restore input without an unhandled stream error', async () => {
+    const directory = await mkdtemp(
+      resolve(tmpdir(), 'wo-piped-input-error-test-'),
+    );
+    temporaryDirectories.push(directory);
+
+    await expect(
+      pipeFileToCommand(
+        resolve(directory, 'missing.dump'),
+        process.execPath,
+        ['--eval', 'process.stdin.resume()'],
+        { label: 'Missing restore input fixture' },
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   test.each([
     ['undefined', 'throw undefined;', 'undefined'],
     ['null', 'throw null;', 'null'],
@@ -1029,6 +1119,296 @@ describe('deployment filesystem safety', () => {
     expect(calls.flat()).not.toContain(images.postgres.imageReference);
   });
 
+  test('captures, leases, and releases selected rollback services in order', async () => {
+    const directory = await mkdtemp(
+      resolve(tmpdir(), 'wo-selected-image-test-'),
+    );
+    temporaryDirectories.push(directory);
+    const envFile = resolve(directory, '.env');
+    await writeFile(envFile, '');
+    const selectedServices = ['server', 'coturn'];
+    const imageIds = {
+      coturn: `sha256:${'d'.repeat(64)}`,
+      server: `sha256:${'b'.repeat(64)}`,
+    };
+    const containerIds = {
+      coturn: '2'.repeat(64),
+      server: '1'.repeat(64),
+    };
+    const composeConfigHashes = {
+      coturn: '4'.repeat(64),
+      server: '3'.repeat(64),
+    };
+    const calls: string[][] = [];
+    const execute = (_command: string, arguments_: string[]) => {
+      calls.push(arguments_);
+      if (arguments_[0] === 'compose') {
+        const service = arguments_.at(-1) as keyof typeof containerIds;
+        return `${containerIds[service]}\n`;
+      }
+      if (arguments_[0] === 'inspect') {
+        const containerId = arguments_.at(-1)!;
+        const service = (
+          Object.keys(containerIds) as Array<keyof typeof containerIds>
+        ).find((candidate) => containerIds[candidate] === containerId);
+        if (service === undefined) {
+          throw new Error(`Unexpected rollback container ${containerId}`);
+        }
+        return rollbackContainerInspection({
+          composeConfigHash: composeConfigHashes[service],
+          containerId,
+          imageId: imageIds[service],
+          imageReference: `wo-${service}:stable`,
+          service,
+        });
+      }
+      return '';
+    };
+    const images = captureRollbackImages(envFile, {
+      execute,
+      selectedServices,
+    });
+
+    expect(Object.keys(images)).toEqual(selectedServices);
+    expect(
+      calls
+        .filter(([command]) => command === 'compose')
+        .map((arguments_) => arguments_.at(-1)),
+    ).toEqual(selectedServices);
+    expect(
+      calls
+        .filter(([command]) => command === 'inspect')
+        .map((arguments_) => arguments_.at(-1)),
+    ).toEqual([containerIds.server, containerIds.coturn]);
+    expect(images).toMatchObject({
+      coturn: {
+        composeConfigHash: composeConfigHashes.coturn,
+        containerId: containerIds.coturn,
+      },
+      server: {
+        composeConfigHash: composeConfigHashes.server,
+        containerId: containerIds.server,
+      },
+    });
+
+    calls.length = 0;
+    const leasedImages = acquireRollbackImageLeases(images, {
+      execute,
+      leaseReferenceFactory: (service: string) =>
+        `wo-rollback-lease:test-${service}`,
+      selectedServices,
+    });
+    expect(calls).toEqual([
+      ['image', 'tag', imageIds.server, 'wo-rollback-lease:test-server'],
+      ['image', 'tag', imageIds.coturn, 'wo-rollback-lease:test-coturn'],
+    ]);
+
+    calls.length = 0;
+    expect(
+      releaseRollbackImageLeases(leasedImages, false, {
+        execute,
+        selectedServices,
+      }),
+    ).toBe(true);
+    expect(calls).toEqual([
+      ['image', 'rm', 'wo-rollback-lease:test-coturn'],
+      ['image', 'rm', 'wo-rollback-lease:test-server'],
+    ]);
+  });
+
+  test.each([
+    ['project', { 'com.docker.compose.project': 'unexpected-project' }],
+    ['service', { 'com.docker.compose.service': 'coturn' }],
+    ['one-off state', { 'com.docker.compose.oneoff': 'True' }],
+    ['container number', { 'com.docker.compose.container-number': '2' }],
+    ['config hash', { 'com.docker.compose.config-hash': 'not-a-hash' }],
+  ])(
+    'rejects a rollback container with mismatched Compose %s',
+    (_boundary, labelOverrides) => {
+      const containerId = '1'.repeat(64);
+      const imageId = `sha256:${'a'.repeat(64)}`;
+
+      expect(() =>
+        captureRollbackImages('/safe/.env', {
+          composeArgumentsForProfile: (
+            _envFile: string,
+            ...arguments_: string[]
+          ) => ['compose', ...arguments_],
+          execute: (_command: string, arguments_: string[]) => {
+            if (arguments_[0] === 'compose') {
+              return `${containerId}\n`;
+            }
+            return rollbackContainerInspection({
+              composeConfigHash: '2'.repeat(64),
+              containerId,
+              imageId,
+              imageReference: 'wo-server:stable',
+              labelOverrides,
+              service: 'server',
+            });
+          },
+          selectedServices: ['server'],
+        }),
+      ).toThrow(
+        'server rollback container and Compose boundary cannot be pinned safely',
+      );
+    },
+  );
+
+  test('fails closed when the rollback server Compose hash differs from the captured runtime', () => {
+    const envFile = '/safe/.env';
+    const equivalenceOverride = '/safe/rollback-equivalence.compose.yaml';
+    const rollbackOverride = '/safe/rollback.compose.yaml';
+    const capturedHash = 'a'.repeat(64);
+    const renderedHash = 'b'.repeat(64);
+
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        envFile,
+        rollbackOverride,
+        { server: { composeConfigHash: capturedHash } },
+        {
+          composeArgumentsForProfile: (
+            actualEnvFile: string,
+            ...arguments_: string[]
+          ) => {
+            expect(actualEnvFile).toBe(envFile);
+            return ['compose', ...arguments_];
+          },
+          execute: (
+            command: string,
+            arguments_: string[],
+            options: { label?: string },
+          ) => {
+            expect(command).toBe('docker');
+            expect(arguments_).toEqual([
+              'compose',
+              '-f',
+              rollbackOverride,
+              '-f',
+              equivalenceOverride,
+              'config',
+              '--hash',
+              'server',
+            ]);
+            expect(options.label).toBe(
+              'Server rollback Compose runtime equivalence',
+            );
+            return `server ${renderedHash}\n`;
+          },
+          equivalenceOverride,
+        },
+      ),
+    ).toThrow(
+      'Server rollback runtime configuration differs from the running Compose boundary',
+    );
+  });
+
+  test('normalizes only the rollback image reference before comparing the Compose hash', async () => {
+    const directory = await mkdtemp(
+      resolve(tmpdir(), 'wo-rollback-equivalence-test-'),
+    );
+    temporaryDirectories.push(directory);
+    const baseCompose = resolve(directory, 'compose.yaml');
+    const rollbackOverride = resolve(directory, 'rollback.compose.yaml');
+    const driftedRollbackOverride = resolve(
+      directory,
+      'rollback-drift.compose.yaml',
+    );
+    const equivalenceOverride = resolve(
+      directory,
+      'rollback-equivalence.compose.yaml',
+    );
+    const imageReference = 'example/server:stable';
+    const imageId = `sha256:${'a'.repeat(64)}`;
+    await writeFile(
+      baseCompose,
+      [
+        'services:',
+        '  server:',
+        `    image: ${imageReference}`,
+        '    environment:',
+        '      POSTGRES_HOST: db.example.test',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      rollbackOverride,
+      rollbackOverrideSource({ server: { imageId } }, undefined, {
+        selectedServices: ['server'],
+      }),
+    );
+    await writeFile(
+      driftedRollbackOverride,
+      [
+        rollbackOverrideSource({ server: { imageId } }, undefined, {
+          selectedServices: ['server'],
+        }).trimEnd(),
+        '    environment:',
+        '      POSTGRES_HOST: changed.example.test',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      equivalenceOverride,
+      rollbackComposeEquivalenceOverrideSource({
+        server: { imageReference },
+      }),
+    );
+
+    const compose = (...arguments_: string[]) => [
+      'compose',
+      '--project-name',
+      'wo-rollback-equivalence-contract',
+      '-f',
+      baseCompose,
+      ...arguments_,
+    ];
+    const execute = (_command: string, arguments_: string[]) => {
+      const result = spawnSync('docker', arguments_, { encoding: 'utf8' });
+      if (result.status !== 0) {
+        throw new Error(result.stderr || 'Docker Compose hash probe failed');
+      }
+      return result.stdout;
+    };
+    const capturedRow = execute(
+      'docker',
+      compose('config', '--hash', 'server'),
+    ).trim();
+    const capturedHash = /^server ([a-f0-9]{64})$/u.exec(capturedRow)?.[1];
+    expect(capturedHash).toMatch(/^[a-f0-9]{64}$/u);
+    const images = { server: { composeConfigHash: capturedHash } };
+
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        '/safe/.env',
+        rollbackOverride,
+        images,
+        {
+          composeArgumentsForProfile: (_envFile, ...arguments_) =>
+            compose(...arguments_),
+          equivalenceOverride,
+          execute,
+        },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        '/safe/.env',
+        driftedRollbackOverride,
+        images,
+        {
+          composeArgumentsForProfile: (_envFile, ...arguments_) =>
+            compose(...arguments_),
+          equivalenceOverride,
+          execute,
+        },
+      ),
+    ).toThrow(
+      'Server rollback runtime configuration differs from the running Compose boundary',
+    );
+  });
+
   test('cleans acquired rollback image leases after partial acquisition failure', () => {
     const images = Object.fromEntries(
       ['caddy', 'server', 'postgres', 'coturn'].map((service, index) => [
@@ -1137,23 +1517,45 @@ describe('deployment filesystem safety', () => {
         `wo-${service}:stable`,
       ]),
     );
+    const containerIds = Object.fromEntries(
+      ['caddy', 'server', 'postgres', 'coturn'].map((service, index) => [
+        service,
+        String(index + 1).repeat(64),
+      ]),
+    );
+    const composeConfigHashes = Object.fromEntries(
+      ['caddy', 'server', 'postgres', 'coturn'].map((service, index) => [
+        service,
+        String(index + 1).repeat(64),
+      ]),
+    );
     const calls: string[][] = [];
     const execute = (_command: string, arguments_: string[]) => {
       calls.push(arguments_);
       if (arguments_[0] === 'compose') {
-        return `container-${arguments_.at(-1)}\n`;
+        return `${containerIds[arguments_.at(-1)!]}\n`;
       }
       if (arguments_[0] === 'inspect') {
-        const service = arguments_.at(-1)!.replace(/^container-/u, '');
-        return arguments_[2] === '{{.Image}}'
-          ? `${imageIds[service]}\n`
-          : `${imageReferences[service]}\n`;
+        const containerId = arguments_.at(-1)!;
+        const service = Object.keys(containerIds).find(
+          (candidate) => containerIds[candidate] === containerId,
+        );
+        if (service === undefined) {
+          throw new Error(`Unexpected rollback container ${containerId}`);
+        }
+        return rollbackContainerInspection({
+          composeConfigHash: composeConfigHashes[service],
+          containerId,
+          imageId: imageIds[service],
+          imageReference: imageReferences[service],
+          service,
+        });
       }
       return '';
     };
     const images = captureRollbackImages(envFile, { execute });
     expect(calls.filter(([command]) => command === 'compose')).toHaveLength(4);
-    expect(calls.filter(([command]) => command === 'inspect')).toHaveLength(8);
+    expect(calls.filter(([command]) => command === 'inspect')).toHaveLength(4);
     const captureCalls = calls.length;
     const leasedImages = acquireRollbackImageLeases(images, {
       execute,
@@ -1468,6 +1870,87 @@ describe('deployment filesystem safety', () => {
     expect(coturn.environment.TURN_RELAY_MAX_PORT).toBe('49160');
     expect(coturn.healthcheck.test.join(' ')).toContain('$TURN_LISTEN_PORT');
     expect(coturn.healthcheck.test.join(' ')).not.toContain('TURN_INTERNAL_IP');
+  });
+
+  test('creates a server and coturn rollback override with the captured coturn boundary', async () => {
+    const directory = await mkdtemp(
+      resolve(tmpdir(), 'wo-selected-rollback-test-'),
+    );
+    temporaryDirectories.push(directory);
+    const selectedServices = ['server', 'coturn'];
+    const images = {
+      coturn: {
+        containerId: 'old-coturn-container',
+        imageId: `sha256:${'d'.repeat(64)}`,
+      },
+      server: {
+        containerId: 'old-server-container',
+        imageId: `sha256:${'b'.repeat(64)}`,
+      },
+    };
+    const coturnBoundary = {
+      healthcheck: rollbackHealthcheck,
+      hostMode: false,
+      mounts: [
+        {
+          propagation: '',
+          readOnly: false,
+          source: 'wo_old_turn_state',
+          target: '/var/lib/coturn',
+          type: 'volume',
+        },
+      ],
+      ports: normalizeCoturnPortBindings({
+        '3478/tcp': [{ HostIp: '0.0.0.0', HostPort: '3478' }],
+        '3478/udp': [{ HostIp: '0.0.0.0', HostPort: '3478' }],
+      }),
+      turnEnvironment: rollbackEnvironment,
+    };
+    const override = await createRollbackOverride(directory, images, {
+      boundaryCapture: (containerId: string) => {
+        expect(containerId).toBe(images.coturn.containerId);
+        return coturnBoundary;
+      },
+      selectedServices,
+    });
+    const source = await readFile(override, 'utf8');
+
+    expect(source).toBe(
+      rollbackOverrideSource(images, coturnBoundary, { selectedServices }),
+    );
+    expect(source).toMatch(/^ {2}server:$/mu);
+    expect(source).toMatch(/^ {2}coturn:$/mu);
+    expect(source).not.toMatch(/^ {2}caddy:$/mu);
+    expect(source).not.toMatch(/^ {2}postgres:$/mu);
+
+    const configuration = await renderRollback(
+      coturnBoundary,
+      true,
+      selectedServices,
+      images,
+    );
+    const coturn = configuration.services.coturn;
+    expect(coturn.image).toBe(images.coturn.imageId);
+    expect(coturn.network_mode).not.toBe('host');
+    expect(Object.keys(coturn.networks ?? {})).toEqual(['turn_edge']);
+    expect(coturn.ports).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          protocol: 'tcp',
+          published: '3478',
+          target: 3478,
+        }),
+        expect.objectContaining({
+          protocol: 'udp',
+          published: '3478',
+          target: 3478,
+        }),
+      ]),
+    );
+    expect(configuration.volumes.coturn_rollback_state).toMatchObject({
+      external: true,
+      name: 'wo_old_turn_state',
+    });
   });
 
   test('restores the captured host boundary after a bridge-profile failure', async () => {
