@@ -348,11 +348,65 @@ Compose 中配置的 PostgreSQL 镜像已在本机存在；apply 会先解析其
 再通过 `pull_policy: never` 的临时 override 启动，不会在激活过程中拉取可变
 tag。已有 PostgreSQL 只做 Running/healthy 检查，不会重建。
 
-`initial` 要求 server 和 coturn 都不存在。当前 `apply-release.mjs` 明确拒绝
-`upgrade`，因为 root profile 尚未具备与镜像回滚绑定的事务性数据库
-preflight/restore；拒绝发生在读取 env、bundle 或调用 Docker 之前。不要用
-`initial` 绕过此限制。external-db root profile 的 Caddy archive 会完成校验，
-但不会替换由 1Panel/OpenResty 管理的公开入口。
+`initial` 要求 server 和 coturn 都不存在。`root-managed-db + upgrade` 仍明确
+拒绝，因为该 profile 尚未具备与镜像回滚绑定的事务性数据库 restore；不要停止
+旧容器后用 `initial` 绕过。`external-db + upgrade` 使用独立的 staging 数据库
+事务，Caddy archive 只完成校验，不会替换由 1Panel/OpenResty 管理的公开入口。
+
+### external-db release upgrade
+
+先在维护窗口开始前用只读命令取得外部 PostgreSQL 与 OpenResty/Nginx ingress
+的完整容器 ID 和不可变 image ID，并从 PostgreSQL 读取 major 与
+`system_identifier`。`deploy/.env` 的 `POSTGRES_USER` 是应用角色，必须存在且
+具备 `LOGIN`、不是 superuser；`--external-postgres-admin` 是单独的发布管理员，
+必须是 superuser 且具备 `CREATEDB`。确认目标后执行：
+
+```bash
+node deploy/scripts/apply-release.mjs \
+  --manifest=/opt/wo/releases/<release-version>/release-manifest.json \
+  --expected-manifest-sha256=<manifest-sha256> \
+  --env-file=deploy/.env \
+  --rollback-root=/opt/wo/rollback \
+  --profile=external-db \
+  --mode=upgrade \
+  --external-postgres-container-id=<64位容器ID> \
+  --external-postgres-admin=<发布管理员角色> \
+  --expected-postgres-major=<major> \
+  --expected-postgres-system-id=<system_identifier> \
+  --external-ingress-container-id=<64位容器ID> \
+  --expected-ingress-image-id=sha256:<64位image摘要> \
+  --confirm-apply
+```
+
+入口会在任何 Docker 写操作前校验全部参数、bundle、外部容器身份和旧 Server
+的 Compose project/service/config hash。只有“当前 external-db Compose + 旧的
+不可变 Server image”重新渲染出的 hash 与运行容器一致，才会加载新 archive。
+服务存在性和停止验证使用 `docker compose ps --all -q`，不会把已停止容器误判
+为不存在。Compose hash 校验会用权限 `0600` 的 comparison-only override 恢复
+捕获的 `Config.Image` 字符串；该文件不参与激活，实际回滚仍只使用不可变 image
+ID 和 `pull_policy: never`。
+
+维护顺序固定为：停止并验证 ingress，停止旧 Server，围栏并清空原数据库连接，
+生成新鲜 custom dump，恢复到随机 staging，使用非 superuser 应用角色执行迁移
+和 internal smoke，重新检查 staging 固定 OID 与完整 metadata，停止 staging
+Server，在单个 PostgreSQL 事务中切换两个数据库名，再激活新 Server/coturn 并
+执行 internal smoke。碰撞与剩余连接 count 必须是恰好一行非负十进制，空输出
+不会当成零。最后恢复同一 ingress 容器；若其 Docker healthcheck 暂为
+`starting`，会有界等待 `healthy`，不会放松容器/image 身份。
+
+数据库 manifest 保存原 OID、owner、locale、tablespace、connection limit、
+allow-connections、ICU rules、完整 ACL（含 grantor）、数据库/角色 GUC 以及 dump
+大小和 SHA-256，并记录应用角色 `applicationRoleCanLogin: true`。ACL 按授权链
+在事务内切换到每个原 grantor 后重放；无法证明的授权链会在切库前失败关闭。
+
+失败时先证明新服务和 ingress 已停止，再按固定 OID 恢复原数据库与连接权限，
+用 `pull_policy: never` 的 rollback override 恢复旧镜像/运行配置并执行 smoke，
+最后才恢复 ingress。rollback smoke、ingress 恢复或停止验证任一失败时，不删除
+staging/failed 数据库，也不释放 backup、rollback workspace 或 image lease。
+激活或 rollback 的双 rename 即使已提交后才返回错误，也会按固定 OID 识别唯一
+布局后恢复或继续；只有本轮实际尝试过数据库围栏，失败路径才恢复原 connection
+limit。
+成功输出中的 `backup=<path>` 仍需按备份保留策略保存。
 
 ### 验收
 
