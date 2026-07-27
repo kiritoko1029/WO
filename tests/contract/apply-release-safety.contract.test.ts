@@ -377,6 +377,7 @@ describe('release apply activation safety', () => {
     expect(preflight.arguments_).toEqual(
       expect.arrayContaining([
         `--env-file=${fixture.envFile}`,
+        `--release-provenance=${JSON.stringify(provenance)}`,
         '--allow-running',
       ]),
     );

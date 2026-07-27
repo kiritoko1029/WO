@@ -21,6 +21,7 @@ import {
   checkPortConflicts,
   integrationEdgePorts,
   parseReservedPortRanges,
+  selectPreflightReleaseProvenance,
   validateRootOwnedDirectoryAncestors,
   validateTurnStateEmptyDirectory,
   validateTurnHostKernelState,
@@ -1028,6 +1029,66 @@ describe('deployment filesystem safety', () => {
       );
     },
   );
+
+  test('uses explicit preflight provenance without consulting Git', () => {
+    let deriveCalls = 0;
+    expect(
+      selectPreflightReleaseProvenance({
+        deriveProvenance: () => {
+          deriveCalls += 1;
+          throw new Error('Git must not be consulted');
+        },
+        integration: false,
+        serializedProvenance: JSON.stringify(releaseProvenance),
+      }),
+    ).toEqual(releaseProvenance);
+    expect(deriveCalls).toBe(0);
+  });
+
+  test('retains Git provenance fallback for standalone production preflight', () => {
+    let deriveCalls = 0;
+    expect(
+      selectPreflightReleaseProvenance({
+        deriveProvenance: () => {
+          deriveCalls += 1;
+          return releaseProvenance;
+        },
+        integration: false,
+        serializedProvenance: undefined,
+      }),
+    ).toBe(releaseProvenance);
+    expect(deriveCalls).toBe(1);
+  });
+
+  test.each([
+    ['malformed JSON', '{', /valid JSON/i],
+    [
+      'unexpected field',
+      JSON.stringify({ ...releaseProvenance, EXTRA: 'unexpected' }),
+      /unexpected or missing fields/i,
+    ],
+    [
+      'invalid revision',
+      JSON.stringify({ ...releaseProvenance, BUILD_REVISION: 'invalid' }),
+      /full 40-character Git SHA/i,
+    ],
+  ])('rejects %s in explicit preflight provenance', (_label, value, issue) => {
+    expect(() =>
+      selectPreflightReleaseProvenance({
+        integration: false,
+        serializedProvenance: value,
+      }),
+    ).toThrow(issue);
+  });
+
+  test('rejects explicit release provenance in integration preflight', () => {
+    expect(() =>
+      selectPreflightReleaseProvenance({
+        integration: true,
+        serializedProvenance: JSON.stringify(releaseProvenance),
+      }),
+    ).toThrow(/cannot be combined with --integration/i);
+  });
 
   test.each([
     ['undefined', 'throw undefined;', 'undefined'],

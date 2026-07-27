@@ -640,12 +640,13 @@ function bootstrapPostgres(envFile, profile, provenance, overrides, execute) {
   );
 }
 
-function runProductionPreflight(envFile, execute) {
+function runProductionPreflight(envFile, provenance, execute) {
   execute(
     process.execPath,
     [
       resolve(import.meta.dirname, 'preflight.mjs'),
       `--env-file=${envFile}`,
+      `--release-provenance=${JSON.stringify(provenance)}`,
       '--allow-running',
     ],
     {
@@ -1101,7 +1102,7 @@ export async function applyRelease(
       expectedManifestSha256,
     });
     const provenance = verifiedBundle.manifest.provenance;
-    runProductionPreflight(resolvedEnvFile, execute);
+    runProductionPreflight(resolvedEnvFile, provenance, execute);
     const previousContainerIds = runningContainerIds(
       resolvedEnvFile,
       profile,

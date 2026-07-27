@@ -39,6 +39,7 @@ import {
   deriveReleaseProvenance,
   integrationReleaseProvenance,
   releaseProvenanceFields,
+  validateReleaseProvenance,
 } from './provenance.mjs';
 
 const minimumComposeVersion = '2.24.4';
@@ -58,6 +59,57 @@ function failureCodeOrMessage(error, fallback) {
   }
   const message = failureMessage(error);
   return message.length > 0 ? message : fallback;
+}
+
+export function selectPreflightReleaseProvenance({
+  deriveProvenance = deriveReleaseProvenance,
+  integration,
+  serializedProvenance,
+}) {
+  if (integration) {
+    if (serializedProvenance !== undefined) {
+      throw new Error(
+        '--release-provenance cannot be combined with --integration',
+      );
+    }
+    return integrationReleaseProvenance;
+  }
+  if (serializedProvenance === undefined) {
+    return deriveProvenance();
+  }
+
+  let provenance;
+  try {
+    provenance = JSON.parse(serializedProvenance);
+  } catch (error) {
+    throw new Error('--release-provenance must be valid JSON', {
+      cause: error,
+    });
+  }
+  if (
+    provenance === null ||
+    typeof provenance !== 'object' ||
+    Array.isArray(provenance)
+  ) {
+    throw new Error('--release-provenance must be a JSON object');
+  }
+  const actualFields = Object.keys(provenance).sort();
+  const expectedFields = [...releaseProvenanceFields].sort();
+  if (
+    actualFields.length !== expectedFields.length ||
+    actualFields.some((field, index) => field !== expectedFields[index])
+  ) {
+    throw new Error('--release-provenance has unexpected or missing fields');
+  }
+  const issues = validateReleaseProvenance(provenance);
+  if (issues.length > 0) {
+    throw new Error(`--release-provenance is invalid: ${issues.join('; ')}`);
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      releaseProvenanceFields.map((field) => [field, provenance[field]]),
+    ),
+  );
 }
 
 async function validateSecretFiles(environment, integration) {
@@ -529,7 +581,7 @@ async function checkDiskAndPaths(environment) {
   return checkBackupDirectory(resolvedFromDeploy(environment.BACKUP_DIR));
 }
 
-function checkDocker(envFile, integration, environment) {
+function checkDocker(envFile, integration, environment, serializedProvenance) {
   const issues = [];
   try {
     commandVersion(
@@ -551,9 +603,10 @@ function checkDocker(envFile, integration, environment) {
       ? integrationComposeArguments
       : composeArguments;
     const composeCommand = compose(envFile, 'config', '--format', 'json');
-    const provenance = integration
-      ? integrationReleaseProvenance
-      : deriveReleaseProvenance();
+    const provenance = selectPreflightReleaseProvenance({
+      integration,
+      serializedProvenance,
+    });
     const composeEnvironment = composeProcessEnvironment(
       composeCommand,
       process.env,
@@ -645,6 +698,7 @@ export async function runPreflight() {
     argumentValue('--env-file', resolve(deployDirectory, '.env')),
   );
   const integration = hasArgument('--integration');
+  const serializedProvenance = argumentValue('--release-provenance', undefined);
   const environment = loadDeploymentEnvironment(envFile);
   const environmentIssues = validateDeploymentEnvironment(environment, {
     platform: hasArgument('--allow-non-linux') ? 'linux' : process.platform,
@@ -652,7 +706,9 @@ export async function runPreflight() {
   });
   const issues = [...environmentIssues];
   issues.push(...(await validateSecretFiles(environment, integration)));
-  issues.push(...checkDocker(envFile, integration, environment));
+  issues.push(
+    ...checkDocker(envFile, integration, environment, serializedProvenance),
+  );
   issues.push(...(await checkDiskAndPaths(environment)));
   if (environmentIssues.length === 0) {
     issues.push(...(await checkTurnHostPrerequisites(environment)));
