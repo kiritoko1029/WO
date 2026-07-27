@@ -140,7 +140,7 @@ export function captureRollbackImages(
     rollbackServices.map((service) => {
       const containerId = execute(
         'docker',
-        composeArgumentsForProfile(envFile, 'ps', '-q', service),
+        composeArgumentsForProfile(envFile, 'ps', '--all', '-q', service),
         { label: `${service} container lookup` },
       ).trim();
       if (!/^[a-f0-9]{64}$/u.test(containerId)) {
@@ -180,13 +180,40 @@ export function captureRollbackImages(
           `${service} rollback container and Compose boundary cannot be pinned safely`,
         );
       }
+      let imageInspection;
+      try {
+        const imageInspections = JSON.parse(
+          execute('docker', ['image', 'inspect', imageId], {
+            label: `${service} rollback image inspection`,
+          }),
+        );
+        if (!Array.isArray(imageInspections) || imageInspections.length !== 1) {
+          throw new Error('Rollback image inspection must return one image');
+        }
+        [imageInspection] = imageInspections;
+      } catch (error) {
+        throw new Error(`${service} rollback image inspection is invalid`, {
+          cause: error,
+        });
+      }
+      if (
+        imageInspection?.Id !== imageId ||
+        imageInspection?.Os !== 'linux' ||
+        imageInspection?.Architecture !== 'amd64'
+      ) {
+        throw new Error(
+          `${service} rollback image identity and platform cannot be pinned safely`,
+        );
+      }
       return [
         service,
         {
+          architecture: imageInspection.Architecture,
           composeConfigHash,
           containerId,
           imageId,
           imageReference,
+          os: imageInspection.Os,
         },
       ];
     }),
@@ -857,6 +884,10 @@ export function rollbackComposeEquivalenceOverrideSource(images) {
   ].join('\n');
 }
 
+export function rollbackComposeLegacyPlatformOverrideSource() {
+  return ['services:', '  server:', '    platform: !reset null', ''].join('\n');
+}
+
 export function assertRollbackComposeRuntimeEquivalent(
   envFile,
   rollbackOverride,
@@ -866,6 +897,7 @@ export function assertRollbackComposeRuntimeEquivalent(
     composeProvenance,
     equivalenceOverride,
     execute = run,
+    legacyPlatformOverride,
   } = {},
 ) {
   const capturedHash = images?.server?.composeConfigHash;
@@ -880,33 +912,50 @@ export function assertRollbackComposeRuntimeEquivalent(
       'Server rollback Compose equivalence override is unavailable',
     );
   }
-  const rows = execute(
-    'docker',
-    composeArgumentsForProfile(
-      envFile,
-      '-f',
-      rollbackOverride,
-      '-f',
-      equivalenceOverride,
-      'config',
-      '--hash',
-      'server',
-    ),
-    {
-      composeProvenance,
-      label: 'Server rollback Compose runtime equivalence',
-    },
-  )
-    .split(/\r?\n/u)
-    .map((row) => row.trim())
-    .filter(Boolean);
-  const match =
-    rows.length === 1 ? /^server ([a-f0-9]{64})$/u.exec(rows[0]) : null;
-  if (match === null || match[1] !== capturedHash) {
-    throw new Error(
-      'Server rollback runtime configuration differs from the running Compose boundary',
-    );
+  const renderHash = (overrides, label) => {
+    const rows = execute(
+      'docker',
+      composeArgumentsForProfile(
+        envFile,
+        ...overrides.flatMap((override) => ['-f', override]),
+        'config',
+        '--hash',
+        'server',
+      ),
+      {
+        composeProvenance,
+        label,
+      },
+    )
+      .split(/\r?\n/u)
+      .map((row) => row.trim())
+      .filter(Boolean);
+    const match =
+      rows.length === 1 ? /^server ([a-f0-9]{64})$/u.exec(rows[0]) : null;
+    return match?.[1];
+  };
+  const comparisonOverrides = [rollbackOverride, equivalenceOverride];
+  const currentHash = renderHash(
+    comparisonOverrides,
+    'Server rollback Compose runtime equivalence',
+  );
+  if (currentHash === capturedHash) {
+    return;
   }
+  if (
+    currentHash !== undefined &&
+    typeof legacyPlatformOverride === 'string' &&
+    legacyPlatformOverride.length > 0 &&
+    renderHash(
+      [...comparisonOverrides, legacyPlatformOverride],
+      'Server rollback legacy platform Compose runtime equivalence',
+    ) === capturedHash
+  ) {
+    return;
+  }
+  throw new Error(
+    'Server rollback runtime configuration differs from the running Compose boundary',
+  );
 }
 
 export function restoreImageTags(

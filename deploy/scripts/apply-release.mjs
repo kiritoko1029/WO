@@ -47,6 +47,7 @@ import {
   releaseRollbackImageLeases,
   releaseRollbackResources,
   rollbackComposeEquivalenceOverrideSource,
+  rollbackComposeLegacyPlatformOverrideSource,
   restoreImageTags,
 } from './upgrade.mjs';
 
@@ -872,6 +873,11 @@ export async function applyExternalDatabaseRelease(
       'rollback-equivalence.compose.yaml',
       rollbackComposeEquivalenceOverrideSource(rollbackImages),
     );
+    const rollbackLegacyPlatformOverride = await writeOverride(
+      workspace,
+      'rollback-legacy-platform.compose.yaml',
+      rollbackComposeLegacyPlatformOverrideSource(),
+    );
     assertRollbackRuntimeEquivalent(
       resolvedEnvFile,
       rollbackOverride,
@@ -881,6 +887,7 @@ export async function applyExternalDatabaseRelease(
         composeProvenance: provenance,
         equivalenceOverride: rollbackEquivalenceOverride,
         execute,
+        legacyPlatformOverride: rollbackLegacyPlatformOverride,
       },
     );
     const loadedBundle = await loadReleaseBundle(manifestFile, {

@@ -72,6 +72,7 @@ type HarnessOptions = {
   postgresImageMissing?: boolean;
   postgresExisted?: boolean;
   releaseServicesExisted?: boolean;
+  rollbackRequiresLegacyPlatform?: boolean;
   rootBoundaryInvalid?: boolean;
   rootSecretBoundaryInvalid?: boolean;
   smokeThrownValue?: unknown;
@@ -167,6 +168,7 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
     postgresImageMissing = false,
     postgresExisted = false,
     releaseServicesExisted = false,
+    rollbackRequiresLegacyPlatform = false,
     rootBoundaryInvalid = false,
     rootSecretBoundaryInvalid = false,
     smokeThrownValue,
@@ -234,6 +236,15 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
       return imageId('c');
     }
     if (label === 'Server rollback Compose runtime equivalence') {
+      return `server ${
+        rollbackRequiresLegacyPlatform
+          ? '8'.repeat(64)
+          : serverComposeConfigHash
+      }`;
+    }
+    if (
+      label === 'Server rollback legacy platform Compose runtime equivalence'
+    ) {
       return `server ${serverComposeConfigHash}`;
     }
     if (label === 'Post-apply internal smoke' && failSmoke) {
@@ -913,7 +924,7 @@ describe('release apply activation safety', () => {
   });
 
   test('captures and leases old images before loading the external database release', async () => {
-    const harness = createHarness();
+    const harness = createHarness({ rollbackRequiresLegacyPlatform: true });
     const fixture = await createFixture('external-db', harness.execute);
     const workspace = resolve(fixture.rollbackRoot, 'upgrade-workspace');
     await mkdir(workspace, { mode: 0o700 });
@@ -1025,6 +1036,16 @@ describe('release apply activation safety', () => {
             rollbackImages: leasedImages,
             workspace,
           });
+          options.activateServices({
+            label: 'Contract release activation',
+            overrides: [options.releaseOverride],
+            services: ['server'],
+          });
+          options.activateServices({
+            label: 'Contract rollback activation',
+            overrides: [options.rollbackOverride],
+            services: ['server'],
+          });
           return { backupDirectory: '/safe/external-db-backup' };
         },
       },
@@ -1041,11 +1062,13 @@ describe('release apply activation safety', () => {
       'database-upgrade',
       'release:false:server,coturn',
     ]);
-    expect(
-      harness.calls.find(
-        ({ label }) => label === 'Server rollback Compose runtime equivalence',
-      ),
-    ).toMatchObject({
+    const equivalenceCalls = harness.calls.filter(
+      ({ label }) =>
+        label.includes('rollback') &&
+        label.includes('Compose runtime equivalence'),
+    );
+    expect(equivalenceCalls).toHaveLength(2);
+    expect(equivalenceCalls[0]).toMatchObject({
       arguments_: expect.arrayContaining([
         '-f',
         resolve(workspace, 'rollback.compose.yaml'),
@@ -1056,6 +1079,25 @@ describe('release apply activation safety', () => {
         'server',
       ]),
       command: 'docker',
+      label: 'Server rollback Compose runtime equivalence',
+    });
+    expect(equivalenceCalls[0]?.arguments_).not.toContain(
+      resolve(workspace, 'rollback-legacy-platform.compose.yaml'),
+    );
+    expect(equivalenceCalls[1]).toMatchObject({
+      arguments_: expect.arrayContaining([
+        '-f',
+        resolve(workspace, 'rollback.compose.yaml'),
+        '-f',
+        resolve(workspace, 'rollback-equivalence.compose.yaml'),
+        '-f',
+        resolve(workspace, 'rollback-legacy-platform.compose.yaml'),
+        'config',
+        '--hash',
+        'server',
+      ]),
+      command: 'docker',
+      label: 'Server rollback legacy platform Compose runtime equivalence',
     });
     expect(
       await readFile(
@@ -1070,6 +1112,38 @@ describe('release apply activation safety', () => {
         '',
       ].join('\n'),
     );
+    expect(
+      await readFile(
+        resolve(workspace, 'rollback-legacy-platform.compose.yaml'),
+        'utf8',
+      ),
+    ).toBe(
+      ['services:', '  server:', '    platform: !reset null', ''].join('\n'),
+    );
+    for (const name of [
+      'rollback-equivalence.compose.yaml',
+      'rollback-legacy-platform.compose.yaml',
+    ]) {
+      expect((await stat(resolve(workspace, name))).mode & 0o777).toBe(0o600);
+    }
+    const activationCalls = harness.calls.filter(({ label }) =>
+      label.startsWith('Contract '),
+    );
+    expect(activationCalls).toHaveLength(2);
+    expect(activationCalls[0]?.arguments_).toContain(
+      resolve(workspace, 'release.compose.yaml'),
+    );
+    expect(activationCalls[1]?.arguments_).toContain(
+      resolve(workspace, 'rollback.compose.yaml'),
+    );
+    for (const call of activationCalls) {
+      expect(call.arguments_).not.toContain(
+        resolve(workspace, 'rollback-equivalence.compose.yaml'),
+      );
+      expect(call.arguments_).not.toContain(
+        resolve(workspace, 'rollback-legacy-platform.compose.yaml'),
+      );
+    }
   });
 
   test('retains workspace and image leases when external database rollback is incomplete', async () => {

@@ -57,6 +57,7 @@ import {
   releaseRollbackWorkspace,
   restoreImageTags,
   rollbackComposeEquivalenceOverrideSource,
+  rollbackComposeLegacyPlatformOverrideSource,
   rollbackOverrideSource,
   throwUpgradeCleanupFailures,
   validateCoturnRollbackMountSources,
@@ -129,6 +130,24 @@ function rollbackContainerInspection({
     Image: imageId,
     State: { Running: true },
   });
+}
+
+function rollbackImageInspection({
+  architecture = 'amd64',
+  imageId,
+  os = 'linux',
+}: {
+  architecture?: string;
+  imageId: string;
+  os?: string;
+}): string {
+  return JSON.stringify([
+    {
+      Architecture: architecture,
+      Id: imageId,
+      Os: os,
+    },
+  ]);
 }
 
 function tarHeader(name: string, type: '0' | '2' | '5', size = 0): Buffer {
@@ -1146,6 +1165,9 @@ describe('deployment filesystem safety', () => {
         const service = arguments_.at(-1) as keyof typeof containerIds;
         return `${containerIds[service]}\n`;
       }
+      if (arguments_[0] === 'image' && arguments_[1] === 'inspect') {
+        return rollbackImageInspection({ imageId: arguments_[2]! });
+      }
       if (arguments_[0] === 'inspect') {
         const containerId = arguments_.at(-1)!;
         const service = (
@@ -1171,23 +1193,52 @@ describe('deployment filesystem safety', () => {
 
     expect(Object.keys(images)).toEqual(selectedServices);
     expect(
+      calls.map((arguments_) => {
+        if (arguments_[0] === 'compose') {
+          return `compose:${arguments_.at(-1)}`;
+        }
+        return `${arguments_[0]}:${arguments_[1]}`;
+      }),
+    ).toEqual([
+      'compose:server',
+      'inspect:--format',
+      'image:inspect',
+      'compose:coturn',
+      'inspect:--format',
+      'image:inspect',
+    ]);
+    expect(
       calls
         .filter(([command]) => command === 'compose')
-        .map((arguments_) => arguments_.at(-1)),
-    ).toEqual(selectedServices);
+        .map((arguments_) => arguments_.slice(-4)),
+    ).toEqual([
+      ['ps', '--all', '-q', 'server'],
+      ['ps', '--all', '-q', 'coturn'],
+    ]);
     expect(
       calls
         .filter(([command]) => command === 'inspect')
         .map((arguments_) => arguments_.at(-1)),
     ).toEqual([containerIds.server, containerIds.coturn]);
+    expect(
+      calls
+        .filter(
+          ([command, action]) => command === 'image' && action === 'inspect',
+        )
+        .map((arguments_) => arguments_.at(-1)),
+    ).toEqual([imageIds.server, imageIds.coturn]);
     expect(images).toMatchObject({
       coturn: {
+        architecture: 'amd64',
         composeConfigHash: composeConfigHashes.coturn,
         containerId: containerIds.coturn,
+        os: 'linux',
       },
       server: {
+        architecture: 'amd64',
         composeConfigHash: composeConfigHashes.server,
         containerId: containerIds.server,
+        os: 'linux',
       },
     });
 
@@ -1255,12 +1306,77 @@ describe('deployment filesystem safety', () => {
     },
   );
 
+  test.each([
+    [
+      'image ID',
+      {
+        Architecture: 'amd64',
+        Id: `sha256:${'b'.repeat(64)}`,
+        Os: 'linux',
+      },
+    ],
+    [
+      'operating system',
+      {
+        Architecture: 'amd64',
+        Id: `sha256:${'a'.repeat(64)}`,
+        Os: 'windows',
+      },
+    ],
+    [
+      'architecture',
+      {
+        Architecture: 'arm64',
+        Id: `sha256:${'a'.repeat(64)}`,
+        Os: 'linux',
+      },
+    ],
+  ])('rejects a rollback image with mismatched %s', (_boundary, image) => {
+    const containerId = '1'.repeat(64);
+    const imageId = `sha256:${'a'.repeat(64)}`;
+
+    expect(() =>
+      captureRollbackImages('/safe/.env', {
+        composeArgumentsForProfile: (
+          _envFile: string,
+          ...arguments_: string[]
+        ) => ['compose', ...arguments_],
+        execute: (_command: string, arguments_: string[]) => {
+          if (arguments_[0] === 'compose') {
+            return `${containerId}\n`;
+          }
+          if (arguments_[0] === 'inspect') {
+            return rollbackContainerInspection({
+              composeConfigHash: '2'.repeat(64),
+              containerId,
+              imageId,
+              imageReference: 'wo-server:stable',
+              service: 'server',
+            });
+          }
+          if (arguments_[0] === 'image' && arguments_[1] === 'inspect') {
+            return JSON.stringify([image]);
+          }
+          throw new Error(
+            `Unexpected Docker arguments: ${arguments_.join(' ')}`,
+          );
+        },
+        selectedServices: ['server'],
+      }),
+    ).toThrow(
+      'server rollback image identity and platform cannot be pinned safely',
+    );
+  });
+
   test('fails closed when the rollback server Compose hash differs from the captured runtime', () => {
     const envFile = '/safe/.env';
     const equivalenceOverride = '/safe/rollback-equivalence.compose.yaml';
+    const legacyPlatformOverride =
+      '/safe/rollback-legacy-platform.compose.yaml';
     const rollbackOverride = '/safe/rollback.compose.yaml';
     const capturedHash = 'a'.repeat(64);
     const renderedHash = 'b'.repeat(64);
+    const calls: string[][] = [];
 
     expect(() =>
       assertRollbackComposeRuntimeEquivalent(
@@ -1280,28 +1396,74 @@ describe('deployment filesystem safety', () => {
             arguments_: string[],
             options: { label?: string },
           ) => {
+            calls.push(arguments_);
             expect(command).toBe('docker');
-            expect(arguments_).toEqual([
-              'compose',
-              '-f',
-              rollbackOverride,
-              '-f',
-              equivalenceOverride,
-              'config',
-              '--hash',
-              'server',
-            ]);
-            expect(options.label).toBe(
-              'Server rollback Compose runtime equivalence',
+            expect(options.label).toMatch(
+              /^Server rollback(?: legacy platform)? Compose runtime equivalence$/u,
             );
             return `server ${renderedHash}\n`;
           },
           equivalenceOverride,
+          legacyPlatformOverride,
         },
       ),
     ).toThrow(
       'Server rollback runtime configuration differs from the running Compose boundary',
     );
+    expect(calls).toEqual([
+      [
+        'compose',
+        '-f',
+        rollbackOverride,
+        '-f',
+        equivalenceOverride,
+        'config',
+        '--hash',
+        'server',
+      ],
+      [
+        'compose',
+        '-f',
+        rollbackOverride,
+        '-f',
+        equivalenceOverride,
+        '-f',
+        legacyPlatformOverride,
+        'config',
+        '--hash',
+        'server',
+      ],
+    ]);
+  });
+
+  test('rejects malformed primary Compose hash output without using the legacy fallback', () => {
+    const capturedHash = 'a'.repeat(64);
+    const calls: string[][] = [];
+
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        '/safe/.env',
+        '/safe/rollback.compose.yaml',
+        { server: { composeConfigHash: capturedHash } },
+        {
+          composeArgumentsForProfile: (
+            _envFile: string,
+            ...arguments_: string[]
+          ) => ['compose', ...arguments_],
+          equivalenceOverride: '/safe/rollback-equivalence.compose.yaml',
+          execute: (_command: string, arguments_: string[]) => {
+            calls.push(arguments_);
+            return calls.length === 1
+              ? 'unexpected Compose output\n'
+              : `server ${capturedHash}\n`;
+          },
+          legacyPlatformOverride: '/safe/rollback-legacy-platform.compose.yaml',
+        },
+      ),
+    ).toThrow(
+      'Server rollback runtime configuration differs from the running Compose boundary',
+    );
+    expect(calls).toHaveLength(1);
   });
 
   test('normalizes only the rollback image reference before comparing the Compose hash', async () => {
@@ -1407,6 +1569,158 @@ describe('deployment filesystem safety', () => {
     ).toThrow(
       'Server rollback runtime configuration differs from the running Compose boundary',
     );
+  });
+
+  test('accepts a legacy running hash only after resetting the newly pinned server platform', async () => {
+    const directory = await mkdtemp(
+      resolve(tmpdir(), 'wo-rollback-legacy-platform-test-'),
+    );
+    temporaryDirectories.push(directory);
+    const legacyCompose = resolve(directory, 'legacy.compose.yaml');
+    const currentCompose = resolve(directory, 'current.compose.yaml');
+    const rollbackOverride = resolve(directory, 'rollback.compose.yaml');
+    const driftedRollbackOverride = resolve(
+      directory,
+      'rollback-drift.compose.yaml',
+    );
+    const equivalenceOverride = resolve(
+      directory,
+      'rollback-equivalence.compose.yaml',
+    );
+    const legacyPlatformOverride = resolve(
+      directory,
+      'rollback-legacy-platform.compose.yaml',
+    );
+    const imageReference = 'example/server:stable';
+    const imageId = `sha256:${'a'.repeat(64)}`;
+    const environment = [
+      '    environment:',
+      '      POSTGRES_HOST: db.example.test',
+    ];
+    await writeFile(
+      legacyCompose,
+      [
+        'services:',
+        '  server:',
+        `    image: ${imageReference}`,
+        ...environment,
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      currentCompose,
+      [
+        'services:',
+        '  server:',
+        `    image: ${imageReference}`,
+        '    platform: linux/amd64',
+        ...environment,
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      rollbackOverride,
+      rollbackOverrideSource({ server: { imageId } }, undefined, {
+        selectedServices: ['server'],
+      }),
+    );
+    await writeFile(
+      driftedRollbackOverride,
+      [
+        rollbackOverrideSource({ server: { imageId } }, undefined, {
+          selectedServices: ['server'],
+        }).trimEnd(),
+        '    environment:',
+        '      POSTGRES_HOST: changed.example.test',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      equivalenceOverride,
+      rollbackComposeEquivalenceOverrideSource({
+        server: { imageReference },
+      }),
+    );
+    await writeFile(
+      legacyPlatformOverride,
+      rollbackComposeLegacyPlatformOverrideSource(),
+    );
+
+    const compose = (file: string, ...arguments_: string[]) => [
+      'compose',
+      '--project-name',
+      'wo-rollback-legacy-platform-contract',
+      '-f',
+      file,
+      ...arguments_,
+    ];
+    const calls: string[][] = [];
+    const execute = (_command: string, arguments_: string[]) => {
+      calls.push(arguments_);
+      const result = spawnSync('docker', arguments_, { encoding: 'utf8' });
+      if (result.status !== 0) {
+        throw new Error(result.stderr || 'Docker Compose hash probe failed');
+      }
+      return result.stdout;
+    };
+    const capturedRow = execute(
+      'docker',
+      compose(legacyCompose, 'config', '--hash', 'server'),
+    ).trim();
+    const capturedHash = /^server ([a-f0-9]{64})$/u.exec(capturedRow)?.[1];
+    expect(capturedHash).toMatch(/^[a-f0-9]{64}$/u);
+    const currentRow = execute(
+      'docker',
+      compose(currentCompose, 'config', '--hash', 'server'),
+    ).trim();
+    const currentHash = /^server ([a-f0-9]{64})$/u.exec(currentRow)?.[1];
+    expect(currentHash).toMatch(/^[a-f0-9]{64}$/u);
+    calls.length = 0;
+    const options = {
+      composeArgumentsForProfile: (_envFile: string, ...arguments_: string[]) =>
+        compose(currentCompose, ...arguments_),
+      equivalenceOverride,
+      execute,
+      legacyPlatformOverride,
+    };
+
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        '/safe/.env',
+        rollbackOverride,
+        { server: { composeConfigHash: currentHash } },
+        options,
+      ),
+    ).not.toThrow();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toContain(legacyPlatformOverride);
+
+    calls.length = 0;
+    const images = { server: { composeConfigHash: capturedHash } };
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        '/safe/.env',
+        rollbackOverride,
+        images,
+        options,
+      ),
+    ).not.toThrow();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).not.toContain(legacyPlatformOverride);
+    expect(calls[1]).toContain(legacyPlatformOverride);
+
+    calls.length = 0;
+    expect(() =>
+      assertRollbackComposeRuntimeEquivalent(
+        '/safe/.env',
+        driftedRollbackOverride,
+        images,
+        options,
+      ),
+    ).toThrow(
+      'Server rollback runtime configuration differs from the running Compose boundary',
+    );
+    expect(calls).toHaveLength(2);
   });
 
   test('cleans acquired rollback image leases after partial acquisition failure', () => {
@@ -1535,6 +1849,9 @@ describe('deployment filesystem safety', () => {
       if (arguments_[0] === 'compose') {
         return `${containerIds[arguments_.at(-1)!]}\n`;
       }
+      if (arguments_[0] === 'image' && arguments_[1] === 'inspect') {
+        return rollbackImageInspection({ imageId: arguments_[2]! });
+      }
       if (arguments_[0] === 'inspect') {
         const containerId = arguments_.at(-1)!;
         const service = Object.keys(containerIds).find(
@@ -1556,6 +1873,11 @@ describe('deployment filesystem safety', () => {
     const images = captureRollbackImages(envFile, { execute });
     expect(calls.filter(([command]) => command === 'compose')).toHaveLength(4);
     expect(calls.filter(([command]) => command === 'inspect')).toHaveLength(4);
+    expect(
+      calls.filter(
+        ([command, action]) => command === 'image' && action === 'inspect',
+      ),
+    ).toHaveLength(4);
     const captureCalls = calls.length;
     const leasedImages = acquireRollbackImageLeases(images, {
       execute,
