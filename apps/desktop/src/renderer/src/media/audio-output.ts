@@ -133,6 +133,12 @@ export function createAudioOutput(
       }
       remoteTracks.set(track.id, track);
       const onEnded = (): void => {
+        if (
+          remoteTracks.get(track.id) !== track ||
+          endedListeners.get(track.id) !== onEnded
+        ) {
+          return;
+        }
         remoteTracks.delete(track.id);
         endedListeners.delete(track.id);
         void syncElementStream().catch(() => undefined);

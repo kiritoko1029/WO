@@ -447,6 +447,127 @@ describe('voice capture and playback', () => {
     expect(element.play).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ['microphone', 'remote-mic'],
+    ['system audio', 'remote-desktop'],
+  ] as const)(
+    'keeps the other remote audio track playing when %s ends',
+    async (_label, endedTrackId) => {
+      const element = audioElement();
+      const playback = createAudioOutput({
+        createElement: () => element,
+        createMediaStream: (tracks) => stream([...tracks]),
+      });
+      const mic = eventfulAudioTrack();
+      const desktop = eventfulAudioTrack();
+      Object.defineProperty(mic, 'id', { value: 'remote-mic' });
+      Object.defineProperty(desktop, 'id', { value: 'remote-desktop' });
+
+      await playback.attach(mic);
+      await playback.attach(desktop);
+
+      const ended = endedTrackId === 'remote-mic' ? mic : desktop;
+      const remaining = ended === mic ? desktop : mic;
+      ended.emitEnded();
+
+      await vi.waitFor(() => {
+        expect(element.srcObject?.getAudioTracks()).toEqual([remaining]);
+      });
+
+      remaining.emitEnded();
+      await vi.waitFor(() => expect(element.srcObject).toBeNull());
+    },
+  );
+
+  it('ignores a stale ended callback after a same-id remote track replacement', async () => {
+    const element = audioElement();
+    const playback = createAudioOutput({
+      createElement: () => element,
+      createMediaStream: (tracks) => stream([...tracks]),
+    });
+    const previous = eventfulAudioTrack();
+    const replacement = eventfulAudioTrack();
+    Object.defineProperty(previous, 'id', { value: 'remote-audio' });
+    Object.defineProperty(replacement, 'id', { value: 'remote-audio' });
+
+    await playback.attach(previous);
+    const previousEndedListener = (
+      previous.addEventListener as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0]?.[1] as EventListener;
+    await playback.attach(replacement);
+    previous.stop();
+
+    previousEndedListener(new Event('ended'));
+    await Promise.resolve();
+
+    expect(previous.removeEventListener).toHaveBeenCalledWith(
+      'ended',
+      previousEndedListener,
+    );
+    expect(element.srcObject?.getAudioTracks()).toEqual([replacement]);
+
+    replacement.emitEnded();
+    await vi.waitFor(() => expect(element.srcObject).toBeNull());
+  });
+
+  it('ignores an old ended listener when the same remote track is reattached', async () => {
+    const element = audioElement();
+    const playback = createAudioOutput({
+      createElement: () => element,
+      createMediaStream: (tracks) => stream([...tracks]),
+    });
+    const remote = eventfulAudioTrack();
+    Object.defineProperty(remote, 'id', { value: 'remote-audio' });
+
+    await playback.attach(remote);
+    const previousEndedListener = (
+      remote.addEventListener as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0]?.[1] as EventListener;
+    await playback.attach(remote);
+
+    previousEndedListener(new Event('ended'));
+    await Promise.resolve();
+
+    expect(element.srcObject?.getAudioTracks()).toEqual([remote]);
+
+    remote.emitEnded();
+    await vi.waitFor(() => expect(element.srcObject).toBeNull());
+  });
+
+  it('removes every remote ended listener when the peer tracks are cleared', async () => {
+    const element = audioElement();
+    const playback = createAudioOutput({
+      createElement: () => element,
+      createMediaStream: (tracks) => stream([...tracks]),
+    });
+    const mic = eventfulAudioTrack();
+    const desktop = eventfulAudioTrack();
+    Object.defineProperty(mic, 'id', { value: 'remote-mic' });
+    Object.defineProperty(desktop, 'id', { value: 'remote-desktop' });
+
+    await playback.attach(mic);
+    await playback.attach(desktop);
+    const micEndedListener = (
+      mic.addEventListener as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0]?.[1];
+    const desktopEndedListener = (
+      desktop.addEventListener as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[0]?.[1];
+
+    playback.clearRemoteTracks();
+
+    expect(mic.removeEventListener).toHaveBeenCalledWith(
+      'ended',
+      micEndedListener,
+    );
+    expect(desktop.removeEventListener).toHaveBeenCalledWith(
+      'ended',
+      desktopEndedListener,
+    );
+    expect(element.pause).toHaveBeenCalledOnce();
+    expect(element.srcObject).toBeNull();
+  });
+
   it('degrades output selection without interrupting playback when setSinkId is unavailable', async () => {
     const element = audioElement(false);
     const voice = createVoiceController({

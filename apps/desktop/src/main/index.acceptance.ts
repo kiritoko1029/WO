@@ -69,8 +69,11 @@ declare const __WO_ACCEPTANCE_CA_CERTIFICATE__: string;
 const applicationId = 'cn.wo.desktop.acceptance';
 const audioFile = process.env.WO_ACCEPTANCE_AUDIO_FILE;
 const userDataDirectory = process.env.WO_ACCEPTANCE_USER_DATA_DIR;
+// Keep the automated picker deterministic while exposing the explicit
+// loopback-audio toggle used by media acceptance. Physical native-picker
+// certification opts in separately and uses the real host release.
 const acceptancePlatformRelease =
-  process.env.WO_ACCEPTANCE_USE_SYSTEM_PICKER === '1' ? release() : '0';
+  process.env.WO_ACCEPTANCE_USE_SYSTEM_PICKER === '1' ? release() : '23.2.0';
 let apiEndpoint: URL;
 try {
   apiEndpoint = new URL(process.env.WO_API_ORIGIN ?? '');

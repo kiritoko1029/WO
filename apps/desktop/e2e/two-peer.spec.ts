@@ -540,10 +540,16 @@ async function proveNoiseIntensitySwitching(
 async function startMotionShare(
   page: Page,
   motionTitle: string,
+  systemAudio = false,
 ): Promise<void> {
   await page.getByRole('button', { name: '共享屏幕' }).click();
   const dialog = page.getByRole('dialog', { name: '选择共享内容' });
   await expect(dialog).toBeVisible();
+  if (systemAudio) {
+    const toggle = dialog.getByRole('checkbox', { name: /共享系统音频/u });
+    await toggle.check();
+    await expect(toggle).toBeChecked();
+  }
   const source = dialog.getByRole('button', {
     name: `${motionTitle}，窗口`,
     exact: true,
@@ -571,12 +577,125 @@ async function startMotionShare(
   }
 }
 
-async function proveScreenAndBitrates(pair: AcceptancePair): Promise<void> {
-  await startMotionShare(pair.first.page, pair.motionTitle);
+async function proveRemoteAudioTrackIsolation(pair: AcceptancePair) {
+  const firstWithBoth = await waitForPeer(
+    pair.first.page,
+    (peer, snapshot) =>
+      snapshot.capture.audioTracks === 1 &&
+      peer.connectionState === 'connected' &&
+      peer.packetsSentAudio > 5 &&
+      peer.framesSentVideo > 5 &&
+      peer.localAudioEnergy > 0,
+  );
+  const secondWithBoth = await waitForPeer(
+    pair.second.page,
+    (peer) =>
+      peer.connectionState === 'connected' &&
+      peer.liveRemoteAudioTracks === 2 &&
+      peer.packetsReceivedAudio > 5 &&
+      peer.framesReceivedVideo > 5 &&
+      peer.inboundAudioEnergy > 0,
+  );
+  const firstNegotiations = firstWithBoth.offers + firstWithBoth.answers;
+  const secondNegotiations = secondWithBoth.offers + secondWithBoth.answers;
+
+  const stoppedMicrophone = await pair.first.page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { stopLocalMicrophoneTrack(): number };
+      }
+    ).woAcceptanceControl.stopLocalMicrophoneTrack(),
+  );
+  expect(stoppedMicrophone).toBe(1);
+  const microphoneEnded =
+    pair.first.page.getByText('麦克风已断开，请检查权限或设备后重试');
+  await expect(microphoneEnded).toBeVisible();
+  const firstSystemOnly = await waitForPeer(
+    pair.first.page,
+    (peer) =>
+      peer.id === firstWithBoth.id &&
+      peer.offers + peer.answers === firstNegotiations &&
+      peer.packetsSentAudio > firstWithBoth.packetsSentAudio &&
+      peer.framesSentVideo > firstWithBoth.framesSentVideo &&
+      peer.localAudioEnergy > 0,
+  );
+  const secondSystemOnly = await waitForPeer(
+    pair.second.page,
+    (peer) =>
+      peer.id === secondWithBoth.id &&
+      peer.offers + peer.answers === secondNegotiations &&
+      peer.liveRemoteAudioTracks >= 1 &&
+      peer.packetsReceivedAudio > secondWithBoth.packetsReceivedAudio &&
+      peer.bytesReceivedAudio > secondWithBoth.bytesReceivedAudio &&
+      peer.framesReceivedVideo > secondWithBoth.framesReceivedVideo &&
+      peer.inboundAudioEnergy > 0,
+  );
+
+  await pair.first.page.getByRole('button', { name: '重试麦克风' }).click();
+  await expect(microphoneEnded).toHaveCount(0);
+  const firstRestored = await waitForPeer(
+    pair.first.page,
+    (peer) =>
+      peer.id === firstWithBoth.id &&
+      peer.offers + peer.answers === firstNegotiations &&
+      peer.packetsSentAudio > firstSystemOnly.packetsSentAudio,
+  );
+  const secondRestored = await waitForPeer(
+    pair.second.page,
+    (peer) =>
+      peer.id === secondWithBoth.id &&
+      peer.offers + peer.answers === secondNegotiations &&
+      peer.liveRemoteAudioTracks === 2 &&
+      peer.packetsReceivedAudio > secondSystemOnly.packetsReceivedAudio,
+  );
+
+  const stoppedSystemAudio = await pair.first.page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { stopLocalSystemAudioTrack(): number };
+      }
+    ).woAcceptanceControl.stopLocalSystemAudioTrack(),
+  );
+  expect(stoppedSystemAudio).toBe(1);
+  await expect(pair.first.page.getByLabel('屏幕共享状态')).toBeVisible();
+  const firstMicrophoneOnly = await waitForPeer(
+    pair.first.page,
+    (peer) =>
+      peer.id === firstWithBoth.id &&
+      peer.offers + peer.answers === firstNegotiations &&
+      peer.packetsSentAudio > firstRestored.packetsSentAudio &&
+      peer.framesSentVideo > firstRestored.framesSentVideo &&
+      peer.localAudioEnergy > 0,
+  );
+  const secondMicrophoneOnly = await waitForPeer(
+    pair.second.page,
+    (peer) =>
+      peer.id === secondWithBoth.id &&
+      peer.offers + peer.answers === secondNegotiations &&
+      peer.liveRemoteAudioTracks >= 1 &&
+      peer.packetsReceivedAudio > secondRestored.packetsReceivedAudio &&
+      peer.bytesReceivedAudio > secondRestored.bytesReceivedAudio &&
+      peer.framesReceivedVideo > secondRestored.framesReceivedVideo &&
+      peer.inboundAudioEnergy > 0,
+  );
+
+  return {
+    firstWithBoth,
+    secondWithBoth,
+    firstSystemOnly,
+    secondSystemOnly,
+    firstMicrophoneOnly,
+    secondMicrophoneOnly,
+  };
+}
+
+async function proveScreenAndBitrates(pair: AcceptancePair) {
+  await startMotionShare(pair.first.page, pair.motionTitle, true);
   const remoteVideo = pair.second.page.locator(
     'video[aria-label$="的共享屏幕"]',
   );
   await expect(remoteVideo).toBeVisible({ timeout: 45_000 });
+  const remoteAudioIsolation = await proveRemoteAudioTrackIsolation(pair);
   const initial = await waitForPeer(
     pair.first.page,
     (peer) =>
@@ -642,6 +761,7 @@ async function proveScreenAndBitrates(pair: AcceptancePair): Promise<void> {
   await expect(
     pair.first.page.locator('video[aria-label$="的共享屏幕"]'),
   ).toHaveCount(0, { timeout: 30_000 });
+  return remoteAudioIsolation;
 }
 
 async function proveSignalingRecovery(pair: AcceptancePair): Promise<void> {
@@ -728,7 +848,11 @@ for (const policy of ['all', 'relay'] as const) {
       expect(second.remoteIceType).not.toBe('relay');
     }
 
-    await proveScreenAndBitrates(pair);
+    const remoteAudioIsolation = await proveScreenAndBitrates(pair);
+    await test.info().attach(`v07-remote-audio-isolation-${policy}.json`, {
+      body: JSON.stringify(remoteAudioIsolation, null, 2),
+      contentType: 'application/json',
+    });
     await proveSignalingRecovery(pair);
 
     await pair.second.close();

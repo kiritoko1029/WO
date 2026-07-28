@@ -53,6 +53,7 @@ declare global {
       resetRnnoiseCallbackGap(): number;
       stopLocalMicrophoneTrack(): number;
       stopLocalScreenTrack(): number;
+      stopLocalSystemAudioTrack(): number;
     }>;
   }
 }
@@ -65,6 +66,7 @@ let reportSequence = 0;
 let signalingDrops = 0;
 let microphoneDenials = 0;
 const liveMicrophoneTracks = new Set<MediaStreamTrack>();
+const liveSystemAudioTracks = new Set<MediaStreamTrack>();
 const captureDiagnostic = {
   attempts: 0,
   successes: 0,
@@ -314,6 +316,43 @@ function installWebSocketProbe(): void {
   window.WebSocket = AcceptanceWebSocket;
 }
 
+async function createAcceptanceAudioTrack(
+  activeTracks: Set<MediaStreamTrack>,
+): Promise<MediaStreamTrack> {
+  const context = new AudioContext({ sampleRate: 48_000 });
+  const source = context.createBufferSource();
+  const destination = context.createMediaStreamDestination();
+  try {
+    const wav = await window.woAcceptance.audioWav();
+    source.buffer = await context.decodeAudioData(wav.slice(0));
+    source.loop = true;
+    source.connect(destination);
+    source.start();
+    await context.resume();
+  } catch (error) {
+    await context.close().catch(() => undefined);
+    throw error;
+  }
+  const track = destination.stream.getAudioTracks()[0];
+  if (track === undefined) {
+    source.stop();
+    await context.close();
+    throw new Error('Acceptance audio track is unavailable');
+  }
+  const stop = track.stop.bind(track);
+  let stopped = false;
+  activeTracks.add(track);
+  track.stop = () => {
+    if (stopped) return;
+    stopped = true;
+    activeTracks.delete(track);
+    stop();
+    source.stop();
+    void context.close();
+  };
+  return track;
+}
+
 function installDisplayCaptureProbe(): void {
   const mediaDevices = navigator.mediaDevices;
   const getDisplayMedia = mediaDevices.getDisplayMedia.bind(mediaDevices);
@@ -322,8 +361,22 @@ function installDisplayCaptureProbe(): void {
     value: async (constraints?: DisplayMediaStreamOptions) => {
       captureDiagnostic.attempts += 1;
       captureDiagnostic.lastName = '';
+      let stream: MediaStream | null = null;
       try {
-        const stream = await getDisplayMedia(constraints);
+        const audioRequested =
+          constraints?.audio !== undefined && constraints.audio !== false;
+        stream = await getDisplayMedia(
+          audioRequested ? { ...constraints, audio: false } : constraints,
+        );
+        if (audioRequested) {
+          for (const capturedAudio of stream.getAudioTracks()) {
+            stream.removeTrack(capturedAudio);
+            capturedAudio.stop();
+          }
+          stream.addTrack(
+            await createAcceptanceAudioTrack(liveSystemAudioTracks),
+          );
+        }
         const videoTrack = stream.getVideoTracks()[0];
         const settings = videoTrack?.getSettings();
         captureDiagnostic.successes += 1;
@@ -336,6 +389,7 @@ function installDisplayCaptureProbe(): void {
         window.woAcceptance.report(snapshot());
         return stream;
       } catch (error) {
+        for (const track of stream?.getTracks() ?? []) track.stop();
         captureDiagnostic.lastName =
           error instanceof DOMException ? error.name : 'Error';
         window.woAcceptance.report(snapshot());
@@ -363,38 +417,7 @@ function installAudioFixture(): void {
           'NotAllowedError',
         );
       }
-
-      const context = new AudioContext({ sampleRate: 48_000 });
-      const source = context.createBufferSource();
-      const destination = context.createMediaStreamDestination();
-      try {
-        const wav = await window.woAcceptance.audioWav();
-        source.buffer = await context.decodeAudioData(wav.slice(0));
-        source.loop = true;
-        source.connect(destination);
-        source.start();
-        await context.resume();
-      } catch (error) {
-        await context.close().catch(() => undefined);
-        throw error;
-      }
-      const track = destination.stream.getAudioTracks()[0];
-      if (track === undefined) {
-        source.stop();
-        await context.close();
-        throw new Error('Acceptance audio track is unavailable');
-      }
-      const stop = track.stop.bind(track);
-      let stopped = false;
-      liveMicrophoneTracks.add(track);
-      track.stop = () => {
-        if (stopped) return;
-        stopped = true;
-        liveMicrophoneTracks.delete(track);
-        stop();
-        source.stop();
-        void context.close();
-      };
+      const track = await createAcceptanceAudioTrack(liveMicrophoneTracks);
       return new MediaStream([track]);
     },
   });
@@ -507,6 +530,16 @@ Object.defineProperty(window, 'woAcceptanceControl', {
             stopped += 1;
           }
         }
+      }
+      return stopped;
+    },
+    stopLocalSystemAudioTrack: () => {
+      let stopped = 0;
+      for (const track of [...liveSystemAudioTracks]) {
+        if (track.readyState !== 'live') continue;
+        track.stop();
+        track.dispatchEvent(new Event('ended'));
+        stopped += 1;
       }
       return stopped;
     },
