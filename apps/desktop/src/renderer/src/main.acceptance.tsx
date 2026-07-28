@@ -48,7 +48,9 @@ declare global {
   interface Window {
     readonly woAcceptance: AcceptanceBridge;
     readonly woAcceptanceControl: Readonly<{
+      denyNextMicrophoneCapture(): number;
       dropSignaling(): number;
+      stopLocalMicrophoneTrack(): number;
       stopLocalScreenTrack(): number;
     }>;
   }
@@ -60,6 +62,8 @@ let peerSequence = 0;
 let socketSequence = 0;
 let reportSequence = 0;
 let signalingDrops = 0;
+let microphoneDenials = 0;
+const liveMicrophoneTracks = new Set<MediaStreamTrack>();
 const captureDiagnostic = {
   attempts: 0,
   successes: 0,
@@ -348,6 +352,13 @@ function installAudioFixture(): void {
       const videoRequested =
         constraints?.video !== undefined && constraints.video !== false;
       if (!audioRequested || videoRequested) return getUserMedia(constraints);
+      if (microphoneDenials > 0) {
+        microphoneDenials -= 1;
+        throw new DOMException(
+          'Acceptance microphone permission denied',
+          'NotAllowedError',
+        );
+      }
 
       const context = new AudioContext({ sampleRate: 48_000 });
       const source = context.createBufferSource();
@@ -371,9 +382,11 @@ function installAudioFixture(): void {
       }
       const stop = track.stop.bind(track);
       let stopped = false;
+      liveMicrophoneTracks.add(track);
       track.stop = () => {
         if (stopped) return;
         stopped = true;
+        liveMicrophoneTracks.delete(track);
         stop();
         source.stop();
         void context.close();
@@ -438,6 +451,10 @@ Object.defineProperty(window, 'woAcceptanceControl', {
   enumerable: false,
   writable: false,
   value: Object.freeze({
+    denyNextMicrophoneCapture: () => {
+      microphoneDenials += 1;
+      return microphoneDenials;
+    },
     dropSignaling: () => {
       let closed = 0;
       for (const socket of signalingSockets.keys()) {
@@ -448,6 +465,16 @@ Object.defineProperty(window, 'woAcceptanceControl', {
       }
       signalingDrops += closed;
       return closed;
+    },
+    stopLocalMicrophoneTrack: () => {
+      let stopped = 0;
+      for (const track of [...liveMicrophoneTracks]) {
+        if (track.readyState !== 'live') continue;
+        track.stop();
+        track.dispatchEvent(new Event('ended'));
+        stopped += 1;
+      }
+      return stopped;
     },
     stopLocalScreenTrack: () => {
       let stopped = 0;

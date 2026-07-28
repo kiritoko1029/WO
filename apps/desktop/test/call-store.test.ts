@@ -947,6 +947,170 @@ describe('realtime room gateway', () => {
     expect(call.getSnapshot().status).toBe('waiting');
   });
 
+  it('settles an established transport after microphone permission retry', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.joinRoom('access-token', '123456');
+    const microphone = audioTrack();
+    const mediaDevices = {
+      getUserMedia: vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+        )
+        .mockResolvedValueOnce(mediaStream(microphone)),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
+    } as unknown as MediaDevices;
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    await expect(call.start()).rejects.toMatchObject({
+      code: 'MICROPHONE_PERMISSION_DENIED',
+    });
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'offer-while-microphone-denied' as never,
+      type: 'webrtc.offer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'microphone-retry-negotiation' as never,
+        connectionEpoch: 10,
+        description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      },
+    });
+    await vi.waitFor(() => expect(peer.pc.createAnswer).toHaveBeenCalledOnce());
+    peer.pc.connectionState = 'connected';
+    peer.pc.iceConnectionState = 'connected';
+    peer.pc.emit('connectionstatechange', {});
+    expect(call.getSnapshot().status).toBe('error');
+
+    await expect(call.start()).resolves.toBeUndefined();
+
+    expect(peer.factory).toHaveBeenCalledOnce();
+    expect(peer.pc.createAnswer).toHaveBeenCalledOnce();
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'connected',
+      error: null,
+      microphoneRetryAvailable: false,
+    });
+    await call.cleanup();
+  });
+
+  it('recovers an ended microphone on the existing peer connection', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const initialMicrophone = audioTrack();
+    const replacementMicrophone = audioTrack();
+    const mediaDevices = {
+      getUserMedia: vi
+        .fn()
+        .mockResolvedValueOnce(mediaStream(initialMicrophone))
+        .mockResolvedValueOnce(mediaStream(replacementMicrophone)),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
+    } as unknown as MediaDevices;
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    await call.start();
+
+    initialMicrophone.emitEnded();
+
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'error',
+      error: '麦克风已断开，请检查权限或设备后重试',
+      microphoneRetryAvailable: true,
+      rnnoiseActive: false,
+    });
+    await vi.waitFor(() =>
+      expect(
+        peer.transceivers[0]!.sender.replaceTrack,
+      ).toHaveBeenLastCalledWith(null),
+    );
+
+    await expect(call.start()).resolves.toBeUndefined();
+
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(peer.factory).toHaveBeenCalledOnce();
+    expect(peer.transceivers[0]!.sender.replaceTrack).toHaveBeenLastCalledWith(
+      replacementMicrophone,
+    );
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'waiting',
+      error: null,
+      microphoneRetryAvailable: false,
+    });
+    await call.cleanup();
+  });
+
+  it('rejects an initial start when the microphone ends during device enumeration', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const initialMicrophone = audioTrack();
+    const replacementMicrophone = audioTrack();
+    const enumeration = deferred<MediaDeviceInfo[]>();
+    const enumerateDevices = vi
+      .fn()
+      .mockReturnValueOnce(enumeration.promise)
+      .mockResolvedValueOnce([]);
+    const mediaDevices = {
+      getUserMedia: vi
+        .fn()
+        .mockResolvedValueOnce(mediaStream(initialMicrophone))
+        .mockResolvedValueOnce(mediaStream(replacementMicrophone)),
+      enumerateDevices,
+    } as unknown as MediaDevices;
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    const starting = call.start();
+    await vi.waitFor(() => expect(enumerateDevices).toHaveBeenCalledOnce());
+
+    initialMicrophone.emitEnded();
+    enumeration.resolve([]);
+
+    await expect(starting).rejects.toMatchObject({
+      code: 'MICROPHONE_CAPTURE_ENDED',
+    });
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'error',
+      microphoneRetryAvailable: true,
+    });
+    await expect(call.start()).resolves.toBeUndefined();
+    expect(peer.factory).toHaveBeenCalledOnce();
+    expect(call.getSnapshot()).toMatchObject({
+      status: 'waiting',
+      error: null,
+      microphoneRetryAvailable: false,
+    });
+    await call.cleanup();
+  });
+
   it('keeps a failed call failed when a stale peer-left event arrives', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
@@ -3630,12 +3794,19 @@ describe('realtime room gateway', () => {
     peer.pc.getStats.mockResolvedValue(
       new Map([
         [
+          'transport',
+          {
+            id: 'transport',
+            type: 'transport',
+            selectedCandidatePairId: 'pair',
+          },
+        ],
+        [
           'pair',
           {
             id: 'pair',
             type: 'candidate-pair',
             state: 'succeeded',
-            selected: true,
             localCandidateId: 'local',
           },
         ],

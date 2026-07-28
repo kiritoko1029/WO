@@ -10,7 +10,9 @@ import {
 import type { AudioOutput } from './audio-output.js';
 
 export type VoiceControllerErrorCode =
-  'MICROPHONE_PERMISSION_DENIED' | 'MICROPHONE_CAPTURE_INVALID';
+  | 'MICROPHONE_PERMISSION_DENIED'
+  | 'MICROPHONE_CAPTURE_INVALID'
+  | 'MICROPHONE_CAPTURE_ENDED';
 
 export class VoiceControllerError extends Error {
   readonly code: VoiceControllerErrorCode;
@@ -37,6 +39,7 @@ export interface VoiceControllerOptions {
   readonly audioOutput: AudioOutput;
   readonly initialNoiseIntensity?: NoiseIntensity;
   readonly initialMicrophoneVolume?: number;
+  readonly onMicrophoneEnded?: (error: VoiceControllerError) => void;
   /** Injectable for tests; defaults to `new AudioContext()`. */
   readonly createAudioContext?: () => AudioContext;
   /** Injectable RNNoise loader for tests. */
@@ -188,6 +191,7 @@ export function createVoiceController(
   let cleaned = false;
   let senderMutationChain = Promise.resolve();
   const uncommittedStreams = new Set<MediaStream>();
+  let removeRawTrackEndedListener: (() => void) | null = null;
 
   const stopUncommittedStreams = (): void => {
     for (const stream of uncommittedStreams) stopTracks(stream);
@@ -208,6 +212,42 @@ export function createVoiceController(
       () => undefined,
     );
     return result;
+  };
+
+  const clearRawTrackEndedListener = (): void => {
+    removeRawTrackEndedListener?.();
+    removeRawTrackEndedListener = null;
+  };
+
+  const watchRawTrackEnded = (track: MediaStreamTrack): void => {
+    clearRawTrackEndedListener();
+    const onEnded = (): void => {
+      if (cleaned || rawMicrophoneTrack !== track) return;
+      clearRawTrackEndedListener();
+      const stream = localStream;
+      const pipeline = outboundPipeline;
+      localStream = null;
+      rawMicrophoneTrack = null;
+      microphoneTrack = null;
+      outboundPipeline = null;
+      rnnoiseActive = false;
+      pipeline?.dispose();
+      if (stream !== null) stopTracks(stream);
+      const sender = audioSender;
+      if (sender !== null) {
+        void mutateSender(async () => {
+          if (rawMicrophoneTrack !== null) return;
+          await sender.replaceTrack(null);
+        }).catch(() => undefined);
+      }
+      options.onMicrophoneEnded?.(
+        new VoiceControllerError('MICROPHONE_CAPTURE_ENDED'),
+      );
+    };
+    track.addEventListener('ended', onEnded, { once: true });
+    removeRawTrackEndedListener = () => {
+      track.removeEventListener('ended', onEnded);
+    };
   };
 
   const isCurrentOperation = (operation: number): boolean =>
@@ -290,6 +330,7 @@ export function createVoiceController(
       }
     },
     () => {
+      clearRawTrackEndedListener();
       disposeOutbound();
       const stream = localStream;
       localStream = null;
@@ -432,6 +473,7 @@ export function createVoiceController(
       outboundPipeline = built.pipeline;
       rnnoiseActive = built.usedRnnoise;
       audioSender = sender ?? null;
+      watchRawTrackEnded(built.rawTrack);
       applyMutedToTracks();
       return built.outboundTrack;
     },
@@ -489,11 +531,13 @@ export function createVoiceController(
           }
           previous.stream = localStream;
           previous.pipeline = outboundPipeline;
+          clearRawTrackEndedListener();
           localStream = built.stream;
           rawMicrophoneTrack = built.rawTrack;
           microphoneTrack = built.outboundTrack;
           outboundPipeline = built.pipeline;
           rnnoiseActive = built.usedRnnoise;
+          watchRawTrackEnded(built.rawTrack);
           applyMutedToTracks();
         });
       } catch (error) {

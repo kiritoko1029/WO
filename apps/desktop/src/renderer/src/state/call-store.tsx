@@ -72,6 +72,7 @@ import {
 import {
   createVoiceController,
   readMicrophoneVolume,
+  VoiceControllerError,
   writeMicrophoneVolume,
   type VoiceController,
   type VoiceDevice,
@@ -652,6 +653,14 @@ function callErrorMessage(error: unknown): string {
   ) {
     return '需要麦克风权限才能加入语音';
   }
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'MICROPHONE_CAPTURE_ENDED'
+  ) {
+    return '麦克风已断开，请检查权限或设备后重试';
+  }
   return '语音连接失败，请重试';
 }
 
@@ -661,7 +670,8 @@ function isMicrophoneError(error: unknown): boolean {
     error !== null &&
     'code' in error &&
     (error.code === 'MICROPHONE_PERMISSION_DENIED' ||
-      error.code === 'MICROPHONE_CAPTURE_INVALID')
+      error.code === 'MICROPHONE_CAPTURE_INVALID' ||
+      error.code === 'MICROPHONE_CAPTURE_ENDED')
   );
 }
 
@@ -681,12 +691,21 @@ function selectedPairUsesRelay(stats: RTCStatsReport): boolean {
     (report): report is Record<string, unknown> =>
       typeof report === 'object' && report !== null,
   );
-  const pair = records.find(
+  const transport = records.find(
     (report) =>
-      report.type === 'candidate-pair' &&
-      report.state === 'succeeded' &&
-      (report.selected === true || report.nominated === true),
+      report.type === 'transport' &&
+      typeof report.selectedCandidatePairId === 'string',
   );
+  const pair =
+    records.find(
+      (report) => report.id === transport?.selectedCandidatePairId,
+    ) ??
+    records.find(
+      (report) =>
+        report.type === 'candidate-pair' &&
+        report.state === 'succeeded' &&
+        (report.selected === true || report.nominated === true),
+    );
   if (pair === undefined || typeof pair.localCandidateId !== 'string') {
     return false;
   }
@@ -1492,6 +1511,20 @@ export function createCallController(
       audioOutput,
       initialNoiseIntensity: readNoiseIntensity(),
       initialMicrophoneVolume: readMicrophoneVolume(),
+      onMicrophoneEnded: (error) => {
+        if (closed) return;
+        microphoneAcquired = false;
+        startPromise = null;
+        pendingMicrophoneRetryDeviceId = null;
+        dispatchCall(
+          { type: 'fail' },
+          {
+            error: callErrorMessage(error),
+            microphoneRetryAvailable: true,
+            rnnoiseActive: false,
+          },
+        );
+      },
     });
     voice.setMuted(snapshot.muted);
     voice.setOutputMuted(snapshot.outputMuted);
@@ -2152,6 +2185,9 @@ export function createCallController(
             const initialSender = peer!.audioSender;
             await voice!.start(initialSender ?? undefined);
             assertCurrentLifecycle(generation);
+            if (voice!.microphoneTrack === null) {
+              throw new VoiceControllerError('MICROPHONE_CAPTURE_ENDED');
+            }
             microphoneAcquired = true;
             const currentSender = peer!.audioSender;
             if (initialSender === null && currentSender !== null) {
@@ -2178,6 +2214,10 @@ export function createCallController(
             assertCurrentLifecycle(generation);
             update({ supportsOutputSelection: voice!.supportsOutputSelection });
           }
+          if (!microphoneAcquired || voice!.microphoneTrack === null) {
+            throw new VoiceControllerError('MICROPHONE_CAPTURE_ENDED');
+          }
+          settleCallPhase();
         } catch (error) {
           startPromise = null;
           assertCurrentLifecycle(generation);

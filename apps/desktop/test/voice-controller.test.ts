@@ -44,6 +44,39 @@ function track(kind: 'audio' | 'video' = 'audio') {
   } as unknown as MediaStreamTrack;
 }
 
+function eventfulAudioTrack() {
+  const listeners = new Set<EventListenerOrEventListenerObject>();
+  let readyState: MediaStreamTrackState = 'live';
+  return {
+    kind: 'audio',
+    enabled: true,
+    get readyState() {
+      return readyState;
+    },
+    stop: vi.fn(() => {
+      readyState = 'ended';
+    }),
+    addEventListener: vi.fn(
+      (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (type === 'ended' && listener !== null) listeners.add(listener);
+      },
+    ),
+    removeEventListener: vi.fn(
+      (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (type === 'ended' && listener !== null) listeners.delete(listener);
+      },
+    ),
+    emitEnded() {
+      readyState = 'ended';
+      const event = new Event('ended');
+      for (const listener of [...listeners]) {
+        if (typeof listener === 'function') listener(event);
+        else listener.handleEvent(event);
+      }
+    },
+  } as unknown as MediaStreamTrack & { emitEnded(): void };
+}
+
 function stream(tracks: MediaStreamTrack[]) {
   return {
     getTracks: () => tracks,
@@ -157,6 +190,100 @@ describe('voice capture and playback', () => {
     });
     expect(first.stop).toHaveBeenCalledOnce();
     expect(second.stop).toHaveBeenCalledOnce();
+  });
+
+  it('detaches an unexpectedly ended microphone and allows capture retry', async () => {
+    const microphone = eventfulAudioTrack();
+    const replacement = eventfulAudioTrack();
+    const audioSender = sender();
+    const onMicrophoneEnded = vi.fn();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([microphone]))
+          .mockResolvedValueOnce(stream([replacement])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      onMicrophoneEnded,
+    });
+    await voice.start(audioSender);
+
+    microphone.emitEnded();
+
+    expect(onMicrophoneEnded).toHaveBeenCalledOnce();
+    expect(onMicrophoneEnded).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'MICROPHONE_CAPTURE_ENDED' }),
+    );
+    expect(voice.microphoneTrack).toBeNull();
+    await vi.waitFor(() =>
+      expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(null),
+    );
+
+    await expect(voice.start(audioSender)).resolves.toBe(replacement);
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(replacement);
+    expect(voice.microphoneTrack).toBe(replacement);
+  });
+
+  it('does not report intentional microphone replacement or cleanup as an ended capture', async () => {
+    const first = eventfulAudioTrack();
+    const second = eventfulAudioTrack();
+    const onMicrophoneEnded = vi.fn();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([first]))
+          .mockResolvedValueOnce(stream([second])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      onMicrophoneEnded,
+    });
+    await voice.start(sender());
+
+    await voice.switchMicrophone('device-2');
+    first.emitEnded();
+    await voice.cleanup();
+    second.emitEnded();
+
+    expect(onMicrophoneEnded).not.toHaveBeenCalled();
+  });
+
+  it('does not detach a replacement committed while the old microphone ends', async () => {
+    const first = eventfulAudioTrack();
+    const second = eventfulAudioTrack();
+    const replacement = deferred<void>();
+    const audioSender = sender();
+    audioSender.replaceTrack
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(replacement.promise);
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([first]))
+          .mockResolvedValueOnce(stream([second])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      onMicrophoneEnded: vi.fn(),
+    });
+    await voice.start(audioSender);
+    const switching = voice.switchMicrophone('device-2');
+    await vi.waitFor(() =>
+      expect(audioSender.replaceTrack).toHaveBeenCalledWith(second),
+    );
+
+    first.emitEnded();
+    replacement.resolve();
+    await switching;
+    await Promise.resolve();
+
+    expect(voice.microphoneTrack).toBe(second);
+    expect(audioSender.replaceTrack).toHaveBeenCalledTimes(2);
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(second);
   });
 
   it('mutes locally and hot-swaps the microphone without renegotiation', async () => {

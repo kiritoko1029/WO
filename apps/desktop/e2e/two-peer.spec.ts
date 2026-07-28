@@ -153,12 +153,67 @@ async function proveCameraRequestRejected(page: Page): Promise<void> {
   expect(result).toBe('NotAllowedError');
 }
 
-async function connectRoom(pair: AcceptancePair): Promise<void> {
+async function denyNextMicrophoneCapture(page: Page): Promise<void> {
+  const pending = await page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { denyNextMicrophoneCapture(): number };
+      }
+    ).woAcceptanceControl.denyNextMicrophoneCapture(),
+  );
+  expect(pending).toBe(1);
+}
+
+async function connectRoom(
+  pair: AcceptancePair,
+  retryFirstMicrophone: boolean,
+): Promise<void> {
+  if (retryFirstMicrophone) {
+    await denyNextMicrophoneCapture(pair.first.page);
+  }
   await pair.first.page.getByRole('button', { name: '创建房间' }).click();
   const code = pair.first.page.locator('.room-header code');
   await expect(code).toHaveText(/^\d{6}$/u);
   await pair.second.page.getByLabel('房间码').fill(await code.innerText());
   await pair.second.page.getByRole('button', { name: '加入房间' }).click();
+
+  if (retryFirstMicrophone) {
+    const permissionError =
+      pair.first.page.getByText('需要麦克风权限才能加入语音');
+    const retry = pair.first.page.getByRole('button', {
+      name: '重试麦克风',
+    });
+    await expect(permissionError).toBeVisible();
+    await expect(retry).toBeVisible();
+    const firstBefore = await waitForPeer(
+      pair.first.page,
+      (peer) => peer.connectionState === 'connected',
+    );
+    const secondBefore = await waitForPeer(
+      pair.second.page,
+      (peer) => peer.connectionState === 'connected',
+    );
+    const firstNegotiations = firstBefore.offers + firstBefore.answers;
+    const secondNegotiations = secondBefore.offers + secondBefore.answers;
+
+    await retry.click();
+
+    await expect(permissionError).toHaveCount(0);
+    await waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstBefore.id &&
+        peer.offers + peer.answers === firstNegotiations &&
+        peer.packetsSentAudio > firstBefore.packetsSentAudio,
+    );
+    await waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondBefore.id &&
+        peer.offers + peer.answers === secondNegotiations &&
+        peer.packetsReceivedAudio > secondBefore.packetsReceivedAudio,
+    );
+  }
 
   const connected = /语音已连接/u;
   await expect(pair.first.page.getByText(connected)).toBeVisible({
@@ -167,6 +222,56 @@ async function connectRoom(pair: AcceptancePair): Promise<void> {
   await expect(pair.second.page.getByText(connected)).toBeVisible({
     timeout: 45_000,
   });
+}
+
+async function proveMicrophoneRevocationRecovery(
+  pair: AcceptancePair,
+): Promise<void> {
+  const firstBefore = await waitForPeer(
+    pair.first.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+  const secondBefore = await waitForPeer(
+    pair.second.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+  const firstNegotiations = firstBefore.offers + firstBefore.answers;
+  const secondNegotiations = secondBefore.offers + secondBefore.answers;
+  const stopped = await pair.first.page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { stopLocalMicrophoneTrack(): number };
+      }
+    ).woAcceptanceControl.stopLocalMicrophoneTrack(),
+  );
+  expect(stopped).toBe(1);
+
+  const endedError =
+    pair.first.page.getByText('麦克风已断开，请检查权限或设备后重试');
+  const retry = pair.first.page.getByRole('button', {
+    name: '重试麦克风',
+  });
+  await expect(endedError).toBeVisible();
+  await expect(retry).toBeVisible();
+  await retry.click();
+
+  await expect(endedError).toHaveCount(0);
+  await waitForPeer(
+    pair.first.page,
+    (peer) =>
+      peer.id === firstBefore.id &&
+      peer.offers + peer.answers === firstNegotiations &&
+      peer.packetsSentAudio > firstBefore.packetsSentAudio &&
+      peer.packetsReceivedAudio > firstBefore.packetsReceivedAudio,
+  );
+  await waitForPeer(
+    pair.second.page,
+    (peer) =>
+      peer.id === secondBefore.id &&
+      peer.offers + peer.answers === secondNegotiations &&
+      peer.packetsSentAudio > secondBefore.packetsSentAudio &&
+      peer.packetsReceivedAudio > secondBefore.packetsReceivedAudio,
+  );
 }
 
 async function proveBidirectionalAudio(pair: AcceptancePair): Promise<void> {
@@ -370,8 +475,11 @@ for (const policy of ['all', 'relay'] as const) {
         `bob-${policy}-${run}@e2e.invalid`,
       ),
     ]);
-    await connectRoom(pair);
+    await connectRoom(pair, policy === 'all');
     await proveBidirectionalAudio(pair);
+    if (policy === 'all') {
+      await proveMicrophoneRevocationRecovery(pair);
+    }
 
     const first = await waitForPeer(pair.first.page, () => true);
     const second = await waitForPeer(pair.second.page, () => true);
