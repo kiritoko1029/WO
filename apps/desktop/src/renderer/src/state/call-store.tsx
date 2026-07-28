@@ -587,6 +587,7 @@ export interface CallSnapshot {
   readonly screenSystemAudioEnabled: boolean;
   readonly screenCaptureSettings: ScreenCaptureSettings | null;
   readonly screenError: string | null;
+  readonly screenPermissionError: boolean;
   readonly screenOwner: Readonly<{
     userId: string;
     displayName: string;
@@ -661,6 +662,16 @@ function isMicrophoneError(error: unknown): boolean {
     'code' in error &&
     (error.code === 'MICROPHONE_PERMISSION_DENIED' ||
       error.code === 'MICROPHONE_CAPTURE_INVALID')
+  );
+}
+
+function isScreenPermissionError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  if ('name' in error && error.name === 'NotAllowedError') return true;
+  return (
+    'code' in error &&
+    typeof error.code === 'string' &&
+    error.code === 'SCREEN_PERMISSION_DENIED'
   );
 }
 
@@ -751,6 +762,7 @@ export function createCallController(
     screenSystemAudioEnabled: false,
     screenCaptureSettings: null,
     screenError: null,
+    screenPermissionError: false,
     screenOwner: initialScreenOwner,
     screenOwnerLeaseId: callSession.screen.leaseId,
     localScreenTrack: null,
@@ -2259,6 +2271,7 @@ export function createCallController(
           code: 'SCREEN_SHARE_BUSY',
         });
       }
+      update({ screenPermissionError: false });
       let permission: ScreenPermissionSnapshot;
       try {
         permission = await options.gateway.desktop.capture.permission();
@@ -2270,8 +2283,9 @@ export function createCallController(
       assertCurrentLifecycle(generation);
       update({ screenPermission: permission });
       if (
-        permission.status === 'denied' ||
-        permission.status === 'restricted'
+        permission.status === 'restricted' ||
+        (permission.status === 'denied' &&
+          permission.systemAudioMode !== 'native-picker')
       ) {
         const error = Object.assign(
           new Error('Screen capture is not allowed'),
@@ -2279,7 +2293,10 @@ export function createCallController(
             code: 'SCREEN_PERMISSION_DENIED',
           },
         );
-        update({ screenError: '需要在系统设置中允许屏幕录制' });
+        update({
+          screenError: '需要在系统设置中允许屏幕录制',
+          screenPermissionError: true,
+        });
         throw error;
       }
       if (
@@ -2333,8 +2350,15 @@ export function createCallController(
           code: 'INVALID_STATE',
         });
       }
-      await screen.startSelectedCapture();
+      try {
+        await screen.startSelectedCapture();
+      } catch (error) {
+        assertCurrentLifecycle(generation);
+        update({ screenPermissionError: isScreenPermissionError(error) });
+        throw error;
+      }
       assertCurrentLifecycle(generation);
+      update({ screenPermissionError: false });
       await replayBitrate();
     },
     stopScreenShare: () => screenController?.stop() ?? Promise.resolve(),
@@ -2406,6 +2430,7 @@ function passiveCallController(room: RoomSnapshot): CallController {
     screenSystemAudioEnabled: false,
     screenCaptureSettings: null,
     screenError: null,
+    screenPermissionError: false,
     screenOwner: null,
     screenOwnerLeaseId: null,
     localScreenTrack: null,

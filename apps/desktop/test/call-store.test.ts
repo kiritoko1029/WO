@@ -3194,56 +3194,267 @@ describe('realtime room gateway', () => {
     ).toHaveLength(0);
   });
 
-  it('checks capture permission before acquire and exposes only the approved settings action', async () => {
+  it.each([
+    {
+      name: 'denied non-native capture',
+      status: 'denied',
+      systemAudioMode: 'unsupported',
+    },
+    {
+      name: 'restricted custom-picker capture',
+      status: 'restricted',
+      systemAudioMode: 'loopback',
+    },
+    {
+      name: 'restricted native-picker capture',
+      status: 'restricted',
+      systemAudioMode: 'native-picker',
+    },
+  ] as const)(
+    'blocks $name before acquire and exposes only the approved settings action',
+    async ({ status, systemAudioMode }) => {
+      const client = signaling();
+      const openSettings = vi.fn().mockResolvedValue(undefined);
+      const deniedDesktop = {
+        ...desktop,
+        capture: {
+          ...desktop.capture,
+          permission: vi.fn().mockResolvedValue({
+            status,
+            canOpenSettings: true,
+            systemAudioMode,
+          }),
+          openSettings,
+        },
+      } as DesktopApi;
+      const gateway = createRealtimeRoomGateway({
+        desktop: deniedDesktop,
+        user,
+        signaling: client,
+      });
+      const room = await gateway.createRoom('access-token');
+      const call = createCallController({
+        room,
+        gateway,
+        mediaDevices: {
+          getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+          enumerateDevices: vi.fn().mockResolvedValue([]),
+        } as unknown as MediaDevices,
+        createPeerConnection: peerConnectionFactory().factory,
+      });
+      await call.start();
+
+      await expect(call.prepareScreenShare()).rejects.toMatchObject({
+        code: 'SCREEN_PERMISSION_DENIED',
+      });
+      expect(call.getSnapshot()).toMatchObject({
+        screenPermission: {
+          status,
+          canOpenSettings: true,
+          systemAudioMode,
+        },
+        screenError: '需要在系统设置中允许屏幕录制',
+        screenPermissionError: true,
+      });
+      expect(
+        client.request.mock.calls.filter(([type]) => type === 'screen.acquire'),
+      ).toHaveLength(0);
+
+      await call.openScreenSettings();
+      expect(openSettings).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('delegates denied native-picker capture to the operating system picker', async () => {
     const client = signaling();
-    const openSettings = vi.fn().mockResolvedValue(undefined);
-    const deniedDesktop = {
+    const nativePickerDesktop = {
       ...desktop,
       capture: {
         ...desktop.capture,
         permission: vi.fn().mockResolvedValue({
           status: 'denied',
           canOpenSettings: true,
-          systemAudioMode: 'unsupported',
+          systemAudioMode: 'native-picker',
         }),
-        openSettings,
       },
     } as DesktopApi;
     const gateway = createRealtimeRoomGateway({
-      desktop: deniedDesktop,
+      desktop: nativePickerDesktop,
       user,
       signaling: client,
     });
     const room = await gateway.createRoom('access-token');
+    const screenTrack = videoTrack();
+    const getDisplayMedia = vi.fn().mockResolvedValue({
+      getTracks: () => [screenTrack],
+      getVideoTracks: () => [screenTrack],
+      getAudioTracks: () => [],
+    } as unknown as MediaStream);
     const call = createCallController({
       room,
       gateway,
       mediaDevices: {
         getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
         enumerateDevices: vi.fn().mockResolvedValue([]),
+        getDisplayMedia,
       } as unknown as MediaDevices,
       createPeerConnection: peerConnectionFactory().factory,
     });
     await call.start();
 
-    await expect(call.prepareScreenShare()).rejects.toMatchObject({
-      code: 'SCREEN_PERMISSION_DENIED',
-    });
+    await call.prepareScreenShare();
+
     expect(call.getSnapshot()).toMatchObject({
       screenPermission: {
         status: 'denied',
         canOpenSettings: true,
-        systemAudioMode: 'unsupported',
+        systemAudioMode: 'native-picker',
       },
-      screenError: '需要在系统设置中允许屏幕录制',
+      screenPermissionError: false,
+      screenState: 'picking',
+      screenSources: [],
     });
     expect(
       client.request.mock.calls.filter(([type]) => type === 'screen.acquire'),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
 
-    await call.openScreenSettings();
-    expect(openSettings).toHaveBeenCalledOnce();
+    await call.startScreenShare();
+
+    expect(getDisplayMedia).toHaveBeenCalledOnce();
+    expect(call.getSnapshot()).toMatchObject({
+      screenState: 'sharing',
+      localScreenTrack: screenTrack,
+      screenError: null,
+      screenPermissionError: false,
+    });
+    await call.cleanup();
   });
+
+  it('clears native-picker permission remediation after a successful retry', async () => {
+    const client = signaling();
+    const nativePickerDesktop = {
+      ...desktop,
+      capture: {
+        ...desktop.capture,
+        permission: vi.fn().mockResolvedValue({
+          status: 'denied',
+          canOpenSettings: true,
+          systemAudioMode: 'native-picker',
+        }),
+      },
+    } as DesktopApi;
+    const gateway = createRealtimeRoomGateway({
+      desktop: nativePickerDesktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const screenTrack = videoTrack();
+    const permissionError = Object.assign(new Error('denied'), {
+      name: 'NotAllowedError',
+    });
+    const getDisplayMedia = vi
+      .fn()
+      .mockRejectedValueOnce(permissionError)
+      .mockResolvedValueOnce({
+        getTracks: () => [screenTrack],
+        getVideoTracks: () => [screenTrack],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+        getDisplayMedia,
+      } as unknown as MediaDevices,
+      createPeerConnection: peerConnectionFactory().factory,
+    });
+    await call.start();
+    await call.prepareScreenShare();
+
+    await expect(call.startScreenShare()).rejects.toBe(permissionError);
+    expect(call.getSnapshot()).toMatchObject({
+      screenState: 'error',
+      screenPermissionError: true,
+    });
+
+    await call.prepareScreenShare();
+    await call.startScreenShare();
+
+    expect(getDisplayMedia).toHaveBeenCalledTimes(2);
+    expect(call.getSnapshot()).toMatchObject({
+      screenState: 'sharing',
+      localScreenTrack: screenTrack,
+      screenError: null,
+      screenPermissionError: false,
+    });
+    await call.cleanup();
+  });
+
+  it.each([
+    {
+      name: 'permission denial',
+      error: Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+      expectedPermissionError: true,
+      expectedMessage: '需要屏幕录制权限才能共享',
+    },
+    {
+      name: 'non-permission capture failure',
+      error: new Error('capture failed'),
+      expectedPermissionError: false,
+      expectedMessage: '屏幕共享失败，请重试',
+    },
+  ])(
+    'classifies native-picker $name without trusting the stale permission snapshot',
+    async ({ error, expectedPermissionError, expectedMessage }) => {
+      const client = signaling();
+      const nativePickerDesktop = {
+        ...desktop,
+        capture: {
+          ...desktop.capture,
+          permission: vi.fn().mockResolvedValue({
+            status: 'denied',
+            canOpenSettings: true,
+            systemAudioMode: 'native-picker',
+          }),
+        },
+      } as DesktopApi;
+      const gateway = createRealtimeRoomGateway({
+        desktop: nativePickerDesktop,
+        user,
+        signaling: client,
+      });
+      const room = await gateway.createRoom('access-token');
+      const call = createCallController({
+        room,
+        gateway,
+        mediaDevices: {
+          getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+          enumerateDevices: vi.fn().mockResolvedValue([]),
+          getDisplayMedia: vi.fn().mockRejectedValue(error),
+        } as unknown as MediaDevices,
+        createPeerConnection: peerConnectionFactory().factory,
+      });
+      await call.start();
+      await call.prepareScreenShare();
+
+      await expect(call.startScreenShare()).rejects.toBe(error);
+
+      expect(call.getSnapshot()).toMatchObject({
+        screenState: 'error',
+        screenError: expectedMessage,
+        screenPermissionError: expectedPermissionError,
+        screenPermission: {
+          status: 'denied',
+          canOpenSettings: true,
+          systemAudioMode: 'native-picker',
+        },
+      });
+      await call.cleanup();
+    },
+  );
 
   it('does not send an in-flight bitrate update after cleanup wins', async () => {
     const client = signaling();

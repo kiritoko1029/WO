@@ -82,6 +82,7 @@ export function RoomRoute({
     call.snapshot.screenBitrateError ??
     error;
   const canOpenScreenSettings =
+    call.snapshot.screenPermissionError &&
     call.snapshot.screenPermission?.canOpenSettings === true &&
     (call.snapshot.screenPermission.status === 'denied' ||
       call.snapshot.screenPermission.status === 'restricted');

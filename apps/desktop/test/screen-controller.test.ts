@@ -542,11 +542,13 @@ describe('single screen controller', () => {
     });
     expect(harness.desktop.list).not.toHaveBeenCalled();
     expect(harness.desktop.select).not.toHaveBeenCalled();
+    expect(() => harness.controller.setSystemAudioEnabled(true)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_STATE' }),
+    );
     await expect(
       harness.controller.selectSource('00000000-0000-4000-8000-000000000001'),
     ).rejects.toMatchObject({ code: 'INVALID_STATE' });
 
-    harness.controller.setSystemAudioEnabled(true);
     await harness.controller.startSelectedCapture();
 
     expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
@@ -556,7 +558,31 @@ describe('single screen controller', () => {
     expect(harness.desktop.select).not.toHaveBeenCalled();
     expect(harness.sender.replaceTrack).toHaveBeenCalledWith(videoTrack);
     expect(harness.audioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);
-    expect(harness.controller.getSnapshot().state).toBe('sharing');
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      systemAudioEnabled: true,
+    });
+  });
+
+  test('keeps native-picker video when the OS picker leaves audio off', async () => {
+    const videoTrack = new FakeTrack();
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack)),
+      systemAudioMode: 'native-picker',
+    });
+
+    await harness.controller.prepare();
+    await harness.controller.startSelectedCapture();
+
+    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
+      SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
+    );
+    expect(harness.sender.replaceTrack).toHaveBeenCalledWith(videoTrack);
+    expect(harness.audioSender.replaceTrack).not.toHaveBeenCalled();
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      systemAudioEnabled: false,
+    });
   });
 
   test('stops system-audio sharing by detaching and stopping both tracks', async () => {

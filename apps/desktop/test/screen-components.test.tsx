@@ -187,17 +187,13 @@ describe('desktop share controls', () => {
     ).toBeNull();
     expect(screen.queryByLabelText('可共享内容')).toBeNull();
     expect(screen.getByText('准备选择共享内容')).toBeTruthy();
-
-    const systemAudioCheckbox = screen.getByRole('checkbox', {
-      name: /共享系统音频/,
-    });
-    await user.click(systemAudioCheckbox);
-    expect(onSystemAudioEnabledChange).toHaveBeenCalledWith(true);
+    expect(screen.queryByRole('checkbox', { name: /共享系统音频/ })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: '继续' }));
     expect(onStart).toHaveBeenCalledOnce();
     expect(onSelect).not.toHaveBeenCalled();
     expect(onRefresh).not.toHaveBeenCalled();
+    expect(onSystemAudioEnabledChange).not.toHaveBeenCalled();
   });
 
   it('offers quality tiers as max-bitrate ceilings and stats behind a toggle', async () => {

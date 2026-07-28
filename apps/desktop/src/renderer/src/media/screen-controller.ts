@@ -576,7 +576,11 @@ export function createScreenController(
       if (snapshot.state !== 'picking') {
         throw new ScreenControllerError('INVALID_STATE');
       }
-      if (enabled && options.getSystemAudioMode() === 'unsupported') {
+      const systemAudioMode = options.getSystemAudioMode();
+      if (systemAudioMode === 'native-picker') {
+        throw new ScreenControllerError('INVALID_STATE');
+      }
+      if (enabled && systemAudioMode === 'unsupported') {
         throw Object.assign(new Error('System audio capture is unavailable'), {
           code: 'SYSTEM_AUDIO_UNSUPPORTED',
         });
@@ -609,6 +613,8 @@ export function createScreenController(
         );
       }
       const systemAudioEnabled = snapshot.systemAudioEnabled;
+      const nativeSystemPicker = systemAudioMode === 'native-picker';
+      const systemAudioRequested = nativeSystemPicker || systemAudioEnabled;
       if (systemAudioEnabled && systemAudioMode === 'unsupported') {
         return fail(
           Object.assign(new Error('System audio capture is unavailable'), {
@@ -620,7 +626,7 @@ export function createScreenController(
       try {
         capturePromise = Promise.resolve(
           mediaDevices.getDisplayMedia(
-            systemAudioEnabled
+            systemAudioRequested
               ? SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS
               : DISPLAY_CAPTURE_CONSTRAINTS,
           ),
@@ -651,21 +657,23 @@ export function createScreenController(
         const tracks = stream.getTracks();
         const videoTracks = stream.getVideoTracks();
         const audioTracks = stream.getAudioTracks();
-        // Audio is accepted only after the explicit picker opt-in. This stays
-        // fail-closed even if a platform returns audio against constraints.
+        // The native picker owns its audio consent. Custom pickers keep the
+        // explicit application opt-in and reject unexpected audio.
         if (
           videoTracks.length !== 1 ||
           videoTracks[0]!.kind !== 'video' ||
           audioTracks.length > 1 ||
-          (!systemAudioEnabled && audioTracks.length > 0) ||
+          (!systemAudioRequested && audioTracks.length > 0) ||
           tracks.length !== videoTracks.length + audioTracks.length
         ) {
           stopStream(stream);
           return fail(new ScreenControllerError('INVALID_STATE'));
         }
+        let audioTrack: MediaStreamTrack | null = audioTracks[0] ?? null;
         if (
           systemAudioEnabled &&
-          (audioTracks.length !== 1 || trackEnded(audioTracks[0]!))
+          !nativeSystemPicker &&
+          (audioTrack === null || trackEnded(audioTrack))
         ) {
           stopStream(stream);
           return fail(
@@ -675,8 +683,15 @@ export function createScreenController(
             ),
           );
         }
+        if (
+          nativeSystemPicker &&
+          audioTrack !== null &&
+          trackEnded(audioTrack)
+        ) {
+          audioTrack.stop();
+          audioTrack = null;
+        }
         const track = videoTracks[0]!;
-        const audioTrack = audioTracks[0] ?? null;
         currentTrack = track;
         currentAudioTrack = audioTrack;
         track.addEventListener('ended', handleTrackEnded, { once: true });
@@ -708,7 +723,12 @@ export function createScreenController(
             await queueAudioSenderTrack(audioTrack);
             assertCurrent(expectedGeneration);
           }
-          update({ state: 'sharing', captureSettings: settings, error: null });
+          update({
+            state: 'sharing',
+            systemAudioEnabled: audioTrack !== null,
+            captureSettings: settings,
+            error: null,
+          });
         } catch (error) {
           return failForGeneration(expectedGeneration, error);
         }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @vitest-environment-options {"url":"https://wo.example.cn/"}
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ import type { LanJoinIntent } from '@wo/protocol';
 import { App } from '../src/renderer/src/App.js';
 import type {
   CallController,
+  CallSnapshot,
   RealtimeRoomGateway,
 } from '../src/renderer/src/state/call-store.js';
 import type {
@@ -70,6 +71,7 @@ const idleScreenSnapshot = {
   screenSystemAudioEnabled: false,
   screenCaptureSettings: null,
   screenError: null,
+  screenPermissionError: false,
   screenOwner: null,
   screenOwnerLeaseId: null,
   localScreenTrack: null,
@@ -993,7 +995,7 @@ describe('desktop account and room workflow', () => {
     const user = userEvent.setup();
     const order: string[] = [];
     let cleanupPromise: Promise<void> | null = null;
-    const callSnapshot = {
+    let callSnapshot: CallSnapshot = {
       status: 'connected' as const,
       error: null,
       muted: false,
@@ -1015,15 +1017,20 @@ describe('desktop account and room workflow', () => {
       remoteAudioLevel: 0,
       ...idleScreenSnapshot,
       screenError: '需要在系统设置中允许屏幕录制',
+      screenPermissionError: true,
       screenPermission: {
         status: 'denied' as const,
         canOpenSettings: true,
         systemAudioMode: 'unsupported' as const,
       },
     };
+    const callListeners = new Set<() => void>();
     const call = {
       getSnapshot: () => callSnapshot,
-      subscribe: vi.fn(() => () => undefined),
+      subscribe: vi.fn((listener: () => void) => {
+        callListeners.add(listener);
+        return () => callListeners.delete(listener);
+      }),
       start: vi.fn().mockResolvedValue(undefined),
       setMuted: vi.fn(),
       switchMicrophone: vi.fn().mockResolvedValue(undefined),
@@ -1067,6 +1074,21 @@ describe('desktop account and room workflow', () => {
 
     await user.click(screen.getByRole('button', { name: '静音' }));
     await user.click(screen.getByRole('button', { name: '打开系统设置' }));
+    callSnapshot = {
+      ...callSnapshot,
+      screenState: 'sharing',
+      screenError: null,
+      screenPermissionError: false,
+      screenPermission: {
+        status: 'denied',
+        canOpenSettings: true,
+        systemAudioMode: 'native-picker',
+      },
+    };
+    act(() => {
+      for (const listener of callListeners) listener();
+    });
+    expect(screen.queryByRole('button', { name: '打开系统设置' })).toBeNull();
     await user.click(screen.getByRole('button', { name: '设置' }));
     await user.selectOptions(screen.getByLabelText('麦克风'), 'mic-2');
     await user.selectOptions(screen.getByLabelText('扬声器'), 'speaker-1');

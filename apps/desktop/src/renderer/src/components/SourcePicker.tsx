@@ -168,7 +168,7 @@ export function SourcePicker({
         </div>
 
         <footer className="source-picker-footer">
-          {systemAudioMode !== 'unsupported' && (
+          {systemAudioMode === 'loopback' && (
             <label className="source-audio-option">
               <input
                 type="checkbox"
