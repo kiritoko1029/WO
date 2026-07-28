@@ -1034,6 +1034,237 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
+  it('refreshes devices and clears disappeared selections on devicechange without rebuilding media', async () => {
+    const originalSetSinkId = Object.getOwnPropertyDescriptor(
+      HTMLMediaElement.prototype,
+      'setSinkId',
+    );
+    const pendingDefaultSelection = deferred<void>();
+    let delayDefaultSelection = false;
+    const setSinkId = vi.fn((sinkId: string) =>
+      sinkId === '' && delayDefaultSelection
+        ? pendingDefaultSelection.promise
+        : Promise.resolve(),
+    );
+    Object.defineProperty(HTMLMediaElement.prototype, 'setSinkId', {
+      configurable: true,
+      value: setSinkId,
+      writable: true,
+    });
+    let call: ReturnType<typeof createCallController> | null = null;
+
+    try {
+      const client = signaling();
+      const gateway = createRealtimeRoomGateway({
+        desktop,
+        user,
+        signaling: client,
+      });
+      const room = await gateway.createRoom('access-token');
+      const initialMicrophone = audioTrack();
+      const selectedMicrophone = audioTrack();
+      let devices = [
+        {
+          kind: 'audioinput',
+          deviceId: 'mic-usb',
+          label: 'USB Microphone',
+        },
+        {
+          kind: 'audiooutput',
+          deviceId: 'speaker-usb',
+          label: 'USB Speaker',
+        },
+      ] as MediaDeviceInfo[];
+      let deviceChangeListener: EventListenerOrEventListenerObject | null =
+        null;
+      const enumerateDevices = vi.fn(async () => devices);
+      const addEventListener = vi.fn(
+        (type: string, listener: EventListenerOrEventListenerObject): void => {
+          if (type === 'devicechange') deviceChangeListener = listener;
+        },
+      );
+      const removeEventListener = vi.fn(
+        (type: string, listener: EventListenerOrEventListenerObject): void => {
+          if (type === 'devicechange' && deviceChangeListener === listener) {
+            deviceChangeListener = null;
+          }
+        },
+      );
+      const emitDeviceChange = (): void => {
+        expect(deviceChangeListener).not.toBeNull();
+        const event = new Event('devicechange');
+        if (typeof deviceChangeListener === 'function') {
+          deviceChangeListener(event);
+        } else {
+          deviceChangeListener!.handleEvent(event);
+        }
+      };
+      const mediaDevices = {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(mediaStream(initialMicrophone))
+          .mockResolvedValueOnce(mediaStream(selectedMicrophone)),
+        enumerateDevices,
+        addEventListener,
+        removeEventListener,
+      } as unknown as MediaDevices;
+      const peer = peerConnectionFactory();
+      call = createCallController({
+        room,
+        gateway,
+        mediaDevices,
+        createPeerConnection: peer.factory,
+      });
+
+      await call.start();
+      expect(call.getSnapshot()).toMatchObject({
+        inputs: [{ deviceId: 'mic-usb', label: 'USB Microphone' }],
+        outputs: [{ deviceId: 'speaker-usb', label: 'USB Speaker' }],
+        supportsOutputSelection: true,
+      });
+      expect(addEventListener).toHaveBeenCalledWith(
+        'devicechange',
+        expect.any(Function),
+      );
+
+      await call.switchMicrophone('mic-usb');
+      await call.selectOutput('speaker-usb');
+      expect(call.getSnapshot()).toMatchObject({
+        selectedInputId: 'mic-usb',
+        selectedOutputId: 'speaker-usb',
+      });
+      expect(setSinkId).toHaveBeenCalledWith('speaker-usb');
+      const signalingBeforeDeviceChange = client.request.mock.calls.filter(
+        ([type]) => type.startsWith('webrtc.'),
+      );
+
+      devices = [
+        {
+          kind: 'audioinput',
+          deviceId: 'default',
+          label: 'Default Microphone',
+        },
+        {
+          kind: 'audiooutput',
+          deviceId: 'default',
+          label: 'Default Speaker',
+        },
+      ] as MediaDeviceInfo[];
+      emitDeviceChange();
+
+      await vi.waitFor(() => expect(enumerateDevices).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() =>
+        expect(call!.getSnapshot()).toMatchObject({
+          inputs: [{ deviceId: 'default', label: 'Default Microphone' }],
+          outputs: [{ deviceId: 'default', label: 'Default Speaker' }],
+          selectedInputId: '',
+          selectedOutputId: '',
+        }),
+      );
+      expect(setSinkId).toHaveBeenLastCalledWith('');
+      expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+      expect(peer.transceivers[0]!.sender.track).toBe(selectedMicrophone);
+      expect(peer.factory).toHaveBeenCalledOnce();
+      expect(
+        client.request.mock.calls.filter(([type]) =>
+          type.startsWith('webrtc.'),
+        ),
+      ).toEqual(signalingBeforeDeviceChange);
+
+      devices = [
+        {
+          kind: 'audioinput',
+          deviceId: 'mic-bluetooth',
+          label: 'Bluetooth Microphone',
+        },
+        {
+          kind: 'audiooutput',
+          deviceId: 'speaker-bluetooth',
+          label: 'Bluetooth Speaker',
+        },
+      ] as MediaDeviceInfo[];
+      emitDeviceChange();
+
+      await vi.waitFor(() => expect(enumerateDevices).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() =>
+        expect(call!.getSnapshot()).toMatchObject({
+          inputs: [
+            {
+              deviceId: 'mic-bluetooth',
+              label: 'Bluetooth Microphone',
+            },
+          ],
+          outputs: [
+            {
+              deviceId: 'speaker-bluetooth',
+              label: 'Bluetooth Speaker',
+            },
+          ],
+          selectedInputId: '',
+          selectedOutputId: '',
+        }),
+      );
+
+      await call.selectOutput('speaker-bluetooth');
+      expect(call.getSnapshot().selectedOutputId).toBe('speaker-bluetooth');
+
+      devices = [
+        {
+          kind: 'audioinput',
+          deviceId: 'default',
+          label: 'Default Microphone',
+        },
+        {
+          kind: 'audiooutput',
+          deviceId: 'speaker-wired',
+          label: 'Wired Speaker',
+        },
+      ] as MediaDeviceInfo[];
+      delayDefaultSelection = true;
+      emitDeviceChange();
+      await vi.waitFor(() => expect(enumerateDevices).toHaveBeenCalledTimes(4));
+      await vi.waitFor(() => expect(setSinkId).toHaveBeenLastCalledWith(''));
+
+      const selectingWired = call.selectOutput('speaker-wired');
+      await Promise.resolve();
+      expect(setSinkId).not.toHaveBeenCalledWith('speaker-wired');
+      pendingDefaultSelection.resolve();
+      await selectingWired;
+
+      await vi.waitFor(() =>
+        expect(call!.getSnapshot()).toMatchObject({
+          outputs: [
+            {
+              deviceId: 'speaker-wired',
+              label: 'Wired Speaker',
+            },
+          ],
+          selectedOutputId: 'speaker-wired',
+        }),
+      );
+      expect(setSinkId.mock.calls.slice(-2)).toEqual([[''], ['speaker-wired']]);
+
+      await call.cleanup();
+      expect(removeEventListener).toHaveBeenCalledWith(
+        'devicechange',
+        expect.any(Function),
+      );
+      expect(deviceChangeListener).toBeNull();
+      call = null;
+    } finally {
+      await call?.cleanup();
+      if (originalSetSinkId === undefined) {
+        Reflect.deleteProperty(HTMLMediaElement.prototype, 'setSinkId');
+      } else {
+        Object.defineProperty(
+          HTMLMediaElement.prototype,
+          'setSinkId',
+          originalSetSinkId,
+        );
+      }
+    }
+  });
+
   it('recovers an ended microphone on the existing peer connection', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({

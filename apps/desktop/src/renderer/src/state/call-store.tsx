@@ -843,6 +843,7 @@ export function createCallController(
   let microphoneRetryFlightDeviceId: string | null = null;
   let microphoneRetryFlightGeneration = 0;
   let microphoneSwitchGeneration = 0;
+  let outputSelectionChain = Promise.resolve();
   let localReady = false;
   let remoteReady = false;
   let everConnected = false;
@@ -990,31 +991,52 @@ export function createCallController(
     failTerminal(error);
   };
 
+  const selectOutputSerially = (deviceId: string): Promise<boolean> => {
+    const activeVoice = voice;
+    const selection = outputSelectionChain.then(() => {
+      if (closed || activeVoice === null || voice !== activeVoice) return false;
+      return activeVoice.selectOutput(deviceId);
+    });
+    outputSelectionChain = selection.then(
+      () => undefined,
+      () => undefined,
+    );
+    return selection;
+  };
+
   const refreshDeviceList = async (): Promise<void> => {
     if (closed || voice === null) return;
     try {
       const devices = await voice.listDevices();
       if (closed) return;
+      const selectedInputId = snapshot.selectedInputId;
+      const selectedOutputId = snapshot.selectedOutputId;
       const selectedInputStillPresent =
-        snapshot.selectedInputId === '' ||
-        devices.inputs.some(
-          (device) => device.deviceId === snapshot.selectedInputId,
-        );
+        selectedInputId === '' ||
+        devices.inputs.some((device) => device.deviceId === selectedInputId);
       const selectedOutputStillPresent =
-        snapshot.selectedOutputId === '' ||
-        devices.outputs.some(
-          (device) => device.deviceId === snapshot.selectedOutputId,
-        );
+        selectedOutputId === '' ||
+        devices.outputs.some((device) => device.deviceId === selectedOutputId);
+      if (!selectedOutputStillPresent) {
+        await selectOutputSerially('');
+        if (closed) return;
+      }
+      const inputSelectionChanged =
+        snapshot.selectedInputId !== selectedInputId;
+      const outputSelectionChanged =
+        snapshot.selectedOutputId !== selectedOutputId;
       update({
         inputs: devices.inputs,
         outputs: devices.outputs,
         supportsOutputSelection: voice.supportsOutputSelection,
-        selectedInputId: selectedInputStillPresent
-          ? snapshot.selectedInputId
-          : '',
-        selectedOutputId: selectedOutputStillPresent
-          ? snapshot.selectedOutputId
-          : '',
+        selectedInputId:
+          selectedInputStillPresent || inputSelectionChanged
+            ? snapshot.selectedInputId
+            : '',
+        selectedOutputId:
+          selectedOutputStillPresent || outputSelectionChanged
+            ? snapshot.selectedOutputId
+            : '',
       });
     } catch {
       // Enumeration can fail if permissions were revoked; keep prior list.
@@ -2294,7 +2316,7 @@ export function createCallController(
       });
     },
     selectOutput: async (deviceId) => {
-      if (await voice!.selectOutput(deviceId)) {
+      if (await selectOutputSerially(deviceId)) {
         update({ selectedOutputId: deviceId });
       }
     },
