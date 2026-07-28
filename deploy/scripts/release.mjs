@@ -32,6 +32,7 @@ export const releaseSourceFiles = Object.freeze([
   'deploy/scripts/compose.mjs',
   'deploy/scripts/external-db-upgrade.mjs',
   'deploy/scripts/lib.mjs',
+  'deploy/scripts/monitor-email.mjs',
   'deploy/scripts/monitor.mjs',
   'deploy/scripts/ops.mjs',
   'deploy/scripts/preflight.mjs',
@@ -42,6 +43,10 @@ export const releaseSourceFiles = Object.freeze([
   'deploy/scripts/smoke.mjs',
   'deploy/scripts/upgrade.mjs',
   'deploy/scripts/validate-build-metadata.sh',
+  'deploy/systemd/mail.env.example',
+  'deploy/systemd/monitor.env.example',
+  'deploy/systemd/wo-monitor.service',
+  'deploy/systemd/wo-monitor.timer',
   'docker-compose.yml',
   'docker-compose.external-db.yml',
 ]);

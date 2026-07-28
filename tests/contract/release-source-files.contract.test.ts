@@ -55,6 +55,7 @@ describe('release source file contract', () => {
       'deploy/scripts/backup.mjs',
       'deploy/scripts/build-release.mjs',
       'deploy/scripts/compose.mjs',
+      'deploy/scripts/monitor-email.mjs',
       'deploy/scripts/monitor.mjs',
       'deploy/scripts/preflight.mjs',
       'deploy/scripts/restore.mjs',
@@ -64,6 +65,20 @@ describe('release source file contract', () => {
 
     expect(
       productionEntrypoints.filter((file) => !manifestFiles.has(file)),
+    ).toEqual([]);
+  });
+
+  test('binds the production monitor systemd assets', () => {
+    const manifestFiles = new Set(releaseSourceFiles);
+    const monitorSystemdFiles = [
+      'deploy/systemd/mail.env.example',
+      'deploy/systemd/monitor.env.example',
+      'deploy/systemd/wo-monitor.service',
+      'deploy/systemd/wo-monitor.timer',
+    ];
+
+    expect(
+      monitorSystemdFiles.filter((file) => !manifestFiles.has(file)),
     ).toEqual([]);
   });
 

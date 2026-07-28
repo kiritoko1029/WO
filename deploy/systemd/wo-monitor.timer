@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the WO production boundary monitor every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=30s
+Persistent=true
+Unit=wo-monitor.service
+
+[Install]
+WantedBy=timers.target

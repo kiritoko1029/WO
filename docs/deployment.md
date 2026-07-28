@@ -559,9 +559,102 @@ node deploy/scripts/monitor.mjs \
   --json
 ```
 
+`--env-file` 必须指向目标主机实际存在的环境文件。同步到 `/opt/wo` 的生产
+source tree 使用 `/opt/wo/.env`，不能直接照抄仓库开发示例中的
+`deploy/.env`。
+
+1Panel 管理的外部 PostgreSQL/ingress 若被探测出真实运行配置缺口，应先备份
+Compose、`.env`、权限、哈希和完整容器/镜像身份，再用
+`docker compose config --quiet` 预检并只重建目标 service。重建后必须以
+`docker inspect` 复验实际 `Health`、`Memory`、`LogConfig`，不能只相信 YAML；
+含数据库密码的 1Panel `.env` 必须为 `0600`。容器 ID 变化后必须同步更新监控
+命令。
+
 告警接入以退出码为准，宿主机用 cron/systemd timer 周期执行并在非零退出时
 发送通知（邮件、webhook 均可）。探测不修改任何状态，也不输出 secret。无外网
 TLS 访问的主机可用 `--skip-web-probe` 跳过 HTTPS 探测。
+
+### systemd 邮件告警
+
+`deploy/systemd/wo-monitor.service` 每次运行
+`deploy/scripts/monitor-email.mjs`。健康结果只写入
+`MONITOR_OK`，不发邮件；不健康结果或 monitor 执行异常各发送一封邮件，并让
+service 保持非零退出。邮件只包含主机标签、UTC 时间、profile、已检查服务和
+issue 数量，不包含 issue 原文、子进程 stderr、`.env` 内容、token 或 SMTP
+凭据。`--test-alert` 只测试邮件通道，不运行 Docker、磁盘或证书探测。
+经过校验的 From 地址同时作为 sendmail envelope sender，避免认证中继收到
+`root@hostname` 发件身份。
+
+邮件包装器使用本机 `/usr/sbin/sendmail` 接口。生产机必须先配置只监听本机的
+Postfix SMTP relay，并确认 relay 的 STARTTLS、认证和 CA 校验成功；不得依赖
+云主机无认证直投 25 端口。SMTP 用户和应用专用密码只能保存在
+`/etc/postfix/sasl_passwd` 及其 `postmap` 数据库中，源文件和数据库均为
+`0600 root:root`，不得写入 `/opt/wo/.env`、
+`/etc/wo-monitor/mail.env`、systemd unit、仓库或任务证据。
+Postfix 3.5 的最低 TLS 版本使用排除式协议列表，例如
+`!SSLv2, !SSLv3, !TLSv1, !TLSv1.1`；该版本不接受
+`>=TLSv1.2`，错误语法会让所有 SMTP TLS 会话在认证前失败。
+
+运行配置分为两个 root-only 文件：
+
+```text
+/etc/wo-monitor/monitor.env  # /opt/wo/.env、Node PATH、两个完整外部容器 ID
+/etc/wo-monitor/mail.env     # 收件人、发件人、非敏感主机标签
+```
+
+创建目录和文件时使用 `umask 077`，目录权限 `0700`、文件权限 `0600`。
+`monitor.env` 可从 `deploy/systemd/monitor.env.example` 起草，但必须替换两个
+占位符并以 `docker inspect` 复验完整 64 位 ID；外部容器每次重建后都要原子
+更新对应 ID。`mail.env` 可从 `deploy/systemd/mail.env.example` 起草，地址
+必须是裸邮箱地址，多个收件人用英文逗号分隔。
+
+变更前先在权限为 `0700` 的回滚目录保存已有 Postfix 配置、unit、monitor 配置
+的内容、owner/mode/SHA-256，以及 `postfix`、`wo-monitor.timer` 的
+enabled/active 状态。安装时先验证而不启用 timer：
+
+```bash
+install -d -m 0700 /etc/wo-monitor
+install -m 0600 deploy/systemd/monitor.env.example \
+  /etc/wo-monitor/monitor.env
+install -m 0600 deploy/systemd/mail.env.example \
+  /etc/wo-monitor/mail.env
+# 编辑两个 root-only 文件并替换占位符后再继续。
+
+install -m 0644 deploy/systemd/wo-monitor.service \
+  /etc/systemd/system/wo-monitor.service
+install -m 0644 deploy/systemd/wo-monitor.timer \
+  /etc/systemd/system/wo-monitor.timer
+systemd-analyze verify /etc/systemd/system/wo-monitor.service \
+  /etc/systemd/system/wo-monitor.timer
+systemctl daemon-reload
+```
+
+先发送一封不触碰生产容器的测试邮件，并由收件端确认实际送达；`sendmail`
+返回 0 只代表本机已接收或排队，不能替代收件端确认：
+
+```bash
+node /opt/wo/deploy/scripts/monitor-email.mjs \
+  --mail-env-file=/etc/wo-monitor/mail.env \
+  --profile=external-db \
+  --test-alert
+mailq
+```
+
+测试邮件确认后，手工运行一次真实 service。预期 monitor healthy、service
+退出 0，且不发送第二封邮件；随后才启用 timer：
+
+```bash
+systemctl start wo-monitor.service
+systemctl show wo-monitor.service \
+  -p Result -p ExecMainStatus -p ActiveEnterTimestamp
+journalctl -u wo-monitor.service --since '-10 minutes' --no-pager
+systemctl enable --now wo-monitor.timer
+systemctl list-timers wo-monitor.timer --all
+```
+
+回滚顺序为禁用 timer、恢复 unit 和两个配置文件、`daemon-reload`，再按快照
+恢复 Postfix 配置及原 enabled/active 状态。不得通过删除邮件包装器或把 monitor
+改为总是退出 0 来消除告警。
 
 ## 镜像与工件保留策略
 

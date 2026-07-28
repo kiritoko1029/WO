@@ -1,0 +1,22 @@
+[Unit]
+Description=WO external-database production boundary monitor
+After=docker.service network-online.target postfix.service
+Wants=network-online.target postfix.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/wo
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+EnvironmentFile=/etc/wo-monitor/monitor.env
+ExecStart=/usr/bin/env node /opt/wo/deploy/scripts/monitor-email.mjs --env-file=${WO_MONITOR_ENV_FILE} --mail-env-file=${WO_MONITOR_MAIL_ENV_FILE} --profile=external-db --external-postgres-container-id=${WO_MONITOR_POSTGRES_CONTAINER_ID} --external-ingress-container-id=${WO_MONITOR_INGRESS_CONTAINER_ID}
+TimeoutStartSec=3min
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadOnlyPaths=/opt/wo
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wo-monitor
