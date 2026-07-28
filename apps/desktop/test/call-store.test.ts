@@ -290,6 +290,36 @@ function pairedSignaling() {
       type === 'webrtc.iceCandidate'
     ) {
       relay(side, type, payload);
+    } else if (type === 'screen.acquire' || type === 'screen.renew') {
+      const leaseId = `pair-screen-${side}`;
+      const leaseExpiresAt = new Date(Date.now() + 15_000).toISOString();
+      data = {
+        lease: {
+          roomId,
+          leaseId,
+          holderId: sideUser(side).userId,
+          expiresAt: leaseExpiresAt,
+        },
+      };
+      if (type === 'screen.acquire') {
+        relay(side, 'screen.ownerChanged', {
+          roomId,
+          owner: {
+            userId: sideUser(side).userId,
+            displayName: sideUser(side).displayName,
+            ready: true,
+          },
+          leaseId,
+          leaseExpiresAt,
+        });
+      }
+    } else if (type === 'screen.release') {
+      relay(side, 'screen.ownerChanged', {
+        roomId,
+        owner: null,
+        leaseId: null,
+        leaseExpiresAt: null,
+      });
     }
     return {
       version: PROTOCOL_VERSION,
@@ -1923,7 +1953,7 @@ describe('realtime room gateway', () => {
     expect(joinerPeer.pc.close).toHaveBeenCalledOnce();
   });
 
-  it('negotiates the screen receiver when the joiner microphone is unavailable', async () => {
+  it('receives a peer screen and attaches a later creator microphone without renegotiation', async () => {
     const bus = pairedSignaling();
     const creatorGateway = createRealtimeRoomGateway({
       desktop,
@@ -1940,13 +1970,20 @@ describe('realtime room gateway', () => {
       'joiner-token',
       creatorRoom.roomCode,
     );
-    const creatorPeer = peerConnectionFactory();
+    const creatorPeer = peerConnectionFactory({ screenReceiverTrack: null });
     const joinerPeer = peerConnectionFactory();
+    const creatorMicrophone = audioTrack();
+    const screenTrack = videoTrack();
     const creatorCall = createCallController({
       room: creatorRoom,
       gateway: creatorGateway,
       mediaDevices: {
-        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+          )
+          .mockResolvedValueOnce(mediaStream(creatorMicrophone)),
         enumerateDevices: vi.fn().mockResolvedValue([]),
       } as unknown as MediaDevices,
       createPeerConnection: creatorPeer.factory,
@@ -1955,12 +1992,13 @@ describe('realtime room gateway', () => {
       room: joinerRoom,
       gateway: joinerGateway,
       mediaDevices: {
-        getUserMedia: vi
-          .fn()
-          .mockRejectedValue(
-            Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
-          ),
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
         enumerateDevices: vi.fn().mockResolvedValue([]),
+        getDisplayMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [screenTrack],
+          getVideoTracks: () => [screenTrack],
+          getAudioTracks: () => [],
+        }),
       } as unknown as MediaDevices,
       createPeerConnection: joinerPeer.factory,
     });
@@ -1970,22 +2008,55 @@ describe('realtime room gateway', () => {
       joinerCall.start(),
     ]);
 
-    expect(results[0]).toMatchObject({ status: 'fulfilled' });
-    expect(results[1]).toMatchObject({
+    expect(results[0]).toMatchObject({
       status: 'rejected',
       reason: { code: 'MICROPHONE_PERMISSION_DENIED' },
     });
+    expect(results[1]).toMatchObject({ status: 'fulfilled' });
     await vi.waitFor(() =>
       expect(
         bus.records.filter(({ type }) => type === 'webrtc.answerApplied'),
       ).toHaveLength(1),
     );
-    expect(creatorCall.getSnapshot().remoteScreenTrack).toBe(
-      creatorPeer.transceivers[2]!.receiver.track,
+    expect(
+      creatorPeer.transceivers[0]!.sender.replaceTrack,
+    ).not.toHaveBeenCalled();
+    const negotiationRecords = bus.records.filter(({ type }) =>
+      type.startsWith('webrtc.'),
+    );
+
+    await joinerCall.prepareScreenShare();
+    await joinerCall.selectScreenSource('00000000-0000-4000-8000-000000000001');
+    await joinerCall.startScreenShare();
+    expect(joinerPeer.transceivers[2]!.sender.track).toBe(screenTrack);
+    await vi.waitFor(() =>
+      expect(creatorCall.getSnapshot().screenOwner).toMatchObject({
+        userId: peerUser.userId,
+        displayName: peerUser.displayName,
+      }),
+    );
+    creatorPeer.transceivers[2]!.receiver.track = screenTrack;
+    creatorPeer.pc.emit('track', { track: screenTrack });
+    await vi.waitFor(() =>
+      expect(creatorCall.getSnapshot().remoteScreenTrack).toBe(screenTrack),
     );
     expect(
-      joinerPeer.transceivers[0]!.sender.replaceTrack,
-    ).not.toHaveBeenCalled();
+      bus.records.filter(({ type }) => type.startsWith('webrtc.')),
+    ).toEqual(negotiationRecords);
+
+    await expect(creatorCall.start()).resolves.toBeUndefined();
+
+    expect(
+      bus.records.filter(({ type }) => type.startsWith('webrtc.')),
+    ).toEqual(negotiationRecords);
+    expect(creatorPeer.factory).toHaveBeenCalledOnce();
+    expect(
+      creatorPeer.transceivers[0]!.sender.replaceTrack,
+    ).toHaveBeenCalledOnce();
+    expect(
+      creatorPeer.transceivers[0]!.sender.replaceTrack,
+    ).toHaveBeenCalledWith(creatorMicrophone);
+    expect(creatorCall.getSnapshot().remoteScreenTrack).toBe(screenTrack);
 
     await Promise.all([creatorCall.cleanup(), joinerCall.cleanup()]);
   });

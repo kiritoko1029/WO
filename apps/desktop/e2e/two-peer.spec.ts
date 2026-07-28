@@ -164,6 +164,37 @@ async function denyNextMicrophoneCapture(page: Page): Promise<void> {
   expect(pending).toBe(1);
 }
 
+async function proveScreenReceptionWithoutMicrophone(
+  pair: AcceptancePair,
+  firstBefore: PeerDiagnostic,
+  secondBefore: PeerDiagnostic,
+): Promise<void> {
+  const firstNegotiations = firstBefore.offers + firstBefore.answers;
+  const secondNegotiations = secondBefore.offers + secondBefore.answers;
+  await startMotionShare(pair.second.page, pair.motionTitle);
+  const remoteVideo = pair.first.page.locator(
+    'video[aria-label$="的共享屏幕"]',
+  );
+  await expect(remoteVideo).toBeVisible({ timeout: 45_000 });
+  await waitForPeer(
+    pair.first.page,
+    (peer) =>
+      peer.id === firstBefore.id &&
+      peer.offers + peer.answers === firstNegotiations &&
+      peer.framesReceivedVideo > firstBefore.framesReceivedVideo &&
+      peer.liveRemoteVideoTracks === 1,
+  );
+  await waitForPeer(
+    pair.second.page,
+    (peer) =>
+      peer.id === secondBefore.id &&
+      peer.offers + peer.answers === secondNegotiations &&
+      peer.framesSentVideo > secondBefore.framesSentVideo,
+  );
+  await pair.second.page.getByRole('button', { name: '停止共享' }).click();
+  await expect(remoteVideo).toHaveCount(0, { timeout: 30_000 });
+}
+
 async function connectRoom(
   pair: AcceptancePair,
   retryFirstMicrophone: boolean,
@@ -196,6 +227,11 @@ async function connectRoom(
     const firstNegotiations = firstBefore.offers + firstBefore.answers;
     const secondNegotiations = secondBefore.offers + secondBefore.answers;
 
+    await proveScreenReceptionWithoutMicrophone(
+      pair,
+      firstBefore,
+      secondBefore,
+    );
     await retry.click();
 
     await expect(permissionError).toHaveCount(0);
