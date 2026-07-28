@@ -22,11 +22,14 @@ const expiringNow =
 const expectedExpiryDays = Math.floor(
   (Date.parse(turnCertificate.validTo) - expiringNow) / millisecondsPerDay,
 );
+const externalPostgresContainerId = 'a'.repeat(64);
+const externalIngressContainerId = 'b'.repeat(64);
 const temporaryDirectories: string[] = [];
 
 type InspectionOverride = {
   health?: string;
   healthAbsent?: boolean;
+  id?: string;
   logType?: string;
   memory?: number;
   oomKilled?: boolean;
@@ -36,6 +39,7 @@ type InspectionOverride = {
 
 function inspectionFor(override: InspectionOverride = {}) {
   return JSON.stringify({
+    ...(override.id === undefined ? {} : { Id: override.id }),
     HostConfig: {
       LogConfig: {
         Config: { 'max-file': '5', 'max-size': '10m' },
@@ -79,8 +83,17 @@ function createExecute({
       return service === missingService ? '' : `${service}-container-id\n`;
     }
     const containerId = arguments_.at(-1) ?? '';
-    const service = containerId.replace('-container-id', '');
-    return inspectionFor(inspections[service]);
+    const externalService =
+      containerId === externalPostgresContainerId
+        ? 'postgres'
+        : containerId === externalIngressContainerId
+          ? 'ingress'
+          : undefined;
+    const service = externalService ?? containerId.replace('-container-id', '');
+    return inspectionFor({
+      ...(externalService === undefined ? {} : { id: containerId }),
+      ...inspections[service],
+    });
   };
 }
 
@@ -133,6 +146,134 @@ describe('monitor read-only report contract', () => {
     expect(report.issues).toEqual([]);
     expect(report.healthy).toBe(true);
     expect(readPaths).toEqual(['/opt/wo/deploy/secrets/turn_tls_cert.pem']);
+  });
+
+  test('uses explicit external identities without Compose lookups for external services', async () => {
+    const envFile = await createEnvFile();
+    const execute = vi.fn(createExecute());
+    const report = await collectMonitorReport(
+      {
+        envFile,
+        externalIngressContainerId,
+        externalPostgresContainerId,
+        now: freshNow,
+        profile: 'external-db',
+      },
+      {
+        execute,
+        loadEnvironment: environmentWithSecrets,
+        readCertificate: async () => turnCertificatePem,
+        webProbe: async () => 60,
+      },
+    );
+
+    expect(report.checkedServices).toEqual([
+      'coturn',
+      'ingress',
+      'postgres',
+      'server',
+    ]);
+    expect(report.issues).toEqual([]);
+    expect(report.healthy).toBe(true);
+    const composeLookups = execute.mock.calls
+      .filter(([, arguments_]) => arguments_[0] === 'ps')
+      .map(([, arguments_]) =>
+        arguments_.find((argument) =>
+          argument.includes('com.docker.compose.service='),
+        ),
+      );
+    expect(composeLookups).toEqual([
+      'label=com.docker.compose.service=coturn',
+      'label=com.docker.compose.service=server',
+    ]);
+    expect(execute).toHaveBeenCalledWith(
+      'docker',
+      ['inspect', '--format', '{{json .}}', externalIngressContainerId],
+      expect.any(Object),
+    );
+    expect(execute).toHaveBeenCalledWith(
+      'docker',
+      ['inspect', '--format', '{{json .}}', externalPostgresContainerId],
+      expect.any(Object),
+    );
+  });
+
+  test.each([
+    {
+      name: 'missing external PostgreSQL identity',
+      options: {
+        externalIngressContainerId,
+        profile: 'external-db',
+      },
+      message:
+        '--external-postgres-container-id must be a complete container ID',
+    },
+    {
+      name: 'short external ingress identity',
+      options: {
+        externalIngressContainerId: 'short-id',
+        externalPostgresContainerId,
+        profile: 'external-db',
+      },
+      message:
+        '--external-ingress-container-id must be a complete container ID',
+    },
+    {
+      name: 'unsupported profile',
+      options: { profile: 'unsupported' },
+      message: '--profile must be root-managed-db or external-db',
+    },
+    {
+      name: 'external identities on the root-managed profile',
+      options: {
+        externalIngressContainerId,
+        externalPostgresContainerId,
+        profile: 'root-managed-db',
+      },
+      message:
+        'External container IDs are valid only for the external-db profile',
+    },
+  ])('rejects $name before running probes', async ({ message, options }) => {
+    const envFile = await createEnvFile();
+    const execute = vi.fn(createExecute());
+
+    await expect(
+      collectMonitorReport(
+        { envFile, now: freshNow, skipWebProbe: true, ...options },
+        {
+          execute,
+          loadEnvironment: environmentWithSecrets,
+          readCertificate: async () => turnCertificatePem,
+        },
+      ),
+    ).rejects.toThrow(message);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('reports an external container identity mismatch', async () => {
+    const envFile = await createEnvFile();
+    const report = await collectMonitorReport(
+      {
+        envFile,
+        externalIngressContainerId,
+        externalPostgresContainerId,
+        now: freshNow,
+        profile: 'external-db',
+        skipWebProbe: true,
+      },
+      {
+        execute: createExecute({
+          inspections: { ingress: { id: 'c'.repeat(64) } },
+        }),
+        loadEnvironment: environmentWithSecrets,
+        readCertificate: async () => turnCertificatePem,
+      },
+    );
+
+    expect(report.healthy).toBe(false);
+    expect(report.issues).toContain(
+      'ingress container identity does not match configured ID',
+    );
   });
 
   test('flags unhealthy containers, restarts, OOM, missing healthcheck, and missing limits', async () => {

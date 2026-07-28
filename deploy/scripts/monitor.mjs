@@ -20,6 +20,7 @@ const monitoredServices = Object.freeze([
   'server',
 ]);
 const resourceLimitedServices = Object.freeze(['coturn', 'postgres', 'server']);
+const completeContainerIdPattern = /^[a-f0-9]{64}$/u;
 const maximumRestartCount = 3;
 const maximumDiskUsagePercent = 85;
 const minimumCertificateDays = 21;
@@ -131,49 +132,97 @@ function containerIssues(service, inspection) {
   return issues;
 }
 
-function collectContainerIssues(project, execute, environment) {
-  const issues = [];
-  for (const service of monitoredServices) {
-    let containerIds;
-    try {
-      containerIds =
-        execute(
-          'docker',
-          [
-            'ps',
-            '--all',
-            '--quiet',
-            '--filter',
-            `label=com.docker.compose.project=${project}`,
-            '--filter',
-            `label=com.docker.compose.service=${service}`,
-          ],
-          { env: environment, label: `${service} container lookup` },
-        ).match(/\S+/gu) ?? [];
-    } catch (error) {
-      issues.push(
-        `${service} container lookup failed: ${failureMessage(error)}`,
+function monitorContainerTargets({
+  externalIngressContainerId,
+  externalPostgresContainerId,
+  profile,
+  project,
+}) {
+  if (profile === 'root-managed-db') {
+    if (
+      externalIngressContainerId !== undefined ||
+      externalPostgresContainerId !== undefined
+    ) {
+      throw new Error(
+        'External container IDs are valid only for the external-db profile',
       );
-      continue;
     }
-    if (containerIds.length !== 1) {
-      issues.push(
-        `${service} must have exactly one container, found ${containerIds.length}`,
-      );
-      continue;
+    return monitoredServices.map((service) => ({ project, service }));
+  }
+  if (profile !== 'external-db') {
+    throw new Error('--profile must be root-managed-db or external-db');
+  }
+  if (!completeContainerIdPattern.test(externalPostgresContainerId ?? '')) {
+    throw new Error(
+      '--external-postgres-container-id must be a complete container ID',
+    );
+  }
+  if (!completeContainerIdPattern.test(externalIngressContainerId ?? '')) {
+    throw new Error(
+      '--external-ingress-container-id must be a complete container ID',
+    );
+  }
+  return [
+    { project, service: 'coturn' },
+    { containerId: externalIngressContainerId, service: 'ingress' },
+    { containerId: externalPostgresContainerId, service: 'postgres' },
+    { project, service: 'server' },
+  ];
+}
+
+function collectContainerIssues(targets, execute, environment) {
+  const issues = [];
+  for (const target of targets) {
+    const { service } = target;
+    let containerId = target.containerId;
+    if (containerId === undefined) {
+      let containerIds;
+      try {
+        containerIds =
+          execute(
+            'docker',
+            [
+              'ps',
+              '--all',
+              '--quiet',
+              '--filter',
+              `label=com.docker.compose.project=${target.project}`,
+              '--filter',
+              `label=com.docker.compose.service=${service}`,
+            ],
+            { env: environment, label: `${service} container lookup` },
+          ).match(/\S+/gu) ?? [];
+      } catch (error) {
+        issues.push(
+          `${service} container lookup failed: ${failureMessage(error)}`,
+        );
+        continue;
+      }
+      if (containerIds.length !== 1) {
+        issues.push(
+          `${service} must have exactly one container, found ${containerIds.length}`,
+        );
+        continue;
+      }
+      [containerId] = containerIds;
     }
     try {
       const inspection = parseJson(
-        execute(
-          'docker',
-          ['inspect', '--format', '{{json .}}', containerIds[0]],
-          {
-            env: environment,
-            label: `${service} container inspection`,
-          },
-        ),
+        execute('docker', ['inspect', '--format', '{{json .}}', containerId], {
+          env: environment,
+          label: `${service} container inspection`,
+        }),
         `${service} container inspection`,
       );
+      if (
+        target.containerId !== undefined &&
+        inspection?.Id !== target.containerId
+      ) {
+        issues.push(
+          `${service} container identity does not match configured ID`,
+        );
+        continue;
+      }
       issues.push(...containerIssues(service, inspection));
     } catch (error) {
       issues.push(
@@ -236,7 +285,10 @@ export async function collectMonitorReport(
     diskPaths = ['/', '/var/lib/docker'],
     domain,
     envFile,
+    externalIngressContainerId,
+    externalPostgresContainerId,
     now = Date.now(),
+    profile = 'root-managed-db',
     project = 'wo',
     skipWebProbe = false,
   } = {},
@@ -250,10 +302,16 @@ export async function collectMonitorReport(
   if (typeof envFile !== 'string' || envFile.length === 0) {
     throw new Error('--env-file is required');
   }
+  const containerTargets = monitorContainerTargets({
+    externalIngressContainerId,
+    externalPostgresContainerId,
+    profile,
+    project,
+  });
   const environment = loadEnvironment(resolve(envFile));
   const processEnvironment = deploymentProcessEnvironment({}, process.env);
   const issues = [
-    ...collectContainerIssues(project, execute, processEnvironment),
+    ...collectContainerIssues(containerTargets, execute, processEnvironment),
     ...diskIssues(execute, processEnvironment, diskPaths),
     ...(await turnCertificateIssues(environment, now, readCertificate)),
   ];
@@ -275,7 +333,7 @@ export async function collectMonitorReport(
   return {
     healthy: issues.length === 0,
     issues,
-    checkedServices: [...monitoredServices],
+    checkedServices: containerTargets.map(({ service }) => service),
   };
 }
 
@@ -305,7 +363,14 @@ if (
   runMonitor({
     domain: argumentValue('--domain'),
     envFile: argumentValue('--env-file'),
+    externalIngressContainerId: argumentValue(
+      '--external-ingress-container-id',
+    ),
+    externalPostgresContainerId: argumentValue(
+      '--external-postgres-container-id',
+    ),
     json: hasArgument('--json'),
+    profile: argumentValue('--profile', 'root-managed-db'),
     project: argumentValue('--project', 'wo'),
     skipWebProbe: hasArgument('--skip-web-probe'),
   }).catch((error) => {

@@ -530,17 +530,33 @@ node deploy/scripts/upgrade.mjs --env-file=deploy/.env
 
 ## 只读监控探测
 
-`monitor.mjs` 对生产栈做只读健康探测：caddy/server/coturn/postgres 四个容器
-必须唯一、running、healthcheck 已配置且 healthy、无 OOM、restart 次数不超
-阈值；server/coturn/postgres 还必须配置 json-file 日志轮转与内存限制；根分区
-与 `/var/lib/docker` 使用率不超过 85%；TURN 证书文件与 `APP_DOMAIN` 的
-HTTPS 证书剩余有效期不少于 21 天。docker/df 子进程探测有 20 秒超时，daemon
-卡死会转为明确失败而不是挂起。任一违规输出 `MONITOR_ISSUE` 并以非零码
-退出：
+`monitor.mjs` 对生产栈做只读健康探测。`root-managed-db` 是默认 profile，
+按 Compose project/service 标签要求 caddy/server/coturn/postgres 四个容器
+唯一。`external-db` 只用标签定位 Compose 管理的 server/coturn；外部
+PostgreSQL 和 ingress 必须分别通过完整 64 位容器 ID 显式固定，并直接
+`docker inspect`。脚本不会在标签缺失时自动猜测外部容器，容器替换后必须同步
+更新 timer/cron 中的 ID。
+
+所有目标必须 running、healthcheck 已配置且 healthy、无 OOM、restart 次数
+不超阈值；server/coturn/postgres 还必须配置 json-file 日志轮转与内存限制；
+根分区与 `/var/lib/docker` 使用率不超过 85%；TURN 证书文件与
+`APP_DOMAIN` 的 HTTPS 证书剩余有效期不少于 21 天。docker/df 子进程探测有
+20 秒超时，daemon 卡死会转为明确失败而不是挂起。任一违规输出
+`MONITOR_ISSUE` 并以非零码退出：
 
 ```bash
-node deploy/scripts/monitor.mjs --env-file=deploy/.env
-node deploy/scripts/monitor.mjs --env-file=deploy/.env --json
+# 仓库内 PostgreSQL + Caddy
+node deploy/scripts/monitor.mjs \
+  --env-file=deploy/.env \
+  --profile=root-managed-db
+
+# 外部 PostgreSQL + 1Panel/OpenResty ingress
+node deploy/scripts/monitor.mjs \
+  --env-file=deploy/.env \
+  --profile=external-db \
+  --external-postgres-container-id=<64位容器ID> \
+  --external-ingress-container-id=<64位容器ID> \
+  --json
 ```
 
 告警接入以退出码为准，宿主机用 cron/systemd timer 周期执行并在非零退出时
