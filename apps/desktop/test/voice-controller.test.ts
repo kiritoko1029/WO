@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createAudioOutput } from '../src/renderer/src/media/audio-output.js';
+import { resetSharedRnnoiseCacheForTests } from '../src/renderer/src/media/noise-suppressor.js';
 import {
   createVoiceController as createVoiceControllerImpl,
   clampMicrophoneVolume,
@@ -599,6 +600,311 @@ describe('voice capture and playback', () => {
     expect(voice.microphoneTrack).toBe(second);
     expect(first.stop).toHaveBeenCalledOnce();
     expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(second);
+  });
+
+  it('keeps the applied noise intensity when an intensity recapture is denied', async () => {
+    const initial = track();
+    const audioSender = sender();
+    const getUserMedia = vi
+      .fn()
+      .mockResolvedValueOnce(stream([initial]))
+      .mockRejectedValueOnce(
+        Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+      );
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(audioSender);
+
+    await expect(voice.setNoiseIntensity('medium')).rejects.toMatchObject({
+      code: 'MICROPHONE_PERMISSION_DENIED',
+    });
+
+    expect(voice.noiseIntensity).toBe('off');
+    expect(voice.microphoneTrack).toBe(initial);
+    expect(initial.stop).not.toHaveBeenCalled();
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(initial);
+  });
+
+  it('keeps the applied noise intensity when sender replacement fails', async () => {
+    const initial = track();
+    const replacement = track();
+    const audioSender = sender();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi
+          .fn()
+          .mockResolvedValueOnce(stream([initial]))
+          .mockResolvedValueOnce(stream([replacement])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(audioSender);
+    audioSender.replaceTrack.mockRejectedValueOnce(new Error('replace failed'));
+
+    await expect(voice.setNoiseIntensity('medium')).rejects.toThrow(
+      'replace failed',
+    );
+
+    expect(voice.noiseIntensity).toBe('off');
+    expect(voice.microphoneTrack).toBe(initial);
+    expect(initial.stop).not.toHaveBeenCalled();
+    expect(replacement.stop).toHaveBeenCalledOnce();
+  });
+
+  it('commits a rebuilt noise intensity only after sender replacement succeeds', async () => {
+    const initial = track();
+    const replacement = track();
+    const replace = deferred<void>();
+    const audioSender = sender();
+    const getUserMedia = vi
+      .fn()
+      .mockResolvedValueOnce(stream([initial]))
+      .mockResolvedValueOnce(stream([replacement]));
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(audioSender);
+    audioSender.replaceTrack.mockReturnValueOnce(replace.promise);
+
+    const changing = voice.setNoiseIntensity('medium');
+    await vi.waitFor(() =>
+      expect(audioSender.replaceTrack).toHaveBeenCalledWith(replacement),
+    );
+    expect(voice.noiseIntensity).toBe('off');
+    replace.resolve();
+    await expect(changing).resolves.toBeUndefined();
+
+    expect(voice.noiseIntensity).toBe('medium');
+    expect(voice.microphoneTrack).toBe(replacement);
+    expect(initial.stop).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the latest intensity when concurrent rebuilds finish out of order', async () => {
+    const initial = track();
+    const stale = track();
+    const latest = track();
+    const staleCapture = deferred<MediaStream>();
+    const latestCapture = deferred<MediaStream>();
+    const audioSender = sender();
+    const getUserMedia = vi
+      .fn()
+      .mockResolvedValueOnce(stream([initial]))
+      .mockReturnValueOnce(staleCapture.promise)
+      .mockReturnValueOnce(latestCapture.promise);
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(audioSender);
+
+    const staleChange = voice.setNoiseIntensity('medium');
+    const latestChange = voice.setNoiseIntensity('aggressive');
+    latestCapture.resolve(stream([latest]));
+    await expect(latestChange).resolves.toBeUndefined();
+    staleCapture.resolve(stream([stale]));
+    await expect(staleChange).rejects.toMatchObject({
+      code: 'MICROPHONE_CAPTURE_INVALID',
+    });
+
+    expect(voice.noiseIntensity).toBe('aggressive');
+    expect(voice.microphoneTrack).toBe(latest);
+    expect(stale.stop).toHaveBeenCalledOnce();
+    expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(latest);
+  });
+
+  it('does not rebuild capture when the selected noise intensity is unchanged', async () => {
+    const microphone = track();
+    const audioSender = sender();
+    const getUserMedia = vi.fn().mockResolvedValue(stream([microphone]));
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+    await voice.start(audioSender);
+
+    await expect(voice.setNoiseIntensity('off')).resolves.toBeUndefined();
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(audioSender.replaceTrack).toHaveBeenCalledOnce();
+    expect(voice.microphoneTrack).toBe(microphone);
+  });
+
+  it('releases capture when the initial outbound pipeline build throws', async () => {
+    const microphone = track();
+    Object.defineProperty(microphone, 'enabled', {
+      configurable: true,
+      get: () => true,
+      set: () => {
+        throw new Error('outbound state failed');
+      },
+    });
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(stream([microphone])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+    });
+
+    await expect(voice.start(sender())).rejects.toThrow(
+      'outbound state failed',
+    );
+
+    expect(microphone.stop).toHaveBeenCalledOnce();
+    expect(voice.microphoneTrack).toBeNull();
+  });
+
+  it('releases capture when the native fallback pipeline rebuild throws', async () => {
+    const microphone = track();
+    const applyConstraints = vi.fn().mockResolvedValue(undefined);
+    let enabledWrites = 0;
+    Object.defineProperties(microphone, {
+      applyConstraints: { configurable: true, value: applyConstraints },
+      enabled: {
+        configurable: true,
+        get: () => true,
+        set: () => {
+          enabledWrites += 1;
+          if (enabledWrites === 2) {
+            throw new Error('fallback outbound state failed');
+          }
+        },
+      },
+    });
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(stream([microphone])),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      initialNoiseIntensity: 'medium',
+    });
+
+    await expect(voice.start(sender())).rejects.toThrow(
+      'fallback outbound state failed',
+    );
+
+    expect(applyConstraints).toHaveBeenCalledWith({ noiseSuppression: true });
+    expect(microphone.stop).toHaveBeenCalledOnce();
+    expect(voice.microphoneTrack).toBeNull();
+  });
+
+  it('updates a live RNNoise pipeline intensity without recapture or sender replacement', async () => {
+    resetSharedRnnoiseCacheForTests();
+    const microphone = track();
+    const outbound = track();
+    const sourceNode = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+    const processorNode = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
+    };
+    const gainNode = {
+      gain: { value: 1 },
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+    const destinationNode = {
+      stream: {
+        getAudioTracks: () => [outbound],
+      },
+    };
+    const context = {
+      state: 'running',
+      createMediaStreamSource: vi.fn(() => sourceNode),
+      createScriptProcessor: vi.fn(() => processorNode),
+      createGain: vi.fn(() => gainNode),
+      createMediaStreamDestination: vi.fn(() => destinationNode),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AudioContext;
+    class FakeMediaStream {
+      constructor(private readonly tracks: readonly MediaStreamTrack[]) {}
+
+      getAudioTracks(): readonly MediaStreamTrack[] {
+        return this.tracks.filter((item) => item.kind === 'audio');
+      }
+    }
+    vi.stubGlobal('MediaStream', FakeMediaStream);
+    const getUserMedia = vi.fn().mockResolvedValue(stream([microphone]));
+    const audioSender = sender();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia,
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(),
+      initialNoiseIntensity: 'medium',
+      createAudioContext: () => context,
+      loadRnnoise: async () => ({
+        frameSize: 4,
+        createDenoiseState: () => ({
+          processFrame: () => 0.5,
+          destroy: vi.fn(),
+        }),
+      }),
+    });
+
+    try {
+      await voice.start(audioSender);
+      expect(voice.rnnoiseActive).toBe(true);
+      expect(voice.microphoneTrack).toBe(outbound);
+
+      const mediumOutput = new Float32Array(4);
+      processorNode.onaudioprocess?.({
+        inputBuffer: {
+          getChannelData: () => new Float32Array([1, 1, 1, 1]),
+        },
+        outputBuffer: {
+          getChannelData: () => mediumOutput,
+        },
+      } as unknown as AudioProcessingEvent);
+      for (const sample of mediumOutput) {
+        expect(sample).toBeCloseTo(0.55);
+      }
+
+      await voice.setNoiseIntensity('aggressive');
+
+      const aggressiveOutput = new Float32Array(4);
+      processorNode.onaudioprocess?.({
+        inputBuffer: {
+          getChannelData: () => new Float32Array([1, 1, 1, 1]),
+        },
+        outputBuffer: {
+          getChannelData: () => aggressiveOutput,
+        },
+      } as unknown as AudioProcessingEvent);
+      for (const sample of aggressiveOutput) {
+        expect(sample).toBeCloseTo(0.15);
+      }
+      expect(voice.noiseIntensity).toBe('aggressive');
+      expect(voice.microphoneTrack).toBe(outbound);
+      expect(getUserMedia).toHaveBeenCalledOnce();
+      expect(audioSender.replaceTrack).toHaveBeenCalledOnce();
+      expect(context.createScriptProcessor).toHaveBeenCalledOnce();
+    } finally {
+      await voice.cleanup();
+      vi.unstubAllGlobals();
+      resetSharedRnnoiseCacheForTests();
+    }
   });
 
   it('reattaches the current microphone when a joiner sender was attached earlier', async () => {

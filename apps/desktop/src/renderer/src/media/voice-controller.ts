@@ -261,6 +261,7 @@ export function createVoiceController(
 
   const captureRaw = async (
     deviceId: string | undefined,
+    intensity: NoiseIntensity,
     preferRnnoise: boolean,
   ): Promise<{
     readonly stream: MediaStream;
@@ -269,7 +270,7 @@ export function createVoiceController(
     let stream: MediaStream;
     try {
       stream = await mediaDevices.getUserMedia(
-        voiceConstraints(deviceId, noiseIntensity, preferRnnoise),
+        voiceConstraints(deviceId, intensity, preferRnnoise),
       );
     } catch (error) {
       throw captureError(error);
@@ -288,37 +289,43 @@ export function createVoiceController(
 
   const makeOutbound = async (
     rawTrack: MediaStreamTrack,
+    intensity: NoiseIntensity,
   ): Promise<{
     track: MediaStreamTrack;
     pipeline: OutboundPipeline;
     rnnoiseActive: boolean;
   }> => {
-    const suppressor = await createNoiseSuppressor(noiseIntensity, {
+    const suppressor = await createNoiseSuppressor(intensity, {
       createAudioContext: () => createAudioContext(),
       loadRnnoise: options.loadRnnoise,
     });
-    suppressor.setIntensity(noiseIntensity);
-    const outbound = await suppressor.process(rawTrack, {
-      gain: microphoneVolume,
-    });
-    const usedRnnoise = suppressor.active;
-    outbound.enabled = !muted;
-    return {
-      track: outbound,
-      rnnoiseActive: usedRnnoise,
-      pipeline: {
-        setVolume: (volume) => {
-          suppressor.setGain(volume);
-        },
-        setIntensity: (intensity) => {
-          suppressor.setIntensity(intensity);
-        },
-        dispose: () => {
-          suppressor.dispose();
-        },
+    try {
+      suppressor.setIntensity(intensity);
+      const outbound = await suppressor.process(rawTrack, {
+        gain: microphoneVolume,
+      });
+      const usedRnnoise = suppressor.active;
+      outbound.enabled = !muted;
+      return {
+        track: outbound,
         rnnoiseActive: usedRnnoise,
-      },
-    };
+        pipeline: {
+          setVolume: (volume) => {
+            suppressor.setGain(volume);
+          },
+          setIntensity: (intensity) => {
+            suppressor.setIntensity(intensity);
+          },
+          dispose: () => {
+            suppressor.dispose();
+          },
+          rnnoiseActive: usedRnnoise,
+        },
+      };
+    } catch (error) {
+      suppressor.dispose();
+      throw error;
+    }
   };
 
   const runCleanup = createIdempotentCleanup([
@@ -358,6 +365,7 @@ export function createVoiceController(
    */
   const captureAndBuild = async (
     deviceId?: string,
+    intensity: NoiseIntensity = noiseIntensity,
   ): Promise<{
     stream: MediaStream;
     rawTrack: MediaStreamTrack;
@@ -365,10 +373,18 @@ export function createVoiceController(
     pipeline: OutboundPipeline;
     usedRnnoise: boolean;
   }> => {
-    const wantRnnoise = noiseIntensity !== 'off';
+    const wantRnnoise = intensity !== 'off';
     // First attempt: prefer RNNoise (native NS off).
-    let captured = await captureRaw(deviceId, wantRnnoise);
-    let outbound = await makeOutbound(captured.rawTrack);
+    let captured = await captureRaw(deviceId, intensity, wantRnnoise);
+    const buildOutbound = async (): ReturnType<typeof makeOutbound> => {
+      try {
+        return await makeOutbound(captured.rawTrack, intensity);
+      } catch (error) {
+        stopTracks(captured.stream);
+        throw error;
+      }
+    };
+    let outbound = await buildOutbound();
 
     if (wantRnnoise && !outbound.rnnoiseActive) {
       outbound.pipeline.dispose();
@@ -387,12 +403,12 @@ export function createVoiceController(
         } catch {
           // Constraints rejected — re-open capture with native NS on.
           stopTracks(captured.stream);
-          captured = await captureRaw(deviceId, false);
+          captured = await captureRaw(deviceId, intensity, false);
         }
       }
       // If applyConstraints is unavailable, keep the original track rather
       // than thrashing getUserMedia; audio still flows (just without NS).
-      outbound = await makeOutbound(captured.rawTrack);
+      outbound = await buildOutbound();
     }
 
     return {
@@ -402,6 +418,67 @@ export function createVoiceController(
       pipeline: outbound.pipeline,
       usedRnnoise: outbound.rnnoiseActive,
     };
+  };
+
+  const replaceMicrophone = async (
+    deviceId: string,
+    intensity: NoiseIntensity,
+  ): Promise<MediaStreamTrack> => {
+    if (cleaned) throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
+    const operation = ++operationSequence;
+    const built = await captureAndBuild(deviceId || undefined, intensity);
+    if (!isCurrentOperation(operation)) {
+      built.pipeline.dispose();
+      stopTracks(built.stream);
+      throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
+    }
+    let senderMayReferenceCapturedTrack = false;
+    const previous = {
+      stream: null as MediaStream | null,
+      pipeline: null as OutboundPipeline | null,
+    };
+    try {
+      await mutateSender(async () => {
+        if (!isCurrentOperation(operation)) {
+          throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
+        }
+        const sender = audioSender;
+        const previousTrack = microphoneTrack;
+        if (sender !== null) {
+          await sender.replaceTrack(built.outboundTrack);
+          senderMayReferenceCapturedTrack = true;
+          stopUncommittedStreams();
+        }
+        if (!isCurrentOperation(operation)) {
+          if (sender !== null) {
+            await sender.replaceTrack(previousTrack);
+            senderMayReferenceCapturedTrack = false;
+          }
+          throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
+        }
+        previous.stream = localStream;
+        previous.pipeline = outboundPipeline;
+        clearRawTrackEndedListener();
+        localStream = built.stream;
+        rawMicrophoneTrack = built.rawTrack;
+        microphoneTrack = built.outboundTrack;
+        outboundPipeline = built.pipeline;
+        rnnoiseActive = built.usedRnnoise;
+        watchRawTrackEnded(built.rawTrack);
+        applyMutedToTracks();
+      });
+    } catch (error) {
+      if (senderMayReferenceCapturedTrack) {
+        uncommittedStreams.add(built.stream);
+      } else {
+        built.pipeline.dispose();
+        stopTracks(built.stream);
+      }
+      throw error;
+    }
+    previous.pipeline?.dispose();
+    if (previous.stream !== null) stopTracks(previous.stream);
+    return built.outboundTrack;
   };
 
   const controller: VoiceController = {
@@ -496,63 +573,7 @@ export function createVoiceController(
       muted = nextMuted;
       applyMutedToTracks();
     },
-    switchMicrophone: async (deviceId) => {
-      if (cleaned) throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-      const operation = ++operationSequence;
-      const built = await captureAndBuild(deviceId || undefined);
-      if (!isCurrentOperation(operation)) {
-        built.pipeline.dispose();
-        stopTracks(built.stream);
-        throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-      }
-      let senderMayReferenceCapturedTrack = false;
-      const previous = {
-        stream: null as MediaStream | null,
-        pipeline: null as OutboundPipeline | null,
-      };
-      try {
-        await mutateSender(async () => {
-          if (!isCurrentOperation(operation)) {
-            throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-          }
-          const sender = audioSender;
-          const previousTrack = microphoneTrack;
-          if (sender !== null) {
-            await sender.replaceTrack(built.outboundTrack);
-            senderMayReferenceCapturedTrack = true;
-            stopUncommittedStreams();
-          }
-          if (!isCurrentOperation(operation)) {
-            if (sender !== null) {
-              await sender.replaceTrack(previousTrack);
-              senderMayReferenceCapturedTrack = false;
-            }
-            throw new VoiceControllerError('MICROPHONE_CAPTURE_INVALID');
-          }
-          previous.stream = localStream;
-          previous.pipeline = outboundPipeline;
-          clearRawTrackEndedListener();
-          localStream = built.stream;
-          rawMicrophoneTrack = built.rawTrack;
-          microphoneTrack = built.outboundTrack;
-          outboundPipeline = built.pipeline;
-          rnnoiseActive = built.usedRnnoise;
-          watchRawTrackEnded(built.rawTrack);
-          applyMutedToTracks();
-        });
-      } catch (error) {
-        if (senderMayReferenceCapturedTrack) {
-          uncommittedStreams.add(built.stream);
-        } else {
-          built.pipeline.dispose();
-          stopTracks(built.stream);
-        }
-        throw error;
-      }
-      previous.pipeline?.dispose();
-      if (previous.stream !== null) stopTracks(previous.stream);
-      return built.outboundTrack;
-    },
+    switchMicrophone: (deviceId) => replaceMicrophone(deviceId, noiseIntensity),
     attachRemoteTrack: (track) => options.audioOutput.attach(track),
     clearRemoteTracks: () => {
       options.audioOutput.clearRemoteTracks();
@@ -572,7 +593,11 @@ export function createVoiceController(
     selectOutput: (deviceId) => options.audioOutput.selectSink(deviceId),
     setNoiseIntensity: async (nextIntensity) => {
       const previous = noiseIntensity;
-      noiseIntensity = nextIntensity;
+      if (nextIntensity === previous) return;
+      if (rawMicrophoneTrack === null) {
+        noiseIntensity = nextIntensity;
+        return;
+      }
       // Level changes within RNNoise-active bands can update in place.
       if (
         previous !== 'off' &&
@@ -581,13 +606,13 @@ export function createVoiceController(
         outboundPipeline !== null
       ) {
         outboundPipeline.setIntensity(nextIntensity);
+        noiseIntensity = nextIntensity;
         return;
       }
       // off ↔ on, or RNNoise was not active: rebuild capture pipeline.
-      if (rawMicrophoneTrack !== null) {
-        const deviceId = rawMicrophoneTrack.getSettings?.().deviceId ?? '';
-        await controller.switchMicrophone(deviceId);
-      }
+      const deviceId = rawMicrophoneTrack.getSettings?.().deviceId ?? '';
+      await replaceMicrophone(deviceId, nextIntensity);
+      noiseIntensity = nextIntensity;
     },
     listDevices: async () => {
       const devices = await mediaDevices.enumerateDevices();

@@ -14,6 +14,7 @@ import {
 import type { PeerConnectionLike } from '../src/renderer/src/media/peer-connection-controller.js';
 import type { SignalingClient } from '../src/renderer/src/media/signaling-client.js';
 import type { SignalingConnectionEvent } from '../src/renderer/src/media/signaling-client.js';
+import { readNoiseIntensity } from '../src/renderer/src/media/noise-suppressor.js';
 import type { RoomGatewayEvent } from '../src/renderer/src/state/room-store.js';
 import type { DesktopApi, PublicAuthSession } from '../src/preload/types.js';
 
@@ -1034,7 +1035,7 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
-  it('normalizes V04 settings before initialization and keeps the snapshot aligned', async () => {
+  it('normalizes call settings before initialization and keeps the snapshot aligned', async () => {
     window.localStorage.clear();
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
@@ -1061,12 +1062,18 @@ describe('realtime room gateway', () => {
       expect(() => call.setOutputMuted(true)).not.toThrow();
       expect(() => call.setRemoteVolume(2)).not.toThrow();
       expect(() => call.setMicrophoneVolume(2)).not.toThrow();
+      await expect(
+        call.setNoiseIntensity('aggressive'),
+      ).resolves.toBeUndefined();
       expect(call.getSnapshot()).toMatchObject({
         muted: true,
         outputMuted: true,
         remoteVolume: 1,
         microphoneVolume: 2,
+        noiseIntensity: 'aggressive',
+        rnnoiseActive: false,
       });
+      expect(readNoiseIntensity()).toBe('aggressive');
 
       await call.start();
       expect(peer.transceivers[0]!.sender.track?.enabled).toBe(false);

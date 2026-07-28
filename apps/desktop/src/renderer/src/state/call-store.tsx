@@ -844,6 +844,7 @@ export function createCallController(
   let microphoneRetryFlightDeviceId: string | null = null;
   let microphoneRetryFlightGeneration = 0;
   let microphoneSwitchGeneration = 0;
+  let noiseIntensityGeneration = 0;
   let outputSelectionChain = Promise.resolve();
   let localReady = false;
   let remoteReady = false;
@@ -1532,7 +1533,7 @@ export function createCallController(
     voice = createVoiceController({
       mediaDevices: options.mediaDevices,
       audioOutput,
-      initialNoiseIntensity: readNoiseIntensity(),
+      initialNoiseIntensity: snapshot.noiseIntensity,
       initialMicrophoneVolume: snapshot.microphoneVolume,
       onMicrophoneEnded: (error) => {
         if (closed) return;
@@ -2312,11 +2313,26 @@ export function createCallController(
       update({ microphoneVolume: normalizedVolume });
     },
     setNoiseIntensity: async (intensity) => {
-      await voice!.setNoiseIntensity(intensity);
-      writeNoiseIntensity(intensity);
+      const generation = ++noiseIntensityGeneration;
+      const activeVoice = voice;
+      if (activeVoice === null) {
+        writeNoiseIntensity(intensity);
+        update({ noiseIntensity: intensity, rnnoiseActive: false });
+        return;
+      }
+      await activeVoice.setNoiseIntensity(intensity);
+      if (
+        closed ||
+        generation !== noiseIntensityGeneration ||
+        activeVoice !== voice
+      ) {
+        return;
+      }
+      const appliedIntensity = activeVoice.noiseIntensity;
+      writeNoiseIntensity(appliedIntensity);
       update({
-        noiseIntensity: intensity,
-        rnnoiseActive: voice!.rnnoiseActive,
+        noiseIntensity: appliedIntensity,
+        rnnoiseActive: activeVoice.rnnoiseActive,
       });
     },
     selectOutput: async (deviceId) => {

@@ -50,6 +50,7 @@ declare global {
     readonly woAcceptanceControl: Readonly<{
       denyNextMicrophoneCapture(): number;
       dropSignaling(): number;
+      resetRnnoiseCallbackGap(): number;
       stopLocalMicrophoneTrack(): number;
       stopLocalScreenTrack(): number;
     }>;
@@ -78,6 +79,9 @@ const captureDiagnostic = {
 const rnnoiseDiagnostic = {
   processorCreations: 0,
   processedFrames: 0,
+  audioProcessCallbacks: 0,
+  maxCallbackGapMs: 0,
+  lastCallbackAtMs: 0,
 };
 
 function numberValue(value: unknown): number {
@@ -416,6 +420,15 @@ function installRnnoiseProbe(): void {
       );
       rnnoiseDiagnostic.processorCreations += 1;
       processor.addEventListener('audioprocess', (event) => {
+        const callbackAtMs = performance.now();
+        if (rnnoiseDiagnostic.lastCallbackAtMs > 0) {
+          rnnoiseDiagnostic.maxCallbackGapMs = Math.max(
+            rnnoiseDiagnostic.maxCallbackGapMs,
+            callbackAtMs - rnnoiseDiagnostic.lastCallbackAtMs,
+          );
+        }
+        rnnoiseDiagnostic.lastCallbackAtMs = callbackAtMs;
+        rnnoiseDiagnostic.audioProcessCallbacks += 1;
         rnnoiseDiagnostic.processedFrames += (
           event as AudioProcessingEvent
         ).inputBuffer.length;
@@ -465,6 +478,11 @@ Object.defineProperty(window, 'woAcceptanceControl', {
       }
       signalingDrops += closed;
       return closed;
+    },
+    resetRnnoiseCallbackGap: () => {
+      rnnoiseDiagnostic.maxCallbackGapMs = 0;
+      rnnoiseDiagnostic.lastCallbackAtMs = 0;
+      return rnnoiseDiagnostic.audioProcessCallbacks;
     },
     stopLocalMicrophoneTrack: () => {
       let stopped = 0;

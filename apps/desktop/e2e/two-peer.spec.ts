@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { ElectronApplication, Page } from '@playwright/test';
 
 import {
   expect,
@@ -55,6 +55,9 @@ interface AcceptanceSnapshot {
   readonly rnnoise: Readonly<{
     processorCreations: number;
     processedFrames: number;
+    audioProcessCallbacks: number;
+    maxCallbackGapMs: number;
+    lastCallbackAtMs: number;
   }>;
   readonly rnnoiseActive: boolean;
   readonly peers: readonly PeerDiagnostic[];
@@ -67,6 +70,34 @@ interface AcceptanceSnapshot {
 }
 
 const password = 'Wo-E2E-Password-2026';
+const maxRnnoiseCallbackGapMs = 5_000;
+const maxRnnoiseTotalCpuPercent = 50;
+const maxRnnoiseProcessCpuPercent = 25;
+
+interface ProcessCpuSample {
+  readonly pid: number;
+  readonly type: string;
+  readonly percentCPUUsage: number;
+}
+
+interface AppCpuSample {
+  readonly sampledAt: number;
+  readonly processes: readonly ProcessCpuSample[];
+  readonly totalPercentCPUUsage: number;
+  readonly maxPercentCPUUsage: number;
+}
+
+interface NoiseIntensitySwitchReport {
+  readonly firstProcessorCreations: number;
+  readonly secondProcessorCreations: number;
+  readonly firstMaxCallbackGapMs: number;
+  readonly secondMaxCallbackGapMs: number;
+  readonly cpu: readonly Readonly<{
+    intensity: 'light' | 'medium' | 'aggressive';
+    first: AppCpuSample;
+    second: AppCpuSample;
+  }>[];
+}
 
 async function diagnostics(page: Page): Promise<AcceptanceSnapshot | null> {
   return page.evaluate(() =>
@@ -76,6 +107,58 @@ async function diagnostics(page: Page): Promise<AcceptanceSnapshot | null> {
       }
     ).woAcceptance.snapshot(),
   );
+}
+
+async function requiredDiagnostics(page: Page): Promise<AcceptanceSnapshot> {
+  const value = await diagnostics(page);
+  if (value === null) throw new Error('Acceptance diagnostics are unavailable');
+  return value;
+}
+
+async function resetRnnoiseCallbackGap(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { resetRnnoiseCallbackGap(): number };
+      }
+    ).woAcceptanceControl.resetRnnoiseCallbackGap(),
+  );
+}
+
+async function cpuSample(
+  application: ElectronApplication,
+): Promise<AppCpuSample> {
+  const processes = await application.evaluate(({ app }) =>
+    app.getAppMetrics().map((metric) => ({
+      pid: metric.pid,
+      type: metric.type,
+      percentCPUUsage: metric.cpu.percentCPUUsage,
+    })),
+  );
+  expect(processes.length).toBeGreaterThan(0);
+  for (const process of processes) {
+    expect(Number.isFinite(process.percentCPUUsage)).toBe(true);
+    expect(process.percentCPUUsage).toBeGreaterThanOrEqual(0);
+    expect(process.percentCPUUsage).toBeLessThanOrEqual(100);
+  }
+  const sample = {
+    sampledAt: Date.now(),
+    processes,
+    totalPercentCPUUsage: processes.reduce(
+      (total, process) => total + process.percentCPUUsage,
+      0,
+    ),
+    maxPercentCPUUsage: Math.max(
+      ...processes.map((process) => process.percentCPUUsage),
+    ),
+  };
+  expect(sample.totalPercentCPUUsage).toBeLessThanOrEqual(
+    maxRnnoiseTotalCpuPercent,
+  );
+  expect(sample.maxPercentCPUUsage).toBeLessThanOrEqual(
+    maxRnnoiseProcessCpuPercent,
+  );
+  return sample;
 }
 
 function activePeer(
@@ -354,6 +437,106 @@ async function proveBidirectionalAudio(pair: AcceptancePair): Promise<void> {
   );
 }
 
+async function proveNoiseIntensitySwitching(
+  pair: AcceptancePair,
+): Promise<NoiseIntensitySwitchReport> {
+  const firstBaseline = await requiredDiagnostics(pair.first.page);
+  const secondBaseline = await requiredDiagnostics(pair.second.page);
+  const firstPeer = activePeer(firstBaseline);
+  const secondPeer = activePeer(secondBaseline);
+  if (firstPeer === null || secondPeer === null) {
+    throw new Error('Connected peers are unavailable for RNNoise switching');
+  }
+  const firstNegotiations = firstPeer.offers + firstPeer.answers;
+  const secondNegotiations = secondPeer.offers + secondPeer.answers;
+  const firstProcessorCreations = firstBaseline.rnnoise.processorCreations;
+  const secondProcessorCreations = secondBaseline.rnnoise.processorCreations;
+  const cpu: Array<{
+    intensity: 'light' | 'medium' | 'aggressive';
+    first: AppCpuSample;
+    second: AppCpuSample;
+  }> = [];
+  const settingsButton = pair.first.page.getByRole('button', { name: '设置' });
+  await settingsButton.click();
+  const settings = pair.first.page.getByRole('dialog', { name: '通话设置' });
+  await expect(settings).toBeVisible();
+  const selector = settings.getByLabel('麦克风降噪');
+  await expect(selector).toHaveValue('light');
+
+  // Electron CPUUsage is measured since the previous sample; the first call
+  // establishes the baseline and intentionally reports zero.
+  await Promise.all([
+    cpuSample(pair.first.application),
+    cpuSample(pair.second.application),
+  ]);
+
+  for (const intensity of ['medium', 'aggressive', 'light'] as const) {
+    await Promise.all([
+      resetRnnoiseCallbackGap(pair.first.page),
+      resetRnnoiseCallbackGap(pair.second.page),
+    ]);
+    const firstBefore = await requiredDiagnostics(pair.first.page);
+    const secondBefore = await requiredDiagnostics(pair.second.page);
+    const firstPeerBefore = activePeer(firstBefore);
+    const secondPeerBefore = activePeer(secondBefore);
+    if (firstPeerBefore === null || secondPeerBefore === null) {
+      throw new Error('Peer disappeared during RNNoise switching');
+    }
+
+    await selector.selectOption(intensity);
+    await expect(selector).toHaveValue(intensity);
+    await waitForPeer(
+      pair.first.page,
+      (peer, snapshot) =>
+        peer.id === firstPeer.id &&
+        peer.offers + peer.answers === firstNegotiations &&
+        peer.packetsSentAudio > firstPeerBefore.packetsSentAudio &&
+        peer.packetsReceivedAudio > firstPeerBefore.packetsReceivedAudio &&
+        snapshot.rnnoiseActive &&
+        snapshot.rnnoise.processorCreations === firstProcessorCreations &&
+        snapshot.rnnoise.processedFrames >
+          firstBefore.rnnoise.processedFrames &&
+        snapshot.rnnoise.audioProcessCallbacks >=
+          firstBefore.rnnoise.audioProcessCallbacks + 2 &&
+        snapshot.rnnoise.maxCallbackGapMs > 0 &&
+        snapshot.rnnoise.maxCallbackGapMs <= maxRnnoiseCallbackGapMs,
+    );
+    await waitForPeer(
+      pair.second.page,
+      (peer, snapshot) =>
+        peer.id === secondPeer.id &&
+        peer.offers + peer.answers === secondNegotiations &&
+        peer.packetsSentAudio > secondPeerBefore.packetsSentAudio &&
+        peer.packetsReceivedAudio > secondPeerBefore.packetsReceivedAudio &&
+        snapshot.rnnoiseActive &&
+        snapshot.rnnoise.processorCreations === secondProcessorCreations &&
+        snapshot.rnnoise.processedFrames >
+          secondBefore.rnnoise.processedFrames &&
+        snapshot.rnnoise.audioProcessCallbacks >=
+          secondBefore.rnnoise.audioProcessCallbacks + 2 &&
+        snapshot.rnnoise.maxCallbackGapMs > 0 &&
+        snapshot.rnnoise.maxCallbackGapMs <= maxRnnoiseCallbackGapMs,
+    );
+    cpu.push({
+      intensity,
+      first: await cpuSample(pair.first.application),
+      second: await cpuSample(pair.second.application),
+    });
+  }
+
+  const firstAfter = await requiredDiagnostics(pair.first.page);
+  const secondAfter = await requiredDiagnostics(pair.second.page);
+  await settingsButton.click();
+  await expect(settings).toHaveCount(0);
+  return {
+    firstProcessorCreations,
+    secondProcessorCreations,
+    firstMaxCallbackGapMs: firstAfter.rnnoise.maxCallbackGapMs,
+    secondMaxCallbackGapMs: secondAfter.rnnoise.maxCallbackGapMs,
+    cpu,
+  };
+}
+
 async function startMotionShare(
   page: Page,
   motionTitle: string,
@@ -513,6 +696,11 @@ for (const policy of ['all', 'relay'] as const) {
     ]);
     await connectRoom(pair, policy === 'all');
     await proveBidirectionalAudio(pair);
+    const noiseIntensitySwitchReport = await proveNoiseIntensitySwitching(pair);
+    await test.info().attach(`v06-rnnoise-${policy}.json`, {
+      body: JSON.stringify(noiseIntensitySwitchReport, null, 2),
+      contentType: 'application/json',
+    });
     if (policy === 'all') {
       await proveMicrophoneRevocationRecovery(pair);
     }
