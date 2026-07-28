@@ -38,6 +38,15 @@ export interface AudioOutput {
   cleanup(): Promise<void>;
 }
 
+export const DEFAULT_REMOTE_VOLUME = 1;
+export const MIN_REMOTE_VOLUME = 0;
+export const MAX_REMOTE_VOLUME = 1;
+
+export function clampRemoteVolume(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_REMOTE_VOLUME;
+  return Math.min(MAX_REMOTE_VOLUME, Math.max(MIN_REMOTE_VOLUME, value));
+}
+
 const createBrowserElement = (): AudioElementLike =>
   document.createElement('audio') as unknown as AudioElementLike;
 
@@ -145,7 +154,7 @@ export function createAudioOutput(
     },
     setVolume: (volume: number) => {
       if (cleaned) return;
-      element.volume = Math.min(1, Math.max(0, volume));
+      element.volume = clampRemoteVolume(volume);
     },
     selectSink: async (sinkId: string) => {
       if (cleaned) return false;

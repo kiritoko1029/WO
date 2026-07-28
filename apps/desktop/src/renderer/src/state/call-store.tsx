@@ -34,7 +34,7 @@ import {
   createSignalingClient,
   type SignalingClient,
 } from '../media/signaling-client.js';
-import { createAudioOutput } from '../media/audio-output.js';
+import { clampRemoteVolume, createAudioOutput } from '../media/audio-output.js';
 import { createIdempotentCleanup } from '../media/media-cleanup.js';
 import { createNegotiationController } from '../media/negotiation-controller.js';
 import {
@@ -70,6 +70,7 @@ import {
   type StatsMonitor,
 } from '../media/stats-monitor.js';
 import {
+  clampMicrophoneVolume,
   createVoiceController,
   readMicrophoneVolume,
   VoiceControllerError,
@@ -1532,7 +1533,7 @@ export function createCallController(
       mediaDevices: options.mediaDevices,
       audioOutput,
       initialNoiseIntensity: readNoiseIntensity(),
-      initialMicrophoneVolume: readMicrophoneVolume(),
+      initialMicrophoneVolume: snapshot.microphoneVolume,
       onMicrophoneEnded: (error) => {
         if (closed) return;
         microphoneAcquired = false;
@@ -1550,6 +1551,7 @@ export function createCallController(
     });
     voice.setMuted(snapshot.muted);
     voice.setOutputMuted(snapshot.outputMuted);
+    voice.setRemoteVolume(snapshot.remoteVolume);
     createTransport();
     const presentationBridge: PresentationFpsSampler = Object.freeze({
       sample: (timestampMs: number) =>
@@ -2250,7 +2252,7 @@ export function createCallController(
       return startPromise;
     },
     setMuted: (muted) => {
-      voice!.setMuted(muted);
+      voice?.setMuted(muted);
       update({ muted });
     },
     switchMicrophone: async (deviceId) => {
@@ -2295,17 +2297,19 @@ export function createCallController(
       }
     },
     setOutputMuted: (muted) => {
-      voice!.setOutputMuted(muted);
+      voice?.setOutputMuted(muted);
       update({ outputMuted: muted });
     },
     setRemoteVolume: (volume) => {
-      voice!.setRemoteVolume(volume);
-      update({ remoteVolume: volume });
+      const normalizedVolume = clampRemoteVolume(volume);
+      voice?.setRemoteVolume(normalizedVolume);
+      update({ remoteVolume: normalizedVolume });
     },
     setMicrophoneVolume: (volume) => {
-      voice!.setMicrophoneVolume(volume);
-      writeMicrophoneVolume(voice!.microphoneVolume);
-      update({ microphoneVolume: voice!.microphoneVolume });
+      const normalizedVolume = clampMicrophoneVolume(volume);
+      voice?.setMicrophoneVolume(normalizedVolume);
+      writeMicrophoneVolume(normalizedVolume);
+      update({ microphoneVolume: normalizedVolume });
     },
     setNoiseIntensity: async (intensity) => {
       await voice!.setNoiseIntensity(intensity);

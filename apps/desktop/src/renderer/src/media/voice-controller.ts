@@ -7,7 +7,7 @@ import {
   noiseSuppressionEnabledFor,
 } from './noise-suppressor.js';
 
-import type { AudioOutput } from './audio-output.js';
+import { clampRemoteVolume, type AudioOutput } from './audio-output.js';
 
 export type VoiceControllerErrorCode =
   | 'MICROPHONE_PERMISSION_DENIED'
@@ -562,7 +562,7 @@ export function createVoiceController(
       options.audioOutput.setMuted(nextMuted);
     },
     setRemoteVolume: (volume) => {
-      remoteVolume = Math.min(1, Math.max(0, volume));
+      remoteVolume = clampRemoteVolume(volume);
       options.audioOutput.setVolume(remoteVolume);
     },
     setMicrophoneVolume: (volume) => {

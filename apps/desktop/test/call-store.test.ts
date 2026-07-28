@@ -1034,6 +1034,56 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
+  it('normalizes V04 settings before initialization and keeps the snapshot aligned', async () => {
+    window.localStorage.clear();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const microphone = audioTrack();
+    const mediaDevices = {
+      getUserMedia: vi.fn().mockResolvedValue(mediaStream(microphone)),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
+    } as unknown as MediaDevices;
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices,
+      createPeerConnection: peer.factory,
+    });
+
+    try {
+      expect(() => call.setMuted(true)).not.toThrow();
+      expect(() => call.setOutputMuted(true)).not.toThrow();
+      expect(() => call.setRemoteVolume(2)).not.toThrow();
+      expect(() => call.setMicrophoneVolume(2)).not.toThrow();
+      expect(call.getSnapshot()).toMatchObject({
+        muted: true,
+        outputMuted: true,
+        remoteVolume: 1,
+        microphoneVolume: 2,
+      });
+
+      await call.start();
+      expect(peer.transceivers[0]!.sender.track?.enabled).toBe(false);
+
+      call.setRemoteVolume(-1);
+      expect(call.getSnapshot().remoteVolume).toBe(0);
+      expect(() => call.setRemoteVolume(Number.NaN)).not.toThrow();
+      expect(call.getSnapshot().remoteVolume).toBe(1);
+
+      call.setMicrophoneVolume(Number.NaN);
+      expect(call.getSnapshot().microphoneVolume).toBe(1);
+    } finally {
+      await call.cleanup();
+      window.localStorage.clear();
+    }
+  });
+
   it('refreshes devices and clears disappeared selections on devicechange without rebuilding media', async () => {
     const originalSetSinkId = Object.getOwnPropertyDescriptor(
       HTMLMediaElement.prototype,

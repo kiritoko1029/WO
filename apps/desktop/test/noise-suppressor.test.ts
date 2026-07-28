@@ -202,6 +202,65 @@ describe('createNoiseSuppressor', () => {
     suppressor.dispose();
   });
 
+  it('applies 0-200% microphone gain on one live audio graph', async () => {
+    const input = mockTrack();
+    const outbound = mockTrack();
+    const sourceNode = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+    const gainNode = {
+      gain: { value: -1 },
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+    const destinationNode = {
+      stream: {
+        getAudioTracks: () => [outbound],
+      },
+    };
+    const context = {
+      state: 'running',
+      createMediaStreamSource: vi.fn(() => sourceNode),
+      createGain: vi.fn(() => gainNode),
+      createMediaStreamDestination: vi.fn(() => destinationNode),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AudioContext;
+    class FakeMediaStream {
+      constructor(private readonly tracks: readonly MediaStreamTrack[]) {}
+
+      getTracks(): readonly MediaStreamTrack[] {
+        return this.tracks;
+      }
+
+      getAudioTracks(): readonly MediaStreamTrack[] {
+        return this.tracks.filter((track) => track.kind === 'audio');
+      }
+    }
+    vi.stubGlobal('MediaStream', FakeMediaStream);
+    const suppressor = await createNoiseSuppressor('off', {
+      createAudioContext: () => context,
+    });
+
+    try {
+      await expect(suppressor.process(input, { gain: 1 })).resolves.toBe(
+        outbound,
+      );
+      expect(gainNode.gain.value).toBe(1);
+
+      for (const volume of [0, 1, 2]) {
+        suppressor.setGain(volume);
+        expect(gainNode.gain.value).toBe(volume);
+      }
+      expect(context.createGain).toHaveBeenCalledOnce();
+      expect(sourceNode.connect).toHaveBeenCalledOnce();
+      expect(gainNode.connect).toHaveBeenCalledOnce();
+    } finally {
+      suppressor.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('reports active when RNNoise loads successfully', async () => {
     // We cannot fully run ScriptProcessor without a real AudioContext; verify
     // the load path marks active via ensure + process failure path.

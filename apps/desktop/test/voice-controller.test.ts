@@ -314,6 +314,10 @@ describe('voice capture and playback', () => {
     expect(audioSender.replaceTrack).toHaveBeenLastCalledWith(newTrack);
     expect(oldTrack.stop).toHaveBeenCalledOnce();
     expect(voice.muted).toBe(true);
+
+    voice.setMuted(false);
+    expect(newTrack.enabled).toBe(true);
+    expect(voice.muted).toBe(false);
   });
 
   it('keeps the old microphone when replaceTrack fails and stops the new one', async () => {
@@ -372,6 +376,36 @@ describe('voice capture and playback', () => {
     expect(element.play).toHaveBeenCalledOnce();
     expect(element.muted).toBe(true);
     expect(element.setSinkId).toHaveBeenCalledWith('speaker-2');
+
+    voice.setOutputMuted(false);
+    expect(element.muted).toBe(false);
+    expect(voice.outputMuted).toBe(false);
+  });
+
+  it('normalizes remote volume before updating playback and controller state', () => {
+    const element = audioElement();
+    const voice = createVoiceController({
+      mediaDevices: {
+        getUserMedia: vi.fn(),
+        enumerateDevices: vi.fn(),
+      } as unknown as MediaDevices,
+      audioOutput: output(element),
+    });
+
+    for (const [input, expected] of [
+      [0, 0],
+      [0.5, 0.5],
+      [1, 1],
+      [-1, 0],
+      [2, 1],
+      [Number.NaN, 1],
+      [Number.NEGATIVE_INFINITY, 1],
+      [Number.POSITIVE_INFINITY, 1],
+    ] as const) {
+      voice.setRemoteVolume(input);
+      expect(voice.remoteVolume).toBe(expected);
+      expect(element.volume).toBe(expected);
+    }
   });
 
   it('mixes microphone and desktop-audio remote tracks instead of replacing', async () => {
@@ -703,6 +737,9 @@ describe('microphone volume', () => {
   it('clamps volume into the supported range', () => {
     expect(clampMicrophoneVolume(Number.NaN)).toBe(1);
     expect(clampMicrophoneVolume(-1)).toBe(0);
+    expect(clampMicrophoneVolume(0)).toBe(0);
+    expect(clampMicrophoneVolume(1)).toBe(1);
+    expect(clampMicrophoneVolume(2)).toBe(2);
     expect(clampMicrophoneVolume(3)).toBe(2);
     expect(clampMicrophoneVolume(0.5)).toBe(0.5);
   });

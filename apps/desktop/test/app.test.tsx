@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 // @vitest-environment-options {"url":"https://wo.example.cn/"}
 
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1092,6 +1099,20 @@ describe('desktop account and room workflow', () => {
     await user.click(screen.getByRole('button', { name: '设置' }));
     await user.selectOptions(screen.getByLabelText('麦克风'), 'mic-2');
     await user.selectOptions(screen.getByLabelText('扬声器'), 'speaker-1');
+    expect(
+      (screen.getByLabelText('麦克风音量') as HTMLInputElement).value,
+    ).toBe('1');
+    expect((screen.getByLabelText('对方音量') as HTMLInputElement).value).toBe(
+      '1',
+    );
+    for (const volume of ['0', '2']) {
+      fireEvent.change(screen.getByLabelText('麦克风音量'), {
+        target: { value: volume },
+      });
+    }
+    fireEvent.change(screen.getByLabelText('对方音量'), {
+      target: { value: '0' },
+    });
     await user.click(screen.getByRole('button', { name: '静音扬声器' }));
     await user.click(screen.getByRole('button', { name: '挂断' }));
 
@@ -1099,6 +1120,8 @@ describe('desktop account and room workflow', () => {
     expect(call.setMuted).toHaveBeenCalledWith(true);
     expect(call.switchMicrophone).toHaveBeenCalledWith('mic-2');
     expect(call.selectOutput).toHaveBeenCalledWith('speaker-1');
+    expect(call.setMicrophoneVolume.mock.calls).toEqual([[0], [2]]);
+    expect(call.setRemoteVolume.mock.calls).toEqual([[0]]);
     expect(call.setOutputMuted).toHaveBeenCalledWith(true);
     expect(call.openScreenSettings).toHaveBeenCalledOnce();
     expect(order).toEqual(['call-cleanup', 'room-end']);
