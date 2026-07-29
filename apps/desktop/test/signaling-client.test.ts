@@ -440,12 +440,70 @@ describe('typed signaling client', () => {
     });
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
     await vi.advanceTimersByTimeAsync(41);
+    await vi.advanceTimersByTimeAsync(250);
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     sockets[1]!.protocol = 'unexpected';
     sockets[1]!.open();
 
     await connectionAssertion;
     expect(desktop.realtime.issueTicket).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off bounded fresh-ticket attempts so a sustained WSS outage can recover', async () => {
+    vi.useFakeTimers();
+    const desktop = createDesktop();
+    desktop.realtime.issueTicket.mockResolvedValue(grant('R'));
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      if (factory.mock.calls.length <= 4) {
+        throw new Error('WSS unavailable');
+      }
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const client = createSignalingClient({
+      desktop,
+      createWebSocket: factory,
+      makeRequestId: () => 'retry-request',
+    });
+
+    const connected = client.connect('access-token');
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(1));
+    for (const [index, delayMs] of [250, 500, 1_000, 2_000].entries()) {
+      await vi.advanceTimersByTimeAsync(delayMs);
+      await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(index + 2));
+    }
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.open();
+
+    await expect(connected).resolves.toBeUndefined();
+    expect(desktop.realtime.issueTicket).toHaveBeenCalledTimes(5);
+  });
+
+  it('cancels a pending connect backoff when the client disconnects', async () => {
+    vi.useFakeTimers();
+    const desktop = createDesktop();
+    desktop.realtime.issueTicket.mockResolvedValue(grant('S'));
+    const factory = vi.fn(() => {
+      throw new Error('WSS unavailable');
+    });
+    const client = createSignalingClient({
+      desktop,
+      createWebSocket: factory,
+      makeRequestId: () => 'cancel-request',
+    });
+
+    const connected = client.connect('access-token');
+    const connectionAssertion = expect(connected).rejects.toMatchObject({
+      code: 'SIGNALING_CLOSED',
+    });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledOnce());
+    client.disconnect();
+
+    await connectionAssertion;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(factory).toHaveBeenCalledOnce();
   });
 
   it('ignores a stale socket close after a replacement connection is established', async () => {

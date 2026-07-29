@@ -16,6 +16,7 @@ import type { SystemAudioMode } from '../src/preload/types.js';
 
 class FakeTrack {
   readonly stop = vi.fn();
+  contentHint = '';
   readyState: MediaStreamTrackState = 'live';
   readonly getSettings = vi.fn(() => ({
     width: 1_920,
@@ -105,6 +106,7 @@ function createHarness(
     readonly acquire?: Promise<P2pScreenLease>;
     readonly releaseFails?: boolean;
     readonly capture?: Promise<MediaStream>;
+    readonly captureSequence?: readonly (() => Promise<MediaStream>)[];
     readonly systemAudioMode?: SystemAudioMode;
     readonly replaceTrack?: (track: MediaStreamTrack | null) => Promise<void>;
     readonly renew?: (
@@ -118,10 +120,13 @@ function createHarness(
   const order: string[] = [];
   const track = new FakeTrack();
   const capture = options.capture ?? Promise.resolve(streamWith(track));
+  let captureCall = 0;
   const mediaDevices = {
     getDisplayMedia: vi.fn(() => {
       order.push('getDisplayMedia');
-      return capture;
+      const operation = options.captureSequence?.[captureCall];
+      captureCall += 1;
+      return operation?.() ?? capture;
     }),
   };
   const sender = {
@@ -476,9 +481,23 @@ describe('single screen controller', () => {
 
     await harness.controller.startSelectedCapture();
 
-    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
-      SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
-    );
+    expect(SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS).toEqual({
+      audio: {
+        autoGainControl: false,
+        echoCancellation: false,
+        noiseSuppression: false,
+      },
+      video: DISPLAY_CAPTURE_CONSTRAINTS.video,
+    });
+    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith({
+      audio: {
+        autoGainControl: false,
+        echoCancellation: false,
+        noiseSuppression: false,
+      },
+      video: DISPLAY_CAPTURE_CONSTRAINTS.video,
+    });
+    expect(audioTrack.contentHint).toBe('music');
     expect(harness.audioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);
     expect(harness.controller.getSnapshot().state).toBe('sharing');
   });
@@ -517,12 +536,72 @@ describe('single screen controller', () => {
         audioTrack,
       );
       expect(harness.controller.getSnapshot()).toMatchObject({
-        state: 'error',
+        state: 'picking',
+        selectedToken: '00000000-0000-4000-8000-000000000001',
         systemAudioEnabled: false,
-        error: '未获取到系统音频，请关闭系统音频后重试',
+        error: '系统音频启动失败，已关闭系统音频；请再次点击开始共享',
       });
+      expect(
+        harness.signaling.request.mock.calls.filter(
+          ([type]) => type === 'screen.release',
+        ),
+      ).toHaveLength(0);
     },
   );
+
+  test('keeps the picker lease and retries video-only after loopback startup rejects', async () => {
+    const videoTrack = new FakeTrack();
+    const loopbackFailure = Object.assign(
+      new Error('Could not start audio source'),
+      { name: 'NotReadableError' },
+    );
+    const harness = createHarness({
+      captureSequence: [
+        () => Promise.reject(loopbackFailure),
+        () => Promise.resolve(streamWith(videoTrack)),
+      ],
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+
+    await expect(
+      harness.controller.startSelectedCapture(),
+    ).rejects.toMatchObject({
+      code: 'SYSTEM_AUDIO_UNAVAILABLE',
+      cause: loopbackFailure,
+    });
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'picking',
+      selectedToken: '00000000-0000-4000-8000-000000000001',
+      systemAudioEnabled: false,
+      error: '系统音频启动失败，已关闭系统音频；请再次点击开始共享',
+    });
+    expect(harness.desktop.list).toHaveBeenCalledTimes(2);
+    expect(harness.desktop.select).toHaveBeenCalledTimes(2);
+    expect(
+      harness.signaling.request.mock.calls.filter(
+        ([type]) => type === 'screen.release',
+      ),
+    ).toHaveLength(0);
+    expect(harness.sender.replaceTrack).not.toHaveBeenCalled();
+
+    await harness.controller.startSelectedCapture();
+
+    expect(harness.mediaDevices.getDisplayMedia.mock.calls).toEqual([
+      [SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS],
+      [DISPLAY_CAPTURE_CONSTRAINTS],
+    ]);
+    expect(harness.sender.replaceTrack).toHaveBeenCalledWith(videoTrack);
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      systemAudioEnabled: false,
+      error: null,
+    });
+  });
 
   test('routes macOS native capture directly to the system picker authority', async () => {
     const videoTrack = new FakeTrack();
@@ -973,11 +1052,73 @@ describe('single screen controller', () => {
 
     expect(harness.track.stop).toHaveBeenCalledOnce();
     expect(harness.sender.replaceTrack.mock.calls.at(-1)).toEqual([null]);
+    expect(harness.controller.getSnapshot().error).toBe('屏幕共享失败，请重试');
     expect(
       harness.signaling.request.mock.calls.filter(
         ([type]) => type === 'screen.release',
       ),
     ).toHaveLength(1);
+  });
+
+  test('reports an invalid returned capture stream before sender attachment', async () => {
+    const videoTrack = new FakeTrack();
+    const unexpectedAudioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, unexpectedAudioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    await expect(
+      harness.controller.startSelectedCapture(),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+
+    expect(videoTrack.stop).toHaveBeenCalledOnce();
+    expect(unexpectedAudioTrack.stop).toHaveBeenCalledOnce();
+    expect(harness.sender.replaceTrack).not.toHaveBeenCalledWith(videoTrack);
+    expect(harness.controller.getSnapshot().error).toBe('屏幕共享失败，请重试');
+  });
+
+  test('reports a video track that has already ended before attachment', async () => {
+    const videoTrack = new FakeTrack();
+    videoTrack.end();
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    await expect(
+      harness.controller.startSelectedCapture(),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+
+    expect(harness.sender.replaceTrack).not.toHaveBeenCalledWith(videoTrack);
+    expect(harness.controller.getSnapshot().error).toBe('屏幕共享失败，请重试');
+  });
+
+  test('reports a final lease renewal failure before sender attachment', async () => {
+    const failure = new Error('renew failed');
+    const harness = createHarness({
+      renew: async (call) => {
+        if (call === 1) return lease(Date.now() + 15_000);
+        throw failure;
+      },
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    await expect(harness.controller.startSelectedCapture()).rejects.toBe(
+      failure,
+    );
+
+    expect(harness.sender.replaceTrack).not.toHaveBeenCalledWith(harness.track);
+    expect(harness.controller.getSnapshot().error).toBe('屏幕共享失败，请重试');
   });
 
   test('canceling the picker never starts capture and releases once', async () => {
@@ -1003,26 +1144,31 @@ describe('single screen controller', () => {
     [
       'permission denial',
       Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
+      '需要屏幕录制权限才能共享',
     ],
-    ['capture failure', new Error('capture failed')],
-  ])('cleans the sender and lease after %s', async (_name, failure) => {
-    const harness = createHarness({ capture: Promise.reject(failure) });
-    await harness.controller.prepare();
-    await harness.controller.selectSource(
-      '00000000-0000-4000-8000-000000000001',
-    );
+    ['capture failure', new Error('capture failed'), '屏幕共享失败，请重试'],
+  ])(
+    'cleans the sender and lease after %s',
+    async (_name, failure, expectedMessage) => {
+      const harness = createHarness({ capture: Promise.reject(failure) });
+      await harness.controller.prepare();
+      await harness.controller.selectSource(
+        '00000000-0000-4000-8000-000000000001',
+      );
 
-    await expect(harness.controller.startSelectedCapture()).rejects.toBe(
-      failure,
-    );
+      await expect(harness.controller.startSelectedCapture()).rejects.toBe(
+        failure,
+      );
 
-    expect(harness.sender.replaceTrack).toHaveBeenCalledWith(null);
-    expect(
-      harness.signaling.request.mock.calls.filter(
-        ([type]) => type === 'screen.release',
-      ),
-    ).toHaveLength(1);
-  });
+      expect(harness.sender.replaceTrack).toHaveBeenCalledWith(null);
+      expect(harness.controller.getSnapshot().error).toBe(expectedMessage);
+      expect(
+        harness.signaling.request.mock.calls.filter(
+          ([type]) => type === 'screen.release',
+        ),
+      ).toHaveLength(1);
+    },
+  );
 
   test('cleans share-only state when signaling closes or LEASE_LOST arrives', async () => {
     const harness = createHarness();

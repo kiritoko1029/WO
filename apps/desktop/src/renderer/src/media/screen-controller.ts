@@ -27,7 +27,11 @@ export const DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
 
 export const SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
   Object.freeze({
-    audio: true,
+    audio: Object.freeze({
+      autoGainControl: false,
+      echoCancellation: false,
+      noiseSuppression: false,
+    }),
     video: DISPLAY_CAPTURE_CONSTRAINTS.video,
   });
 
@@ -183,6 +187,25 @@ function stopStream(stream: MediaStream): void {
 function trackEnded(track: MediaStreamTrack): boolean {
   return track.readyState === 'ended';
 }
+
+function isCapturePermissionError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    (error.name === 'NotAllowedError' || error.name === 'SecurityError')
+  );
+}
+
+type ScreenCaptureDiagnosticCode =
+  | 'CAPTURE_REQUEST_REJECTED'
+  | 'CAPTURE_STREAM_INVALID'
+  | 'CAPTURE_VIDEO_TRACK_ENDED'
+  | 'CAPTURE_LEASE_RENEW_FAILED'
+  | 'VIDEO_SENDER_ATTACH_FAILED'
+  | 'AUDIO_SENDER_ATTACH_FAILED'
+  | 'SYSTEM_AUDIO_REQUEST_REJECTED'
+  | 'SYSTEM_AUDIO_TRACK_UNAVAILABLE';
 
 const defaultRequestId = (): string => crypto.randomUUID();
 
@@ -425,6 +448,75 @@ export function createScreenController(
     return fail(error);
   };
 
+  const failCaptureStage = async (
+    expectedGeneration: number,
+    error: unknown,
+    diagnosticCode: ScreenCaptureDiagnosticCode,
+  ): Promise<never> => {
+    if (isCapturePermissionError(error) || errorCode(error) === 'LEASE_LOST') {
+      return failForGeneration(expectedGeneration, error);
+    }
+    if (generation !== expectedGeneration) {
+      throw lifecycleFailure ?? error;
+    }
+    console.error(
+      `[screen-controller] capture failed at ${diagnosticCode}:`,
+      error,
+    );
+    await cleanupSession('error', error);
+    throw error;
+  };
+
+  const recoverFromLoopbackFailure = async (
+    expectedGeneration: number,
+    selectedSource: CaptureSourceSummary | null,
+    cause: unknown,
+    diagnosticCode:
+      'SYSTEM_AUDIO_REQUEST_REJECTED' | 'SYSTEM_AUDIO_TRACK_UNAVAILABLE',
+  ): Promise<never> => {
+    console.error(
+      `[screen-controller] capture failed at ${diagnosticCode}:`,
+      cause,
+    );
+    const failure = Object.assign(
+      new Error('System audio capture could not start', { cause }),
+      { code: 'SYSTEM_AUDIO_UNAVAILABLE' },
+    );
+    let sources: readonly CaptureSourceSummary[];
+    let selectedToken: string | null = null;
+    try {
+      sources = Object.freeze([...(await options.capture.list())]);
+      assertCurrent(expectedGeneration);
+      if (selectedSource !== null) {
+        const matches = sources.filter(
+          (source) =>
+            source.name === selectedSource.name &&
+            source.kind === selectedSource.kind,
+        );
+        if (matches.length === 1) {
+          selectedToken = matches[0]!.token;
+          await options.capture.select(selectedToken);
+          assertCurrent(expectedGeneration);
+        }
+      }
+    } catch {
+      return failForGeneration(expectedGeneration, failure);
+    }
+    startPromise = null;
+    update({
+      state: 'picking',
+      sources,
+      selectedToken,
+      systemAudioEnabled: false,
+      captureSettings: null,
+      error:
+        selectedToken === null
+          ? '系统音频启动失败，已关闭系统音频；请重新选择共享内容'
+          : '系统音频启动失败，已关闭系统音频；请再次点击开始共享',
+    });
+    throw failure;
+  };
+
   const scheduleRenewal = (expectedGeneration: number): void => {
     clearRenewalTimer();
     renewalTimer = setTimer(() => {
@@ -615,6 +707,12 @@ export function createScreenController(
       const systemAudioEnabled = snapshot.systemAudioEnabled;
       const nativeSystemPicker = systemAudioMode === 'native-picker';
       const systemAudioRequested = nativeSystemPicker || systemAudioEnabled;
+      const selectedSource =
+        snapshot.selectedToken === null
+          ? null
+          : (snapshot.sources.find(
+              (source) => source.token === snapshot.selectedToken,
+            ) ?? null);
       if (systemAudioEnabled && systemAudioMode === 'unsupported') {
         return fail(
           Object.assign(new Error('System audio capture is unavailable'), {
@@ -648,7 +746,23 @@ export function createScreenController(
             '[screen-controller] getDisplayMedia was rejected:',
             error,
           );
-          return failForGeneration(expectedGeneration, error);
+          if (
+            systemAudioEnabled &&
+            !nativeSystemPicker &&
+            !isCapturePermissionError(error)
+          ) {
+            return recoverFromLoopbackFailure(
+              expectedGeneration,
+              selectedSource,
+              error,
+              'SYSTEM_AUDIO_REQUEST_REJECTED',
+            );
+          }
+          return failCaptureStage(
+            expectedGeneration,
+            error,
+            'CAPTURE_REQUEST_REJECTED',
+          );
         }
         if (generation !== expectedGeneration) {
           stopStream(stream);
@@ -667,7 +781,11 @@ export function createScreenController(
           tracks.length !== videoTracks.length + audioTracks.length
         ) {
           stopStream(stream);
-          return fail(new ScreenControllerError('INVALID_STATE'));
+          return failCaptureStage(
+            expectedGeneration,
+            new ScreenControllerError('INVALID_STATE'),
+            'CAPTURE_STREAM_INVALID',
+          );
         }
         let audioTrack: MediaStreamTrack | null = audioTracks[0] ?? null;
         if (
@@ -676,11 +794,11 @@ export function createScreenController(
           (audioTrack === null || trackEnded(audioTrack))
         ) {
           stopStream(stream);
-          return fail(
-            Object.assign(
-              new Error('System audio capture did not provide a live track'),
-              { code: 'SYSTEM_AUDIO_UNAVAILABLE' },
-            ),
+          return recoverFromLoopbackFailure(
+            expectedGeneration,
+            selectedSource,
+            new Error('System audio capture did not provide a live track'),
+            'SYSTEM_AUDIO_TRACK_UNAVAILABLE',
           );
         }
         if (
@@ -691,6 +809,9 @@ export function createScreenController(
           audioTrack.stop();
           audioTrack = null;
         }
+        if (audioTrack !== null) {
+          audioTrack.contentHint = 'music';
+        }
         const track = videoTracks[0]!;
         currentTrack = track;
         currentAudioTrack = audioTrack;
@@ -699,17 +820,23 @@ export function createScreenController(
           once: true,
         });
         const settings = captureSettings(track);
+        let diagnosticCode: ScreenCaptureDiagnosticCode =
+          'CAPTURE_VIDEO_TRACK_ENDED';
         try {
           if (trackEnded(track)) {
             throw new ScreenControllerError('INVALID_STATE');
           }
+          diagnosticCode = 'CAPTURE_LEASE_RENEW_FAILED';
           await renew(expectedGeneration);
           assertCurrent(expectedGeneration);
+          diagnosticCode = 'CAPTURE_VIDEO_TRACK_ENDED';
           if (trackEnded(track)) {
             throw new ScreenControllerError('INVALID_STATE');
           }
+          diagnosticCode = 'VIDEO_SENDER_ATTACH_FAILED';
           await queueSenderTrack(track);
           assertCurrent(expectedGeneration);
+          diagnosticCode = 'CAPTURE_VIDEO_TRACK_ENDED';
           if (trackEnded(track)) {
             throw new ScreenControllerError('INVALID_STATE');
           }
@@ -720,6 +847,7 @@ export function createScreenController(
             !trackEnded(audioTrack) &&
             audioSender !== undefined
           ) {
+            diagnosticCode = 'AUDIO_SENDER_ATTACH_FAILED';
             await queueAudioSenderTrack(audioTrack);
             assertCurrent(expectedGeneration);
           }
@@ -730,7 +858,7 @@ export function createScreenController(
             error: null,
           });
         } catch (error) {
-          return failForGeneration(expectedGeneration, error);
+          return failCaptureStage(expectedGeneration, error, diagnosticCode);
         }
       })();
       return startPromise;

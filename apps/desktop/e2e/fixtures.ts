@@ -39,6 +39,17 @@ interface AcceptanceLauncher {
 const execFileAsync = promisify(execFile);
 const desktopDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryDirectory = resolve(desktopDirectory, '../..');
+const integrationComposeArguments = [
+  'compose',
+  '--project-name',
+  'wo-integration',
+  '--env-file',
+  'deploy/.env.integration',
+  '-f',
+  'deploy/compose.yaml',
+  '-f',
+  'deploy/compose.integration.yaml',
+] as const;
 const rendererDirectory = join(desktopDirectory, 'out-acceptance', 'renderer');
 const mainEntry = join(desktopDirectory, 'out-acceptance', 'main', 'index.js');
 const motionDirectory = join(
@@ -54,6 +65,37 @@ const caddyAuthority = join(
   'caddy-authority',
   'root.crt',
 );
+
+export async function pauseIntegrationCoturn(): Promise<() => Promise<void>> {
+  const commandOptions = {
+    cwd: repositoryDirectory,
+    timeout: 10_000,
+    windowsHide: true,
+  } as const;
+  const { stdout } = await execFileAsync(
+    'docker',
+    [...integrationComposeArguments, 'ps', '-q', 'coturn'],
+    commandOptions,
+  );
+  const containerIds = stdout
+    .split(/\r?\n/u)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  if (containerIds.length !== 1) {
+    throw new Error(
+      `Expected one wo-integration coturn container, found ${containerIds.length}`,
+    );
+  }
+  const [containerId] = containerIds;
+  await execFileAsync('docker', ['pause', containerId], commandOptions);
+
+  let resumed = false;
+  return async () => {
+    if (resumed) return;
+    await execFileAsync('docker', ['unpause', containerId], commandOptions);
+    resumed = true;
+  };
+}
 
 function environment(): Record<string, string> {
   return Object.fromEntries(

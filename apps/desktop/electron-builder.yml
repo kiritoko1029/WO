@@ -33,6 +33,7 @@ protocols:
       - wo
 
 win:
+  requestedExecutionLevel: asInvoker
   target:
     - nsis
     - portable

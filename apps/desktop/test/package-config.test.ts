@@ -43,6 +43,9 @@ describe('desktop production package configuration', () => {
     expect(config).toMatch(
       /win:[\s\S]*?target:[\s\S]*?- nsis[\s\S]*?- portable/u,
     );
+    expect(config).toMatch(
+      /win:\s+requestedExecutionLevel: asInvoker[\s\S]*?target:/u,
+    );
     expect(config).toContain('WO-${version}-setup-${arch}.${ext}');
     expect(config).toContain('WO-${version}-portable-${arch}.${ext}');
     expect(config).toMatch(/mac:[\s\S]*?target:[\s\S]*?- dmg[\s\S]*?- zip/u);

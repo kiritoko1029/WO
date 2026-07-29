@@ -8,13 +8,22 @@ export interface ScreenPermissionService {
     status: ScreenPermissionStatus;
     canOpenSettings: boolean;
     systemAudioMode: SystemAudioMode;
+    captureProcessElevated: boolean;
   }>;
   openSettings(): Promise<void>;
 }
 
+type WindowsIntegrityLevel =
+  'untrusted' | 'low' | 'medium' | 'high' | 'unknown';
+
 export interface ScreenPermissionServiceDependencies {
   readonly platform: NodeJS.Platform;
   readonly platformRelease: string;
+  readonly processId: number;
+  readonly getAppMetrics: () => readonly Readonly<{
+    pid: number;
+    integrityLevel?: WindowsIntegrityLevel;
+  }>[];
   readonly systemPreferences: {
     getMediaAccessStatus(mediaType: 'screen'): ScreenPermissionStatus;
   };
@@ -69,6 +78,15 @@ export function createScreenPermissionService(
         dependencies.platform,
         dependencies.platformRelease,
       ),
+      captureProcessElevated:
+        dependencies.platform === 'win32' &&
+        dependencies
+          .getAppMetrics()
+          .some(
+            (metric) =>
+              metric.pid === dependencies.processId &&
+              metric.integrityLevel === 'high',
+          ),
     });
   };
   return Object.freeze({

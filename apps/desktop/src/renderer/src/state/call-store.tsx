@@ -676,17 +676,28 @@ function isMicrophoneError(error: unknown): boolean {
   );
 }
 
-function isScreenPermissionError(error: unknown): boolean {
+function isScreenPermissionError(
+  error: unknown,
+  permission: ScreenPermissionSnapshot | null,
+): boolean {
   if (typeof error !== 'object' || error === null) return false;
   if ('name' in error && error.name === 'NotAllowedError') return true;
-  return (
+  if (
     'code' in error &&
     typeof error.code === 'string' &&
     error.code === 'SCREEN_PERMISSION_DENIED'
+  ) {
+    return true;
+  }
+  return (
+    permission?.status === 'denied' &&
+    permission.systemAudioMode === 'native-picker' &&
+    'name' in error &&
+    error.name === 'AbortError'
   );
 }
 
-function selectedPairUsesRelay(stats: RTCStatsReport): boolean {
+function selectedPairUsesRelay(stats: RTCStatsReport): boolean | null {
   const reports = [...stats.values()] as unknown[];
   const records = reports.filter(
     (report): report is Record<string, unknown> =>
@@ -708,11 +719,12 @@ function selectedPairUsesRelay(stats: RTCStatsReport): boolean {
         (report.selected === true || report.nominated === true),
     );
   if (pair === undefined || typeof pair.localCandidateId !== 'string') {
-    return false;
+    return null;
   }
   const localCandidate = records.find(
     (report) => report.id === pair.localCandidateId,
   );
+  if (localCandidate === undefined) return null;
   return localCandidate?.candidateType === 'relay';
 }
 
@@ -948,6 +960,15 @@ export function createCallController(
   ): void => {
     const recoveryState = reconnect?.getSnapshot().state;
     if (recoveryState !== undefined && recoveryState !== 'connected') return;
+    if (
+      callMachine.getSnapshot().phase === 'failed' &&
+      !snapshot.microphoneRetryAvailable &&
+      !remoteSignalingDisconnected &&
+      negotiationEstablished &&
+      peer?.connectionState === 'connected'
+    ) {
+      dispatchCall({ type: 'retry', peerReady: remoteReady }, { error: null });
+    }
     dispatchCall({
       type: 'settle',
       peerReady: remoteReady,
@@ -991,6 +1012,22 @@ export function createCallController(
       return;
     }
     failTerminal(error);
+  };
+
+  const failRecovery = (error: unknown): void => {
+    if (
+      !isMicrophoneError(error) &&
+      !closed &&
+      !remoteSignalingDisconnected &&
+      reconnect?.getSnapshot().state === 'connected' &&
+      negotiationEstablished &&
+      peer?.connectionState === 'connected'
+    ) {
+      update({ error: null });
+      settleCallPhase();
+      return;
+    }
+    fail(error);
   };
 
   const selectOutputSerially = (deviceId: string): Promise<boolean> => {
@@ -1187,6 +1224,8 @@ export function createCallController(
       onConnectionStateChange: ({ connectionState, iceConnectionState }) => {
         if (peer !== createdPeer) return;
         resolveNegotiationReadyWaiters();
+        const recoveryIceConnectionState =
+          connectionState === 'failed' ? 'failed' : iceConnectionState;
         // Only feed ICE state to the reconnect controller after the
         // connection has been established at least once. During initial
         // connection, ICE states like 'disconnected' are transient and
@@ -1197,38 +1236,48 @@ export function createCallController(
         if (
           !waitingForPeer &&
           !remoteSignalingDisconnected &&
-          (everConnected || iceConnectionState === 'failed')
+          (everConnected || recoveryIceConnectionState === 'failed')
         ) {
           void reconnect
-            ?.handleIceConnectionState(iceConnectionState)
-            .catch(fail);
+            ?.handleIceConnectionState(recoveryIceConnectionState)
+            .catch(failRecovery);
         }
         if (connectionState === 'connected') {
           everConnected = true;
           waitingForPeer = false;
           settleCallPhase(selectedConnectionPath);
-          void createdPeer
-            .getStats()
-            .then((stats) => {
-              if (
-                closed ||
-                peer !== createdPeer ||
-                createdPeer.connectionState !== 'connected'
-              ) {
-                return;
-              }
-              selectedConnectionPath = selectedPairUsesRelay(stats)
-                ? 'relay'
-                : 'direct';
-              settleCallPhase(selectedConnectionPath);
-              update({ error: null });
-            })
-            .catch(() => {
-              if (!closed && peer === createdPeer) {
+          const resolveConnectionPath = (attempt = 0): void => {
+            void createdPeer
+              .getStats()
+              .then((stats) => {
+                if (
+                  closed ||
+                  peer !== createdPeer ||
+                  createdPeer.connectionState !== 'connected'
+                ) {
+                  return;
+                }
+                const usesRelay = selectedPairUsesRelay(stats);
+                if (usesRelay === null && attempt < 7) {
+                  globalThis.setTimeout(
+                    () => resolveConnectionPath(attempt + 1),
+                    125,
+                  );
+                  return;
+                }
+                selectedConnectionPath =
+                  usesRelay === null ? null : usesRelay ? 'relay' : 'direct';
                 settleCallPhase(selectedConnectionPath);
                 update({ error: null });
-              }
-            });
+              })
+              .catch(() => {
+                if (!closed && peer === createdPeer) {
+                  settleCallPhase(selectedConnectionPath);
+                  update({ error: null });
+                }
+              });
+          };
+          resolveConnectionPath();
         } else if (
           !waitingForPeer &&
           !remoteSignalingDisconnected &&
@@ -1723,7 +1772,9 @@ export function createCallController(
                 peer.connectionState !== 'connected' &&
                 reconnect !== null
               ) {
-                void reconnect.handleIceConnectionState('failed').catch(fail);
+                void reconnect
+                  .handleIceConnectionState('failed')
+                  .catch(failRecovery);
               }
             } else {
               dispatchCall({ type: 'negotiate' });
@@ -1856,7 +1907,7 @@ export function createCallController(
                   }
                   return reconnect!.handleIceConnectionState('failed');
                 })
-                .catch(fail);
+                .catch(failRecovery);
             }
             break;
           case 'webrtc.negotiationReset': {
@@ -1924,7 +1975,7 @@ export function createCallController(
                 maybeOffer();
               });
             resetDeliveryChain = delivery;
-            void delivery.catch(fail);
+            void delivery.catch(failRecovery);
             break;
           }
           case 'peer.left': {
@@ -2364,6 +2415,19 @@ export function createCallController(
       }
       assertCurrentLifecycle(generation);
       update({ screenPermission: permission });
+      if (permission.captureProcessElevated) {
+        const error = Object.assign(
+          new Error('Screen capture is unavailable from an elevated process'),
+          {
+            code: 'SCREEN_CAPTURE_ELEVATED',
+          },
+        );
+        update({
+          screenError: '请退出管理员模式并以普通权限重新启动 WO 后再共享屏幕',
+          screenPermissionError: false,
+        });
+        throw error;
+      }
       if (
         permission.status === 'restricted' ||
         (permission.status === 'denied' &&
@@ -2436,7 +2500,16 @@ export function createCallController(
         await screen.startSelectedCapture();
       } catch (error) {
         assertCurrentLifecycle(generation);
-        update({ screenPermissionError: isScreenPermissionError(error) });
+        const permissionError = isScreenPermissionError(
+          error,
+          snapshot.screenPermission,
+        );
+        update({
+          screenPermissionError: permissionError,
+          screenError: permissionError
+            ? '需要屏幕录制权限才能共享'
+            : snapshot.screenError,
+        });
         throw error;
       }
       assertCurrentLifecycle(generation);

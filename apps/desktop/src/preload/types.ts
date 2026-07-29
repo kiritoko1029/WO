@@ -44,6 +44,7 @@ export interface ScreenPermissionSnapshot {
   readonly status: ScreenPermissionStatus;
   readonly canOpenSettings: boolean;
   readonly systemAudioMode: SystemAudioMode;
+  readonly captureProcessElevated: boolean;
 }
 
 export interface DesktopApi {

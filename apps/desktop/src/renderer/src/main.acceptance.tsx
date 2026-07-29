@@ -11,9 +11,14 @@ interface MutablePeerDiagnostic {
   readonly id: number;
   offers: number;
   answers: number;
+  restartIceCalls: number;
+  holdDisconnectedIceEvents: boolean;
+  heldDisconnectedIceEvents: number;
   closed: boolean;
   connectionState: RTCPeerConnectionState;
+  connectionStateHistory: RTCPeerConnectionState[];
   iceConnectionState: RTCIceConnectionState;
+  iceConnectionStateHistory: RTCIceConnectionState[];
   signalingState: RTCSignalingState;
   transceivers: number;
   liveRemoteAudioTracks: number;
@@ -50,7 +55,10 @@ declare global {
     readonly woAcceptanceControl: Readonly<{
       denyNextMicrophoneCapture(): number;
       dropSignaling(): number;
+      holdDisconnectedIceEvents(): number;
+      pauseSignaling(): number;
       resetRnnoiseCallbackGap(): number;
+      resumeSignaling(): number;
       stopLocalMicrophoneTrack(): number;
       stopLocalScreenTrack(): number;
       stopLocalSystemAudioTrack(): number;
@@ -59,12 +67,16 @@ declare global {
 }
 
 const peerDiagnostics = new Map<RTCPeerConnection, MutablePeerDiagnostic>();
+const NativePeerConnection = window.RTCPeerConnection;
 const signalingSockets = new Map<WebSocket, SocketDiagnostic>();
 let peerSequence = 0;
 let socketSequence = 0;
 let reportSequence = 0;
 let signalingDrops = 0;
+let signalingPaused = false;
+let blockedSignalingAttempts = 0;
 let microphoneDenials = 0;
+const callStatusHistory: string[] = [];
 const liveMicrophoneTracks = new Set<MediaStreamTrack>();
 const liveSystemAudioTracks = new Set<MediaStreamTrack>();
 const captureDiagnostic = {
@@ -130,6 +142,30 @@ function selectedCandidateTypes(records: readonly Record<string, unknown>[]): {
     local: textValue(local?.candidateType),
     remote: textValue(remote?.candidateType),
   };
+}
+
+function appendState<State extends string>(
+  history: State[],
+  state: State,
+): void {
+  if (history.at(-1) === state) return;
+  history.push(state);
+  if (history.length > 32) history.shift();
+}
+
+function recordCallStatus(): string {
+  const indicator = document.querySelector('.connection-dot');
+  const status =
+    [
+      'waiting',
+      'connecting',
+      'connected',
+      'relay',
+      'reconnecting',
+      'error',
+    ].find((candidate) => indicator?.classList.contains(candidate)) ?? '';
+  if (status.length > 0) appendState(callStatusHistory, status);
+  return status;
 }
 
 async function samplePeer(
@@ -218,7 +254,6 @@ async function samplePeer(
 }
 
 function installPeerConnectionProbe(): void {
-  const NativePeerConnection = window.RTCPeerConnection;
   const AcceptancePeerConnection = function (
     configuration?: RTCConfiguration,
   ): RTCPeerConnection {
@@ -231,9 +266,14 @@ function installPeerConnectionProbe(): void {
       id: ++peerSequence,
       offers: 0,
       answers: 0,
+      restartIceCalls: 0,
+      holdDisconnectedIceEvents: false,
+      heldDisconnectedIceEvents: 0,
       closed: false,
       connectionState: peer.connectionState,
+      connectionStateHistory: [peer.connectionState],
       iceConnectionState: peer.iceConnectionState,
+      iceConnectionStateHistory: [peer.iceConnectionState],
       signalingState: peer.signalingState,
       transceivers: 0,
       liveRemoteAudioTracks: 0,
@@ -257,6 +297,13 @@ function installPeerConnectionProbe(): void {
       screenFrameRate: 0,
     };
     peerDiagnostics.set(peer, diagnostic);
+    const setConfiguration = peer.setConfiguration.bind(peer);
+    peer.setConfiguration = (nextConfiguration: RTCConfiguration = {}) => {
+      setConfiguration({
+        ...nextConfiguration,
+        iceTransportPolicy: window.woAcceptance.iceTransportPolicy,
+      });
+    };
     const createOffer = peer.createOffer.bind(peer);
     Object.defineProperty(peer, 'createOffer', {
       configurable: true,
@@ -278,11 +325,104 @@ function installPeerConnectionProbe(): void {
       diagnostic.closed = true;
       close();
     };
+    const restartIce = peer.restartIce.bind(peer);
+    peer.restartIce = () => {
+      diagnostic.restartIceCalls += 1;
+      restartIce();
+    };
+    const addEventListener = peer.addEventListener.bind(peer);
+    const removeEventListener = peer.removeEventListener.bind(peer);
+    const recordConnectionState = () => {
+      diagnostic.connectionState = peer.connectionState;
+      diagnostic.iceConnectionState = peer.iceConnectionState;
+      diagnostic.signalingState = peer.signalingState;
+      appendState(diagnostic.connectionStateHistory, peer.connectionState);
+      appendState(
+        diagnostic.iceConnectionStateHistory,
+        peer.iceConnectionState,
+      );
+    };
+    addEventListener('connectionstatechange', recordConnectionState);
+    addEventListener('iceconnectionstatechange', recordConnectionState);
+    const listenerWrappers = new WeakMap<
+      EventListenerOrEventListenerObject,
+      EventListener
+    >();
+    peer.addEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) => {
+      if (listener === null) return;
+      if (
+        type !== 'connectionstatechange' &&
+        type !== 'iceconnectionstatechange'
+      ) {
+        addEventListener(type, listener, options);
+        return;
+      }
+      let wrapped = listenerWrappers.get(listener);
+      if (wrapped === undefined) {
+        wrapped = (event: Event) => {
+          if (
+            peer.connectionState === 'failed' ||
+            peer.iceConnectionState === 'failed'
+          ) {
+            diagnostic.holdDisconnectedIceEvents = false;
+          }
+          if (
+            diagnostic.holdDisconnectedIceEvents &&
+            peer.iceConnectionState === 'disconnected'
+          ) {
+            diagnostic.heldDisconnectedIceEvents += 1;
+            return;
+          }
+          if (typeof listener === 'function') {
+            listener.call(peer, event);
+          } else {
+            listener.handleEvent(event);
+          }
+        };
+        listenerWrappers.set(listener, wrapped);
+      }
+      addEventListener(type, wrapped, options);
+    }) as typeof peer.addEventListener;
+    peer.removeEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | EventListenerOptions,
+    ) => {
+      if (listener === null) return;
+      removeEventListener(
+        type,
+        listenerWrappers.get(listener) ?? listener,
+        options,
+      );
+    }) as typeof peer.removeEventListener;
     return peer;
   } as unknown as typeof RTCPeerConnection;
   AcceptancePeerConnection.prototype = NativePeerConnection.prototype;
   Object.setPrototypeOf(AcceptancePeerConnection, NativePeerConnection);
   window.RTCPeerConnection = AcceptancePeerConnection;
+}
+
+function holdDisconnectedIceEvents(): number {
+  let entry: readonly [RTCPeerConnection, MutablePeerDiagnostic] | undefined;
+  for (const candidate of peerDiagnostics.entries()) {
+    if (!candidate[1].closed) entry = candidate;
+  }
+  if (entry === undefined) {
+    throw new Error('No active PeerConnection is available');
+  }
+  const [peer, diagnostic] = entry;
+  if (
+    peer.connectionState !== 'connected' ||
+    peer.signalingState !== 'stable'
+  ) {
+    throw new Error('Active PeerConnection is not stably connected');
+  }
+  diagnostic.holdDisconnectedIceEvents = true;
+  return diagnostic.id;
 }
 
 function installWebSocketProbe(): void {
@@ -291,8 +431,13 @@ function installWebSocketProbe(): void {
     url: string | URL,
     protocols?: string | string[],
   ): WebSocket {
+    const signaling = new URL(String(url)).protocol === 'wss:';
+    if (signaling && signalingPaused) {
+      blockedSignalingAttempts += 1;
+      throw new DOMException('Acceptance signaling is paused', 'NetworkError');
+    }
     const socket = new NativeWebSocket(url, protocols);
-    if (new URL(String(url)).protocol === 'wss:') {
+    if (signaling) {
       const diagnostic: SocketDiagnostic = {
         id: ++socketSequence,
         state: socket.readyState,
@@ -314,6 +459,17 @@ function installWebSocketProbe(): void {
   AcceptanceWebSocket.prototype = NativeWebSocket.prototype;
   Object.setPrototypeOf(AcceptanceWebSocket, NativeWebSocket);
   window.WebSocket = AcceptanceWebSocket;
+}
+
+function dropOpenSignalingSockets(): number {
+  let closed = 0;
+  for (const socket of signalingSockets.keys()) {
+    if (socket.readyState !== WebSocket.OPEN) continue;
+    socket.close(4000, 'acceptance-drop');
+    closed += 1;
+  }
+  signalingDrops += closed;
+  return closed;
 }
 
 async function createAcceptanceAudioTrack(
@@ -465,7 +621,11 @@ function snapshot(): unknown {
   return {
     sequence: ++reportSequence,
     icePolicy: window.woAcceptance.iceTransportPolicy,
+    callStatus: recordCallStatus(),
+    callStatusHistory: [...callStatusHistory],
     signalingDrops,
+    signalingPaused,
+    blockedSignalingAttempts,
     capture: { ...captureDiagnostic },
     rnnoise: { ...rnnoiseDiagnostic },
     rnnoiseActive:
@@ -482,6 +642,14 @@ installWebSocketProbe();
 installDisplayCaptureProbe();
 installRnnoiseProbe();
 installAudioFixture();
+const callStatusObserver = new MutationObserver(() => {
+  recordCallStatus();
+});
+callStatusObserver.observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+  characterData: true,
+});
 Object.defineProperty(window, 'woAcceptanceControl', {
   configurable: false,
   enumerable: false,
@@ -491,16 +659,16 @@ Object.defineProperty(window, 'woAcceptanceControl', {
       microphoneDenials += 1;
       return microphoneDenials;
     },
-    dropSignaling: () => {
-      let closed = 0;
-      for (const socket of signalingSockets.keys()) {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.close(4000, 'acceptance-drop');
-          closed += 1;
-        }
-      }
-      signalingDrops += closed;
-      return closed;
+    dropSignaling: dropOpenSignalingSockets,
+    holdDisconnectedIceEvents,
+    pauseSignaling: () => {
+      signalingPaused = true;
+      return dropOpenSignalingSockets();
+    },
+    resumeSignaling: () => {
+      if (!signalingPaused) return 0;
+      signalingPaused = false;
+      return 1;
     },
     resetRnnoiseCallbackGap: () => {
       rnnoiseDiagnostic.maxCallbackGapMs = 0;

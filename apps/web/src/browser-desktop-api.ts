@@ -462,6 +462,7 @@ export function createBrowserDesktopApi(
         systemAudioMode: displayCaptureSupported
           ? ('native-picker' as const)
           : ('unsupported' as const),
+        captureProcessElevated: false,
       }),
     openSettings: async () => undefined,
   });

@@ -140,6 +140,7 @@ function createDesktop(
         status: 'granted',
         canOpenSettings: false,
         systemAudioMode: 'loopback',
+        captureProcessElevated: false,
       }),
       openSettings: vi.fn().mockResolvedValue(undefined),
     },
@@ -1029,6 +1030,7 @@ describe('desktop account and room workflow', () => {
         status: 'denied' as const,
         canOpenSettings: true,
         systemAudioMode: 'unsupported' as const,
+        captureProcessElevated: false,
       },
     };
     const callListeners = new Set<() => void>();
@@ -1090,6 +1092,7 @@ describe('desktop account and room workflow', () => {
         status: 'denied',
         canOpenSettings: true,
         systemAudioMode: 'native-picker',
+        captureProcessElevated: false,
       },
     };
     act(() => {

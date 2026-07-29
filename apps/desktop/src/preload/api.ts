@@ -126,15 +126,17 @@ function parseScreenPermission(input: unknown): ScreenPermissionSnapshot {
     'unsupported',
   ]);
   if (
-    keys.length !== 3 ||
+    keys.length !== 4 ||
     !keys.includes('status') ||
     !keys.includes('canOpenSettings') ||
     !keys.includes('systemAudioMode') ||
+    !keys.includes('captureProcessElevated') ||
     typeof input.status !== 'string' ||
     !statuses.has(input.status) ||
     typeof input.canOpenSettings !== 'boolean' ||
     typeof input.systemAudioMode !== 'string' ||
     !systemAudioModes.has(input.systemAudioMode) ||
+    typeof input.captureProcessElevated !== 'boolean' ||
     (input.canOpenSettings &&
       input.status !== 'denied' &&
       input.status !== 'restricted')
@@ -146,6 +148,7 @@ function parseScreenPermission(input: unknown): ScreenPermissionSnapshot {
     canOpenSettings: input.canOpenSettings,
     systemAudioMode:
       input.systemAudioMode as ScreenPermissionSnapshot['systemAudioMode'],
+    captureProcessElevated: input.captureProcessElevated,
   });
 }
 

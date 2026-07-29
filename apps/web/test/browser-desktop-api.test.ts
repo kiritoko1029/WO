@@ -277,6 +277,7 @@ describe('browser DesktopApi', () => {
       status: 'not-determined',
       canOpenSettings: false,
       systemAudioMode: 'native-picker',
+      captureProcessElevated: false,
     });
 
     const unsupported = createBrowserDesktopApi({
@@ -290,6 +291,7 @@ describe('browser DesktopApi', () => {
       status: 'restricted',
       canOpenSettings: false,
       systemAudioMode: 'unsupported',
+      captureProcessElevated: false,
     });
   });
 });

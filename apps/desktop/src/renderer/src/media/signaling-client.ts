@@ -114,6 +114,9 @@ const defaultWebSocketFactory = (
 const defaultRequestId = (): string => crypto.randomUUID();
 const SOCKET_OPEN = 1;
 const MAX_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_CONNECT_ATTEMPTS = 8;
+const CONNECT_RETRY_BASE_DELAY_MS = 250;
+const CONNECT_RETRY_MAX_DELAY_MS = 2_000;
 
 function errorCode(error: unknown): string | null {
   if (
@@ -185,7 +188,8 @@ export function createSignalingClient(
   const createWebSocket = options.createWebSocket ?? defaultWebSocketFactory;
   const makeRequestId = options.makeRequestId ?? defaultRequestId;
   const requestTimeoutMs = options.requestTimeoutMs ?? 8_000;
-  const maxConnectAttempts = options.maxConnectAttempts ?? 3;
+  const maxConnectAttempts =
+    options.maxConnectAttempts ?? DEFAULT_MAX_CONNECT_ATTEMPTS;
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? 8_000;
   const maxFrameBytes = options.maxFrameBytes ?? 1_048_576;
   const pending = new Map<string, PendingRequest>();
@@ -198,6 +202,7 @@ export function createSignalingClient(
   let connecting: Promise<void> | null = null;
   let accessToken = '';
   let explicitlyClosed = false;
+  let cancelConnectRetry: (() => void) | null = null;
 
   const emitError = (error: SignalingClientError): void => {
     for (const listener of errorListeners) {
@@ -217,6 +222,25 @@ export function createSignalingClient(
         // Connection lifecycle remains authoritative when a consumer fails.
       }
     }
+  };
+
+  const waitForConnectRetry = (attempt: number): Promise<void> => {
+    const delayMs = Math.min(
+      CONNECT_RETRY_BASE_DELAY_MS * 2 ** Math.min(attempt, 8),
+      CONNECT_RETRY_MAX_DELAY_MS,
+    );
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (): void => {
+        if (timer === null) return;
+        clearTimeout(timer);
+        timer = null;
+        if (cancelConnectRetry === finish) cancelConnectRetry = null;
+        resolve();
+      };
+      timer = setTimeout(finish, delayMs);
+      cancelConnectRetry = finish;
+    });
   };
 
   const rejectAllPending = (error: SignalingClientError): void => {
@@ -406,6 +430,9 @@ export function createSignalingClient(
         } catch (error) {
           lastError = error;
           candidate?.close();
+          if (attempt + 1 < maxConnectAttempts) {
+            await waitForConnectRetry(attempt);
+          }
         }
       }
       throw new SignalingClientError('SIGNALING_UNAVAILABLE', lastError);
@@ -499,6 +526,7 @@ export function createSignalingClient(
     connect,
     disconnect: () => {
       explicitlyClosed = true;
+      cancelConnectRetry?.();
       const current = socket;
       socket = null;
       current?.close();

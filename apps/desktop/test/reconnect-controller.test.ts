@@ -179,6 +179,26 @@ describe('reconnect controller', () => {
     expect(harness.controller.getSnapshot().state).toBe('connected');
   });
 
+  test('does not let connected ICE hide a terminal signaling resume failure', async () => {
+    const harness = createHarness({
+      resume: vi.fn(async () => {
+        throw new Error('resume failed');
+      }),
+    });
+
+    await expect(
+      harness.controller.handleSignalingClose({
+        code: 1006,
+        reason: 'network lost',
+      }),
+    ).rejects.toMatchObject({ code: 'RECOVERY_FAILED' });
+    expect(harness.controller.getSnapshot().state).toBe('failed');
+
+    await harness.controller.handleIceConnectionState('connected');
+
+    expect(harness.controller.getSnapshot().state).toBe('failed');
+  });
+
   test('retries on a fresh socket when it closes during resumed reset rebuild', async () => {
     const rebuilding = deferred<void>();
     const resume = vi
@@ -363,6 +383,35 @@ describe('reconnect controller', () => {
     completed.resolve();
     await recovery;
     expect(harness.controller.getSnapshot().state).toBe('connected');
+  });
+
+  test('connected ICE supersedes an active restart and ignores its late failure', async () => {
+    const completed = deferred<void>();
+    const harness = createHarness({
+      prepareRecoveryCompletion: vi.fn(() => completed.promise),
+      operationTimeoutMs: 1_000,
+    });
+
+    const recovery = harness.controller.handleIceConnectionState('failed');
+    await vi.waitFor(() => expect(harness.restartIce).toHaveBeenCalledOnce());
+    expect(harness.controller.getSnapshot().state).toBe('restarting-ice');
+
+    await harness.controller.handleIceConnectionState('connected');
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'connected',
+      error: null,
+    });
+    expect(vi.getTimerCount()).toBe(0);
+
+    completed.reject(new Error('late restart completion failed'));
+    await expect(recovery).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(harness.cleanupShare).not.toHaveBeenCalled();
+    expect(harness.recoverFailedRestart).not.toHaveBeenCalled();
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'connected',
+      error: null,
+    });
   });
 
   test('falls back when restart signaling succeeds but media never reconnects', async () => {
@@ -583,13 +632,40 @@ describe('reconnect controller', () => {
       code: 1006,
       reason: 'socket closed during reset',
     });
+    const connected = harness.controller.handleIceConnectionState('connected');
     expect(harness.resume).not.toHaveBeenCalled();
+    expect(harness.controller.getSnapshot().state).toBe('rebuilding-transport');
     rebuilding.resolve();
 
     await expect(reset).resolves.toBe(false);
+    await connected;
     await signal;
     expect(harness.resume).toHaveBeenCalledOnce();
     expect(harness.controller.getSnapshot().state).toBe('connected');
+  });
+
+  test('lets connected ICE supersede an authoritative reset and ignore its late failure', async () => {
+    const rebuilding = deferred<void>();
+    const harness = createHarness({
+      rebuildTransport: vi.fn(() => rebuilding.promise),
+    });
+    const reset = harness.controller.handleAuthoritativeReset();
+    await vi.waitFor(() =>
+      expect(harness.rebuildTransport).toHaveBeenCalledOnce(),
+    );
+
+    await harness.controller.handleIceConnectionState('connected');
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'connected',
+      error: null,
+    });
+
+    rebuilding.reject(new Error('late reset failure'));
+    await expect(reset).resolves.toBe(false);
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'connected',
+      error: null,
+    });
   });
 
   test.each(['failed', 'disconnected'] as const)(
@@ -691,7 +767,7 @@ describe('reconnect controller', () => {
     });
   });
 
-  test('makes a coalesced recovery timeout visible and ignores its late completion', async () => {
+  test('keeps a coalesced recovery timeout failed until ICE really reconnects', async () => {
     const requested = deferred<void>();
     const harness = createHarness({
       role: 'joiner',
@@ -722,6 +798,12 @@ describe('reconnect controller', () => {
     expect(harness.controller.getSnapshot()).toMatchObject({
       state: 'failed',
       generation: failedGeneration,
+    });
+
+    await harness.controller.handleIceConnectionState('connected');
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'connected',
+      error: null,
     });
   });
 

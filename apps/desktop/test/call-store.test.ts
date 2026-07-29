@@ -391,6 +391,7 @@ const desktop = {
       status: 'granted',
       canOpenSettings: false,
       systemAudioMode: 'loopback',
+      captureProcessElevated: false,
     }),
     openSettings: vi.fn().mockResolvedValue(undefined),
   },
@@ -3119,6 +3120,77 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
+  it('settles a healthy transport after a non-microphone call failure', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.joinRoom('access-token', '123456');
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    await call.start();
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'offer-before-call-failure' as never,
+      type: 'webrtc.offer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'negotiation-before-call-failure' as never,
+        connectionEpoch: 10,
+        description: { type: 'offer', sdp: 'v=0\r\nm=audio\r\nm=video' },
+      },
+    });
+    await vi.waitFor(() => expect(peer.pc.createAnswer).toHaveBeenCalledOnce());
+    peer.pc.iceConnectionState = 'connected';
+    peer.pc.connectionState = 'connected';
+    peer.pc.emit('connectionstatechange', {});
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('connected'));
+
+    peer.pc.addIceCandidate.mockRejectedValueOnce(
+      new Error('candidate failed before transport settled'),
+    );
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'candidate-call-failure' as never,
+      type: 'webrtc.iceCandidate',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'negotiation-before-call-failure' as never,
+        connectionEpoch: 10,
+        candidate: {
+          candidate: 'candidate:1 1 udp 1 127.0.0.1 5000 typ host',
+          sdpMid: '0',
+          sdpMLineIndex: 0,
+        },
+      },
+    });
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('error'));
+
+    peer.pc.iceConnectionState = 'connected';
+    peer.pc.connectionState = 'connected';
+    peer.pc.emit('connectionstatechange', {});
+
+    await vi.waitFor(() =>
+      expect(call.getSnapshot()).toMatchObject({
+        status: 'connected',
+        error: null,
+        microphoneRetryAvailable: false,
+      }),
+    );
+    await call.cleanup();
+  });
+
   it('does not create or retain transport after cleanup wins a reset rebuild', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
@@ -3315,7 +3387,7 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
-  it('requests one creator restart when joiner ICE fails', async () => {
+  it('requests one creator restart when the peer fails before ICE leaves disconnected', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -3347,9 +3419,13 @@ describe('realtime room gateway', () => {
     });
     await vi.waitFor(() => expect(peer.pc.createAnswer).toHaveBeenCalledOnce());
 
-    peer.pc.iceConnectionState = 'failed';
+    peer.pc.iceConnectionState = 'connected';
+    peer.pc.connectionState = 'connected';
+    peer.pc.emit('connectionstatechange', {});
+
+    peer.pc.iceConnectionState = 'disconnected';
     peer.pc.connectionState = 'failed';
-    peer.pc.emit('iceconnectionstatechange', {});
+    peer.pc.emit('connectionstatechange', {});
 
     await vi.waitFor(() =>
       expect(
@@ -3746,6 +3822,7 @@ describe('realtime room gateway', () => {
             status,
             canOpenSettings: true,
             systemAudioMode,
+            captureProcessElevated: false,
           }),
           openSettings,
         },
@@ -3775,6 +3852,7 @@ describe('realtime room gateway', () => {
           status,
           canOpenSettings: true,
           systemAudioMode,
+          captureProcessElevated: false,
         },
         screenError: '需要在系统设置中允许屏幕录制',
         screenPermissionError: true,
@@ -3788,6 +3866,60 @@ describe('realtime room gateway', () => {
     },
   );
 
+  it('blocks elevated Windows capture before source enumeration or lease acquisition', async () => {
+    const client = signaling();
+    const list = vi.fn().mockResolvedValue([]);
+    const elevatedDesktop = {
+      ...desktop,
+      capture: {
+        ...desktop.capture,
+        list,
+        permission: vi.fn().mockResolvedValue({
+          status: 'granted',
+          canOpenSettings: false,
+          systemAudioMode: 'loopback',
+          captureProcessElevated: true,
+        }),
+      },
+    } as DesktopApi;
+    const gateway = createRealtimeRoomGateway({
+      desktop: elevatedDesktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peerConnectionFactory().factory,
+    });
+    await call.start();
+
+    await expect(call.prepareScreenShare()).rejects.toMatchObject({
+      code: 'SCREEN_CAPTURE_ELEVATED',
+    });
+
+    expect(call.getSnapshot()).toMatchObject({
+      screenPermission: {
+        status: 'granted',
+        canOpenSettings: false,
+        systemAudioMode: 'loopback',
+        captureProcessElevated: true,
+      },
+      screenError: '请退出管理员模式并以普通权限重新启动 WO 后再共享屏幕',
+      screenPermissionError: false,
+    });
+    expect(list).not.toHaveBeenCalled();
+    expect(
+      client.request.mock.calls.filter(([type]) => type === 'screen.acquire'),
+    ).toHaveLength(0);
+    await call.cleanup();
+  });
+
   it('delegates denied native-picker capture to the operating system picker', async () => {
     const client = signaling();
     const nativePickerDesktop = {
@@ -3798,6 +3930,7 @@ describe('realtime room gateway', () => {
           status: 'denied',
           canOpenSettings: true,
           systemAudioMode: 'native-picker',
+          captureProcessElevated: false,
         }),
       },
     } as DesktopApi;
@@ -3832,6 +3965,7 @@ describe('realtime room gateway', () => {
         status: 'denied',
         canOpenSettings: true,
         systemAudioMode: 'native-picker',
+        captureProcessElevated: false,
       },
       screenPermissionError: false,
       screenState: 'picking',
@@ -3863,6 +3997,7 @@ describe('realtime room gateway', () => {
           status: 'denied',
           canOpenSettings: true,
           systemAudioMode: 'native-picker',
+          captureProcessElevated: false,
         }),
       },
     } as DesktopApi;
@@ -3919,28 +4054,54 @@ describe('realtime room gateway', () => {
   it.each([
     {
       name: 'permission denial',
+      permissionStatus: 'denied',
       error: Object.assign(new Error('denied'), { name: 'NotAllowedError' }),
       expectedPermissionError: true,
       expectedMessage: '需要屏幕录制权限才能共享',
     },
     {
+      name: 'denied preflight startup abort',
+      permissionStatus: 'denied',
+      error: Object.assign(new Error('Timeout starting video source'), {
+        name: 'AbortError',
+      }),
+      expectedPermissionError: true,
+      expectedMessage: '需要屏幕录制权限才能共享',
+    },
+    {
+      name: 'granted preflight startup abort',
+      permissionStatus: 'granted',
+      error: Object.assign(new Error('Timeout starting video source'), {
+        name: 'AbortError',
+      }),
+      expectedPermissionError: false,
+      expectedMessage: '屏幕共享失败，请重试',
+    },
+    {
       name: 'non-permission capture failure',
+      permissionStatus: 'denied',
       error: new Error('capture failed'),
       expectedPermissionError: false,
       expectedMessage: '屏幕共享失败，请重试',
     },
   ])(
     'classifies native-picker $name without trusting the stale permission snapshot',
-    async ({ error, expectedPermissionError, expectedMessage }) => {
+    async ({
+      error,
+      expectedPermissionError,
+      expectedMessage,
+      permissionStatus,
+    }) => {
       const client = signaling();
       const nativePickerDesktop = {
         ...desktop,
         capture: {
           ...desktop.capture,
           permission: vi.fn().mockResolvedValue({
-            status: 'denied',
+            status: permissionStatus,
             canOpenSettings: true,
             systemAudioMode: 'native-picker',
+            captureProcessElevated: false,
           }),
         },
       } as DesktopApi;
@@ -3970,9 +4131,10 @@ describe('realtime room gateway', () => {
         screenError: expectedMessage,
         screenPermissionError: expectedPermissionError,
         screenPermission: {
-          status: 'denied',
+          status: permissionStatus,
           canOpenSettings: true,
           systemAudioMode: 'native-picker',
+          captureProcessElevated: false,
         },
       });
       await call.cleanup();
@@ -4150,7 +4312,7 @@ describe('realtime room gateway', () => {
     });
     const room = await gateway.joinRoom('access-token', '123456');
     const peer = peerConnectionFactory();
-    peer.pc.getStats.mockResolvedValue(
+    peer.pc.getStats.mockResolvedValueOnce(new Map()).mockResolvedValue(
       new Map([
         [
           'transport',

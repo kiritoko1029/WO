@@ -164,6 +164,7 @@ export function createReconnectController(
   let resumeAfterAuthoritativeReset = false;
   let deferredSignalResumeFlight: Promise<void> | null = null;
   let transportRebuiltGeneration: number | null = null;
+  let mediaRecoveryFailed = false;
 
   const emit = (): void => {
     for (const listener of listeners) {
@@ -182,12 +183,14 @@ export function createReconnectController(
 
   const begin = (state: ReconnectState): number => {
     const generation = snapshot.generation + 1;
+    mediaRecoveryFailed = false;
     replaceSnapshot({ state, generation, error: null });
     return generation;
   };
 
   const updateState = (generation: number, state: ReconnectState): boolean => {
     if (snapshot.generation !== generation) return false;
+    mediaRecoveryFailed = false;
     replaceSnapshot({ state, generation, error: null });
     return true;
   };
@@ -230,10 +233,12 @@ export function createReconnectController(
   const failCurrent = (
     generation: number,
     error: ReconnectControllerError,
+    failedDuringMediaRecovery = false,
   ): void => {
     if (!isCurrent(generation)) return;
     clearDisconnectedTimer();
     clearOperationTimers();
+    mediaRecoveryFailed = failedDuringMediaRecovery;
     replaceSnapshot({
       state: 'failed',
       generation: generation + 1,
@@ -318,7 +323,7 @@ export function createReconnectController(
         } catch (fallbackError) {
           if (!isCurrent(generation)) return;
           const typed = recoveryError(fallbackError);
-          failCurrent(generation, typed);
+          failCurrent(generation, typed, true);
           throw new ReconnectControllerError(
             typed.code,
             typed.message,
@@ -343,6 +348,17 @@ export function createReconnectController(
     if (intent === 'failed' || queuedIceIntent === null) {
       queuedIceIntent = intent;
     }
+  };
+
+  const settleConnectedIce = (): void => {
+    clearDisconnectedTimer();
+    clearOperationTimers();
+    queuedIceIntent = null;
+    iceFlight = null;
+    authoritativeResetFlight = null;
+    // Invalidate the active recovery generation so a late timeout or fallback
+    // cannot overwrite a transport that the browser has already reconnected.
+    begin('connected');
   };
 
   const startDisconnectedGrace = (): Promise<void> => {
@@ -415,7 +431,7 @@ export function createReconnectController(
     const flight = timed(body).catch((error: unknown) => {
       if (resumeAfterAuthoritativeReset || !isCurrent(generation)) return false;
       const typed = recoveryError(error);
-      failCurrent(generation, typed);
+      failCurrent(generation, typed, true);
       throw typed;
     });
     authoritativeResetFlight = flight;
@@ -596,16 +612,26 @@ export function createReconnectController(
       if (snapshot.state === 'closed' || snapshot.state === 'stopped') {
         return RESOLVED;
       }
-      if (authoritativeResetFlight !== null) {
-        return authoritativeResetFlight.then(() => undefined);
-      }
       if (state === 'connected' || state === 'completed') {
+        if (
+          authoritativeResetFlight !== null &&
+          resumeAfterAuthoritativeReset
+        ) {
+          return authoritativeResetFlight.then(() => undefined);
+        }
         queuedIceIntent = null;
-        if (disconnectedTimer !== null) {
-          clearDisconnectedTimer();
-          begin('connected');
+        if (
+          disconnectedTimer !== null ||
+          iceFlight !== null ||
+          authoritativeResetFlight !== null ||
+          (snapshot.state === 'failed' && mediaRecoveryFailed)
+        ) {
+          settleConnectedIce();
         }
         return RESOLVED;
+      }
+      if (authoritativeResetFlight !== null) {
+        return authoritativeResetFlight.then(() => undefined);
       }
       if (state === 'failed') {
         return resumeFlight === null
@@ -635,13 +661,7 @@ export function createReconnectController(
       ) {
         return;
       }
-      clearDisconnectedTimer();
-      clearOperationTimers();
-      queuedIceIntent = null;
-      // Bump generation so any in-flight ICE / rebuild recovery sees isCurrent
-      // as false and cannot transition the controller to failed.
-      iceFlight = null;
-      begin('connected');
+      settleConnectedIce();
     },
     stop() {
       if (snapshot.state === 'stopped') return;

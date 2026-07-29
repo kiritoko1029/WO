@@ -2,6 +2,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 
 import {
   expect,
+  pauseIntegrationCoturn,
   test,
   type AcceptancePair,
   type AcceptancePolicy,
@@ -11,9 +12,14 @@ interface PeerDiagnostic {
   readonly id: number;
   readonly offers: number;
   readonly answers: number;
+  readonly restartIceCalls: number;
+  readonly holdDisconnectedIceEvents: boolean;
+  readonly heldDisconnectedIceEvents: number;
   readonly closed: boolean;
   readonly connectionState: string;
+  readonly connectionStateHistory: readonly string[];
   readonly iceConnectionState: string;
+  readonly iceConnectionStateHistory: readonly string[];
   readonly signalingState: string;
   readonly transceivers: number;
   readonly liveRemoteAudioTracks: number;
@@ -40,7 +46,11 @@ interface PeerDiagnostic {
 interface AcceptanceSnapshot {
   readonly sequence: number;
   readonly icePolicy: AcceptancePolicy;
+  readonly callStatus: string;
+  readonly callStatusHistory: readonly string[];
   readonly signalingDrops: number;
+  readonly signalingPaused: boolean;
+  readonly blockedSignalingAttempts: number;
   readonly capture: Readonly<{
     attempts: number;
     successes: number;
@@ -99,6 +109,74 @@ interface NoiseIntensitySwitchReport {
   }>[];
 }
 
+interface ExplicitDepartureReport {
+  readonly creatorBeforeLeave: PeerDiagnostic;
+  readonly joinerBeforeLeave: PeerDiagnostic;
+  readonly creatorClosed: PeerDiagnostic;
+  readonly joinerClosed: PeerDiagnostic;
+  readonly creatorWaiting: PeerDiagnostic;
+}
+
+interface ExplicitRejoinStageReport extends ExplicitDepartureReport {
+  readonly creatorRejoined: PeerDiagnostic;
+  readonly joinerRejoined: PeerDiagnostic;
+}
+
+interface ExplicitLeaveRejoinReport {
+  readonly roomCodeLength: number;
+  readonly sameRoomCodeReused: true;
+  readonly sameUser: ExplicitRejoinStageReport;
+  readonly newUser: ExplicitRejoinStageReport;
+}
+
+interface SignalingRecoveryStageReport {
+  readonly firstBefore: PeerDiagnostic;
+  readonly secondBefore: PeerDiagnostic;
+  readonly firstAfter: PeerDiagnostic;
+  readonly secondAfter: PeerDiagnostic;
+}
+
+interface SignalingRecoveryReport {
+  readonly short: SignalingRecoveryStageReport;
+  readonly long: SignalingRecoveryStageReport &
+    Readonly<{
+      blockedAttempts: number;
+      firstDuring: PeerDiagnostic;
+      pauseDurationMs: number;
+      secondDuring: PeerDiagnostic;
+    }>;
+}
+
+interface IceRestartRecoveryReport {
+  readonly firstBefore: PeerDiagnostic;
+  readonly secondBefore: PeerDiagnostic;
+  readonly firstDuring: PeerDiagnostic;
+  readonly secondDuring: PeerDiagnostic;
+  readonly firstAfter: PeerDiagnostic;
+  readonly secondAfter: PeerDiagnostic;
+  readonly firstStatusDuring: string;
+  readonly secondStatusDuring: string;
+  readonly firstStatusHistoryDuring: readonly string[];
+  readonly secondStatusHistoryDuring: readonly string[];
+}
+
+interface IceResetRecoveryReport {
+  readonly firstBefore: PeerDiagnostic;
+  readonly secondBefore: PeerDiagnostic;
+  readonly firstFailed: PeerDiagnostic;
+  readonly secondFailed: PeerDiagnostic;
+  readonly firstClosed: PeerDiagnostic;
+  readonly secondClosed: PeerDiagnostic;
+  readonly firstReset: PeerDiagnostic;
+  readonly secondReset: PeerDiagnostic;
+  readonly firstAfter: PeerDiagnostic;
+  readonly secondAfter: PeerDiagnostic;
+  readonly firstSnapshotAfter: AcceptanceSnapshot;
+  readonly secondSnapshotAfter: AcceptanceSnapshot;
+  readonly firstStatusHistoryDuring: readonly string[];
+  readonly secondStatusHistoryDuring: readonly string[];
+}
+
 async function diagnostics(page: Page): Promise<AcceptanceSnapshot | null> {
   return page.evaluate(() =>
     (
@@ -113,6 +191,22 @@ async function requiredDiagnostics(page: Page): Promise<AcceptanceSnapshot> {
   const value = await diagnostics(page);
   if (value === null) throw new Error('Acceptance diagnostics are unavailable');
   return value;
+}
+
+async function connectionStatus(page: Page): Promise<string> {
+  return page.locator('.room-identity > strong').innerText();
+}
+
+async function holdDisconnectedIceEvents(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: {
+          holdDisconnectedIceEvents(): number;
+        };
+      }
+    ).woAcceptanceControl.holdDisconnectedIceEvents(),
+  );
 }
 
 async function resetRnnoiseCallbackGap(page: Page): Promise<number> {
@@ -200,6 +294,79 @@ async function waitForPeer(
   return peer;
 }
 
+async function waitForPeerDiagnostic(
+  page: Page,
+  peerId: number,
+  predicate: (peer: PeerDiagnostic, snapshot: AcceptanceSnapshot) => boolean,
+  timeout = 60_000,
+): Promise<PeerDiagnostic> {
+  let latestSnapshot: AcceptanceSnapshot | null = null;
+  try {
+    await expect
+      .poll(
+        async () => {
+          latestSnapshot = await diagnostics(page);
+          const peer = latestSnapshot?.peers.find(
+            (candidate) => candidate.id === peerId,
+          );
+          return (
+            latestSnapshot !== null &&
+            peer !== undefined &&
+            predicate(peer, latestSnapshot)
+          );
+        },
+        { timeout },
+      )
+      .toBe(true);
+  } catch (error) {
+    const details = JSON.stringify(latestSnapshot).slice(0, 8_192);
+    throw new Error(
+      `Peer ${peerId} diagnostic predicate timed out: ${details}`,
+      { cause: error },
+    );
+  }
+  const snapshot = await requiredDiagnostics(page);
+  const peer = snapshot.peers.find((candidate) => candidate.id === peerId);
+  if (peer === undefined) {
+    throw new Error(`Peer ${peerId} disappeared from diagnostics`);
+  }
+  return peer;
+}
+
+async function waitForClosedPeer(
+  page: Page,
+  peerId: number,
+  timeout = 45_000,
+): Promise<PeerDiagnostic> {
+  let latestSnapshot: AcceptanceSnapshot | null = null;
+  try {
+    await expect
+      .poll(
+        async () => {
+          latestSnapshot = await diagnostics(page);
+          return (
+            latestSnapshot?.peers.find((peer) => peer.id === peerId)?.closed ??
+            false
+          );
+        },
+        { timeout },
+      )
+      .toBe(true);
+  } catch (error) {
+    const details = JSON.stringify(latestSnapshot).slice(0, 8_192);
+    throw new Error(
+      `Peer ${peerId} did not close after explicit leave: ${details}`,
+      { cause: error },
+    );
+  }
+  const snapshot = await requiredDiagnostics(page);
+  const peer = snapshot.peers.find((candidate) => candidate.id === peerId);
+  if (peer === undefined || !peer.closed) {
+    throw new Error(`Closed peer ${peerId} disappeared from diagnostics`);
+  }
+  return peer;
+}
+
 async function registerThenLogin(
   page: Page,
   displayName: string,
@@ -218,6 +385,25 @@ async function registerThenLogin(
   await page.getByLabel('密码').fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.getByRole('button', { name: '创建房间' })).toBeVisible();
+}
+
+async function registerPair(
+  pair: AcceptancePair,
+  policy: AcceptancePolicy,
+  run: string,
+): Promise<void> {
+  await Promise.all([
+    registerThenLogin(
+      pair.first.page,
+      `Alice-${policy}`,
+      `alice-${policy}-${run}@e2e.invalid`,
+    ),
+    registerThenLogin(
+      pair.second.page,
+      `Bob-${policy}`,
+      `bob-${policy}-${run}@e2e.invalid`,
+    ),
+  ]);
 }
 
 async function proveCameraRequestRejected(page: Page): Promise<void> {
@@ -795,6 +981,889 @@ async function proveSignalingRecovery(pair: AcceptancePair): Promise<void> {
   );
 }
 
+async function dropSignaling(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { dropSignaling(): number };
+      }
+    ).woAcceptanceControl.dropSignaling(),
+  );
+}
+
+async function pauseSignaling(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { pauseSignaling(): number };
+      }
+    ).woAcceptanceControl.pauseSignaling(),
+  );
+}
+
+async function resumeSignaling(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        woAcceptanceControl: { resumeSignaling(): number };
+      }
+    ).woAcceptanceControl.resumeSignaling(),
+  );
+}
+
+function matchesIcePolicy(
+  peer: PeerDiagnostic,
+  policy: AcceptancePolicy,
+): boolean {
+  if (policy === 'relay') {
+    return peer.localIceType === 'relay' && peer.remoteIceType === 'relay';
+  }
+  return (
+    peer.localIceType !== '' &&
+    peer.remoteIceType !== '' &&
+    peer.localIceType !== 'relay' &&
+    peer.remoteIceType !== 'relay'
+  );
+}
+
+async function expectParticipantsIntact(
+  pair: AcceptancePair,
+  creatorName: string,
+  joinerName: string,
+): Promise<void> {
+  await Promise.all([
+    expect(pair.first.page.getByTestId('participant-slot')).toHaveCount(2),
+    expect(pair.second.page.getByTestId('participant-slot')).toHaveCount(2),
+    expect(
+      pair.first.page.getByTitle(joinerName, { exact: true }),
+    ).toBeVisible(),
+    expect(
+      pair.second.page.getByTitle(creatorName, { exact: true }),
+    ).toBeVisible(),
+    expect(pair.first.page.getByText('语音连接异常')).toHaveCount(0),
+    expect(pair.second.page.getByText('语音连接异常')).toHaveCount(0),
+  ]);
+}
+
+async function expectConnectedParticipants(
+  pair: AcceptancePair,
+  policy: AcceptancePolicy,
+  creatorName: string,
+  joinerName: string,
+): Promise<void> {
+  const connectedLabel =
+    policy === 'relay' ? '语音已连接（中继）' : '语音已连接';
+  await Promise.all([
+    expect(
+      pair.first.page.getByText(connectedLabel, { exact: true }),
+    ).toBeVisible({ timeout: 45_000 }),
+    expect(
+      pair.second.page.getByText(connectedLabel, { exact: true }),
+    ).toBeVisible({ timeout: 45_000 }),
+  ]);
+  await expectParticipantsIntact(pair, creatorName, joinerName);
+}
+
+function expectSignalingUnchanged(
+  before: AcceptanceSnapshot,
+  after: AcceptanceSnapshot,
+): void {
+  expect(after.signalingDrops).toBe(before.signalingDrops);
+  expect(after.signalingPaused).toBe(false);
+  expect(after.blockedSignalingAttempts).toBe(before.blockedSignalingAttempts);
+  expect(after.sockets).toHaveLength(before.sockets.length);
+  for (const socket of before.sockets) {
+    const current = after.sockets.find(
+      (candidate) => candidate.id === socket.id,
+    );
+    expect(current).toBeDefined();
+    expect(current?.opens).toBe(socket.opens);
+    expect(current?.closes).toBe(socket.closes);
+    expect(current?.state).toBe(1);
+  }
+}
+
+async function waitForSameTransportAudioRecovery(
+  pair: AcceptancePair,
+  policy: AcceptancePolicy,
+  firstBefore: PeerDiagnostic,
+  secondBefore: PeerDiagnostic,
+): Promise<readonly [PeerDiagnostic, PeerDiagnostic]> {
+  const firstNegotiations = firstBefore.offers + firstBefore.answers;
+  const secondNegotiations = secondBefore.offers + secondBefore.answers;
+  const recovered = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstBefore.id &&
+        peer.offers + peer.answers === firstNegotiations &&
+        peer.connectionState === 'connected' &&
+        peer.packetsSentAudio > firstBefore.packetsSentAudio &&
+        peer.packetsReceivedAudio > firstBefore.packetsReceivedAudio &&
+        peer.bytesSentAudio > firstBefore.bytesSentAudio &&
+        peer.bytesReceivedAudio > firstBefore.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, policy),
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondBefore.id &&
+        peer.offers + peer.answers === secondNegotiations &&
+        peer.connectionState === 'connected' &&
+        peer.packetsSentAudio > secondBefore.packetsSentAudio &&
+        peer.packetsReceivedAudio > secondBefore.packetsReceivedAudio &&
+        peer.bytesSentAudio > secondBefore.bytesSentAudio &&
+        peer.bytesReceivedAudio > secondBefore.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, policy),
+      60_000,
+    ),
+  ]);
+  return recovered;
+}
+
+async function proveRelayIceRestart(
+  pair: AcceptancePair,
+): Promise<IceRestartRecoveryReport> {
+  const creatorName = 'Alice-relay';
+  const joinerName = 'Bob-relay';
+  const [firstBefore, secondBefore, firstSnapshotBefore, secondSnapshotBefore] =
+    await Promise.all([
+      waitForPeer(pair.first.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      waitForPeer(pair.second.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      requiredDiagnostics(pair.first.page),
+      requiredDiagnostics(pair.second.page),
+    ]);
+
+  const unpause = await pauseIntegrationCoturn();
+  const {
+    firstDuring,
+    secondDuring,
+    firstStatusDuring,
+    secondStatusDuring,
+    firstStatusHistoryDuring,
+    secondStatusHistoryDuring,
+  } = await (async () => {
+    try {
+      const [currentFirst, currentSecond] = await Promise.all([
+        waitForPeerDiagnostic(
+          pair.first.page,
+          firstBefore.id,
+          (peer, snapshot) =>
+            peer.iceConnectionStateHistory.includes('disconnected') &&
+            peer.restartIceCalls > firstBefore.restartIceCalls &&
+            snapshot.callStatusHistory.includes('reconnecting'),
+          60_000,
+        ),
+        waitForPeerDiagnostic(
+          pair.second.page,
+          secondBefore.id,
+          (peer, snapshot) =>
+            peer.iceConnectionStateHistory.includes('disconnected') &&
+            snapshot.callStatusHistory.includes('reconnecting'),
+          60_000,
+        ),
+      ]);
+      await expectParticipantsIntact(pair, creatorName, joinerName);
+      const [firstStatus, secondStatus] = await Promise.all([
+        connectionStatus(pair.first.page),
+        connectionStatus(pair.second.page),
+      ]);
+      const [firstSnapshotDuring, secondSnapshotDuring] = await Promise.all([
+        requiredDiagnostics(pair.first.page),
+        requiredDiagnostics(pair.second.page),
+      ]);
+      expectSignalingUnchanged(firstSnapshotBefore, firstSnapshotDuring);
+      expectSignalingUnchanged(secondSnapshotBefore, secondSnapshotDuring);
+      return {
+        firstDuring: currentFirst,
+        secondDuring: currentSecond,
+        firstStatusDuring: firstStatus,
+        secondStatusDuring: secondStatus,
+        firstStatusHistoryDuring: firstSnapshotDuring.callStatusHistory,
+        secondStatusHistoryDuring: secondSnapshotDuring.callStatusHistory,
+      };
+    } finally {
+      await unpause();
+    }
+  })();
+
+  const [firstReconnected, secondReconnected] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstBefore.id &&
+        peer.connectionState === 'connected' &&
+        (peer.iceConnectionState === 'connected' ||
+          peer.iceConnectionState === 'completed') &&
+        peer.restartIceCalls > firstBefore.restartIceCalls &&
+        peer.offers + peer.answers > firstBefore.offers + firstBefore.answers &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondBefore.id &&
+        peer.connectionState === 'connected' &&
+        (peer.iceConnectionState === 'connected' ||
+          peer.iceConnectionState === 'completed') &&
+        peer.offers + peer.answers >
+          secondBefore.offers + secondBefore.answers &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+  ]);
+  const [firstAfter, secondAfter] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstReconnected.id &&
+        peer.packetsSentAudio > firstReconnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > firstReconnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > firstReconnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > firstReconnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondReconnected.id &&
+        peer.packetsSentAudio > secondReconnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > secondReconnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > secondReconnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > secondReconnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+  ]);
+  const [firstSnapshotAfter, secondSnapshotAfter] = await Promise.all([
+    requiredDiagnostics(pair.first.page),
+    requiredDiagnostics(pair.second.page),
+  ]);
+  expectSignalingUnchanged(firstSnapshotBefore, firstSnapshotAfter);
+  expectSignalingUnchanged(secondSnapshotBefore, secondSnapshotAfter);
+
+  return {
+    firstBefore,
+    secondBefore,
+    firstDuring,
+    secondDuring,
+    firstAfter,
+    secondAfter,
+    firstStatusDuring,
+    secondStatusDuring,
+    firstStatusHistoryDuring,
+    secondStatusHistoryDuring,
+  };
+}
+
+async function proveRelayIceFailureReset(
+  pair: AcceptancePair,
+): Promise<IceResetRecoveryReport> {
+  const creatorName = 'Alice-relay';
+  const joinerName = 'Bob-relay';
+  const [firstBefore, secondBefore, firstSnapshotBefore, secondSnapshotBefore] =
+    await Promise.all([
+      waitForPeer(pair.first.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      waitForPeer(pair.second.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      requiredDiagnostics(pair.first.page),
+      requiredDiagnostics(pair.second.page),
+    ]);
+
+  const [heldFirstPeerId, heldSecondPeerId] = await Promise.all([
+    holdDisconnectedIceEvents(pair.first.page),
+    holdDisconnectedIceEvents(pair.second.page),
+  ]);
+  expect(heldFirstPeerId).toBe(firstBefore.id);
+  expect(heldSecondPeerId).toBe(secondBefore.id);
+
+  const unpause = await pauseIntegrationCoturn();
+  const {
+    firstFailed,
+    secondFailed,
+    firstClosed,
+    secondClosed,
+    firstReset,
+    secondReset,
+    firstStatusHistoryDuring,
+    secondStatusHistoryDuring,
+  } = await (async () => {
+    try {
+      const [failedFirst, failedSecond] = await Promise.all([
+        waitForPeerDiagnostic(
+          pair.first.page,
+          firstBefore.id,
+          (peer, snapshot) =>
+            peer.iceConnectionStateHistory.includes('disconnected') &&
+            peer.connectionStateHistory.includes('failed') &&
+            peer.heldDisconnectedIceEvents >
+              firstBefore.heldDisconnectedIceEvents &&
+            !peer.holdDisconnectedIceEvents &&
+            peer.restartIceCalls > firstBefore.restartIceCalls &&
+            snapshot.callStatusHistory.includes('reconnecting'),
+          120_000,
+        ),
+        waitForPeerDiagnostic(
+          pair.second.page,
+          secondBefore.id,
+          (peer, snapshot) =>
+            peer.iceConnectionStateHistory.includes('disconnected') &&
+            peer.connectionStateHistory.includes('failed') &&
+            peer.heldDisconnectedIceEvents >
+              secondBefore.heldDisconnectedIceEvents &&
+            !peer.holdDisconnectedIceEvents &&
+            snapshot.callStatusHistory.includes('reconnecting'),
+          120_000,
+        ),
+      ]);
+      await expectParticipantsIntact(pair, creatorName, joinerName);
+      const [closedFirst, closedSecond] = await Promise.all([
+        waitForPeerDiagnostic(
+          pair.first.page,
+          firstBefore.id,
+          (peer) => peer.closed,
+          45_000,
+        ),
+        waitForPeerDiagnostic(
+          pair.second.page,
+          secondBefore.id,
+          (peer) => peer.closed,
+          45_000,
+        ),
+      ]);
+      const [resetFirst, resetSecond] = await Promise.all([
+        waitForPeer(
+          pair.first.page,
+          (peer) =>
+            peer.id !== firstBefore.id &&
+            !peer.closed &&
+            peer.transceivers === 3,
+          45_000,
+        ),
+        waitForPeer(
+          pair.second.page,
+          (peer) =>
+            peer.id !== secondBefore.id &&
+            !peer.closed &&
+            peer.transceivers === 3,
+          45_000,
+        ),
+      ]);
+      const [firstSnapshotDuring, secondSnapshotDuring] = await Promise.all([
+        requiredDiagnostics(pair.first.page),
+        requiredDiagnostics(pair.second.page),
+      ]);
+      expectSignalingUnchanged(firstSnapshotBefore, firstSnapshotDuring);
+      expectSignalingUnchanged(secondSnapshotBefore, secondSnapshotDuring);
+      return {
+        firstFailed: failedFirst,
+        secondFailed: failedSecond,
+        firstClosed: closedFirst,
+        secondClosed: closedSecond,
+        firstReset: resetFirst,
+        secondReset: resetSecond,
+        firstStatusHistoryDuring: firstSnapshotDuring.callStatusHistory,
+        secondStatusHistoryDuring: secondSnapshotDuring.callStatusHistory,
+      };
+    } finally {
+      await unpause();
+    }
+  })();
+
+  const [firstReconnected, secondReconnected] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstReset.id &&
+        peer.connectionState === 'connected' &&
+        peer.transceivers === 3 &&
+        peer.offers > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondReset.id &&
+        peer.connectionState === 'connected' &&
+        peer.transceivers === 3 &&
+        peer.answers > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+  ]);
+  const [firstAfter, secondAfter] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstReconnected.id &&
+        peer.packetsSentAudio > firstReconnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > firstReconnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > firstReconnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > firstReconnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondReconnected.id &&
+        peer.packetsSentAudio > secondReconnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > secondReconnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > secondReconnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > secondReconnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+  ]);
+  const [firstSnapshotAfter, secondSnapshotAfter] = await Promise.all([
+    requiredDiagnostics(pair.first.page),
+    requiredDiagnostics(pair.second.page),
+  ]);
+  expectSignalingUnchanged(firstSnapshotBefore, firstSnapshotAfter);
+  expectSignalingUnchanged(secondSnapshotBefore, secondSnapshotAfter);
+
+  return {
+    firstBefore,
+    secondBefore,
+    firstFailed,
+    secondFailed,
+    firstClosed,
+    secondClosed,
+    firstReset,
+    secondReset,
+    firstAfter,
+    secondAfter,
+    firstSnapshotAfter,
+    secondSnapshotAfter,
+    firstStatusHistoryDuring,
+    secondStatusHistoryDuring,
+  };
+}
+
+async function proveV09SignalingRecovery(
+  pair: AcceptancePair,
+  policy: AcceptancePolicy,
+): Promise<SignalingRecoveryReport> {
+  const creatorName = `Alice-${policy}`;
+  const joinerName = `Bob-${policy}`;
+  const [shortFirstBefore, shortSecondBefore, firstSnapshotBefore] =
+    await Promise.all([
+      waitForPeer(pair.first.page, () => true),
+      waitForPeer(pair.second.page, () => true),
+      requiredDiagnostics(pair.first.page),
+    ]);
+
+  expect(await dropSignaling(pair.first.page)).toBe(1);
+  await expectConnectedParticipants(pair, policy, creatorName, joinerName);
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await requiredDiagnostics(pair.first.page);
+        return (
+          snapshot.signalingDrops === firstSnapshotBefore.signalingDrops + 1 &&
+          snapshot.sockets.length > firstSnapshotBefore.sockets.length &&
+          snapshot.sockets.some(
+            (socket) => socket.opens > 0 && socket.closes > 0,
+          ) &&
+          snapshot.sockets.some(
+            (socket) => socket.opens > 0 && socket.closes === 0,
+          )
+        );
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+  const [shortFirstAfter, shortSecondAfter] =
+    await waitForSameTransportAudioRecovery(
+      pair,
+      policy,
+      shortFirstBefore,
+      shortSecondBefore,
+    );
+  await expectConnectedParticipants(pair, policy, creatorName, joinerName);
+
+  const [longFirstBefore, longSecondBefore, secondSnapshotBefore] =
+    await Promise.all([
+      waitForPeer(pair.first.page, () => true),
+      waitForPeer(pair.second.page, () => true),
+      requiredDiagnostics(pair.second.page),
+    ]);
+  const pauseStartedAt = Date.now();
+  expect(await pauseSignaling(pair.second.page)).toBe(1);
+  await Promise.all([
+    expect(pair.first.page.getByText('正在重新连接')).toBeVisible({
+      timeout: 30_000,
+    }),
+    expect(pair.first.page.locator('[title="离线"]')).toBeVisible({
+      timeout: 30_000,
+    }),
+    expect(pair.second.page.getByText('正在重新连接')).toBeVisible({
+      timeout: 30_000,
+    }),
+  ]);
+  await Promise.all([
+    expect(pair.first.page.getByTestId('participant-slot')).toHaveCount(2),
+    expect(pair.second.page.getByTestId('participant-slot')).toHaveCount(2),
+    expect(
+      pair.first.page.getByTitle(joinerName, { exact: true }),
+    ).toBeVisible(),
+    expect(
+      pair.second.page.getByTitle(creatorName, { exact: true }),
+    ).toBeVisible(),
+    expect(pair.first.page.getByText('语音连接异常')).toHaveCount(0),
+    expect(pair.second.page.getByText('语音连接异常')).toHaveCount(0),
+  ]);
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await requiredDiagnostics(pair.second.page);
+        return (
+          snapshot.signalingPaused &&
+          snapshot.sockets.length === secondSnapshotBefore.sockets.length &&
+          snapshot.blockedSignalingAttempts -
+            secondSnapshotBefore.blockedSignalingAttempts >=
+            5
+        );
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+  const pauseDurationMs = Date.now() - pauseStartedAt;
+  expect(pauseDurationMs).toBeGreaterThanOrEqual(3_500);
+  const [firstDuring, secondDuring] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === longFirstBefore.id &&
+        peer.offers + peer.answers ===
+          longFirstBefore.offers + longFirstBefore.answers &&
+        peer.connectionState === 'connected' &&
+        peer.packetsSentAudio > longFirstBefore.packetsSentAudio &&
+        peer.packetsReceivedAudio > longFirstBefore.packetsReceivedAudio &&
+        matchesIcePolicy(peer, policy),
+      10_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === longSecondBefore.id &&
+        peer.offers + peer.answers ===
+          longSecondBefore.offers + longSecondBefore.answers &&
+        peer.connectionState === 'connected' &&
+        peer.packetsSentAudio > longSecondBefore.packetsSentAudio &&
+        peer.packetsReceivedAudio > longSecondBefore.packetsReceivedAudio &&
+        matchesIcePolicy(peer, policy),
+      10_000,
+    ),
+  ]);
+
+  expect(await resumeSignaling(pair.second.page)).toBe(1);
+  await expectConnectedParticipants(pair, policy, creatorName, joinerName);
+  const [longFirstAfter, longSecondAfter] =
+    await waitForSameTransportAudioRecovery(
+      pair,
+      policy,
+      firstDuring,
+      secondDuring,
+    );
+  const recoveredSnapshot = await requiredDiagnostics(pair.second.page);
+  expect(recoveredSnapshot.signalingPaused).toBe(false);
+  expect(await resumeSignaling(pair.second.page)).toBe(0);
+  const blockedAttempts =
+    recoveredSnapshot.blockedSignalingAttempts -
+    secondSnapshotBefore.blockedSignalingAttempts;
+  expect(blockedAttempts).toBeGreaterThanOrEqual(5);
+
+  return {
+    short: {
+      firstBefore: shortFirstBefore,
+      secondBefore: shortSecondBefore,
+      firstAfter: shortFirstAfter,
+      secondAfter: shortSecondAfter,
+    },
+    long: {
+      firstBefore: longFirstBefore,
+      secondBefore: longSecondBefore,
+      firstDuring,
+      secondDuring,
+      firstAfter: longFirstAfter,
+      secondAfter: longSecondAfter,
+      blockedAttempts,
+      pauseDurationMs,
+    },
+  };
+}
+
+async function leaveJoinerExplicitly(
+  pair: AcceptancePair,
+  departedName: string,
+): Promise<ExplicitDepartureReport> {
+  const [creatorBeforeLeave, joinerBeforeLeave] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) => peer.connectionState === 'connected',
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) => peer.connectionState === 'connected',
+    ),
+  ]);
+
+  await pair.second.page.getByRole('button', { name: '挂断' }).click();
+  await Promise.all([
+    expect(
+      pair.second.page.getByRole('button', { name: '创建房间' }),
+    ).toBeVisible({ timeout: 45_000 }),
+    expect(
+      pair.first.page.getByText('等待对方加入', { exact: true }),
+    ).toBeVisible({ timeout: 45_000 }),
+    expect(pair.first.page.getByTestId('participant-waiting')).toBeVisible({
+      timeout: 45_000,
+    }),
+  ]);
+  await Promise.all([
+    expect(pair.first.page.getByTestId('participant-slot')).toHaveCount(1),
+    expect(
+      pair.first.page.getByTitle(departedName, { exact: true }),
+    ).toHaveCount(0),
+    expect(pair.first.page.getByText('语音连接异常')).toHaveCount(0),
+  ]);
+
+  const [creatorClosed, joinerClosed, creatorWaiting] = await Promise.all([
+    waitForClosedPeer(pair.first.page, creatorBeforeLeave.id),
+    waitForClosedPeer(pair.second.page, joinerBeforeLeave.id),
+    waitForPeer(
+      pair.first.page,
+      (peer, snapshot) =>
+        peer.id !== creatorBeforeLeave.id &&
+        peer.transceivers === 3 &&
+        peer.connectionState !== 'failed' &&
+        snapshot.peers.some(
+          (candidate) =>
+            candidate.id === creatorBeforeLeave.id && candidate.closed,
+        ),
+    ),
+  ]);
+
+  return {
+    creatorBeforeLeave,
+    joinerBeforeLeave,
+    creatorClosed,
+    joinerClosed,
+    creatorWaiting,
+  };
+}
+
+async function joinExistingRoomAndProveAudio(
+  pair: AcceptancePair,
+  policy: AcceptancePolicy,
+  roomCode: string,
+  creatorName: string,
+  joinerName: string,
+  departure: ExplicitDepartureReport,
+): Promise<ExplicitRejoinStageReport> {
+  await pair.second.page.getByLabel('房间码').fill(roomCode);
+  await pair.second.page.getByRole('button', { name: '加入房间' }).click();
+  await expectConnectedParticipants(pair, policy, creatorName, joinerName);
+
+  const [creatorConnected, joinerConnected] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === departure.creatorWaiting.id &&
+        peer.connectionState === 'connected' &&
+        peer.liveRemoteAudioTracks === 1 &&
+        matchesIcePolicy(peer, policy),
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer, snapshot) =>
+        peer.id !== departure.joinerBeforeLeave.id &&
+        peer.connectionState === 'connected' &&
+        peer.liveRemoteAudioTracks === 1 &&
+        matchesIcePolicy(peer, policy) &&
+        snapshot.peers.some(
+          (candidate) =>
+            candidate.id === departure.joinerBeforeLeave.id && candidate.closed,
+        ),
+    ),
+  ]);
+
+  await proveBidirectionalAudio(pair);
+  const [creatorRejoined, joinerRejoined] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === creatorConnected.id &&
+        peer.packetsSentAudio > creatorConnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > creatorConnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > creatorConnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > creatorConnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === joinerConnected.id &&
+        peer.packetsSentAudio > joinerConnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > joinerConnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > joinerConnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > joinerConnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0,
+    ),
+  ]);
+
+  await expectConnectedParticipants(pair, policy, creatorName, joinerName);
+  return {
+    ...departure,
+    creatorRejoined,
+    joinerRejoined,
+  };
+}
+
+async function proveExplicitLeaveAndRejoin(
+  pair: AcceptancePair,
+  policy: AcceptancePolicy,
+  roomCode: string,
+  run: string,
+): Promise<ExplicitLeaveRejoinReport> {
+  const creatorName = `Alice-${policy}`;
+  const sameUserName = `Bob-${policy}`;
+  const newUserName = `Charlie-${policy}`;
+
+  const sameUserDeparture = await leaveJoinerExplicitly(pair, sameUserName);
+  const sameUser = await joinExistingRoomAndProveAudio(
+    pair,
+    policy,
+    roomCode,
+    creatorName,
+    sameUserName,
+    sameUserDeparture,
+  );
+
+  const newUserDeparture = await leaveJoinerExplicitly(pair, sameUserName);
+  await pair.second.page.getByRole('button', { name: '退出登录' }).click();
+  await expect(
+    pair.second.page.getByRole('heading', { name: '登录 WO' }),
+  ).toBeVisible();
+  await registerThenLogin(
+    pair.second.page,
+    newUserName,
+    `charlie-${policy}-${run}@e2e.invalid`,
+  );
+  const newUser = await joinExistingRoomAndProveAudio(
+    pair,
+    policy,
+    roomCode,
+    creatorName,
+    newUserName,
+    newUserDeparture,
+  );
+  await expect(
+    pair.first.page.getByTitle(sameUserName, { exact: true }),
+  ).toHaveCount(0);
+
+  return {
+    roomCodeLength: roomCode.length,
+    sameRoomCodeReused: true,
+    sameUser,
+    newUser,
+  };
+}
+
+for (const policy of ['all', 'relay'] as const) {
+  test(`V09 WSS short/long recovery ${policy === 'all' ? 'direct' : 'forced relay'} path`, async ({
+    acceptance,
+  }) => {
+    const pair = await acceptance.launch(policy);
+    const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await registerPair(pair, policy, run);
+    await connectRoom(pair, false);
+    await proveBidirectionalAudio(pair);
+
+    const report = await proveV09SignalingRecovery(pair, policy);
+    await test.info().attach(`v09-signaling-recovery-${policy}.json`, {
+      body: JSON.stringify(report, null, 2),
+      contentType: 'application/json',
+    });
+  });
+}
+
+test('V10 ICE disconnected/restart forced relay path', async ({
+  acceptance,
+}) => {
+  const pair = await acceptance.launch('relay');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+
+  const report = await proveRelayIceRestart(pair);
+  await test.info().attach('v10-ice-restart-relay.json', {
+    body: JSON.stringify(report, null, 2),
+    contentType: 'application/json',
+  });
+});
+
+test('V10 ICE failed/authoritative reset forced relay path', async ({
+  acceptance,
+}) => {
+  const pair = await acceptance.launch('relay');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+
+  const report = await proveRelayIceFailureReset(pair);
+  await test.info().attach('v10-ice-reset-relay.json', {
+    body: JSON.stringify(report, null, 2),
+    contentType: 'application/json',
+  });
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+});
+
+for (const policy of ['all', 'relay'] as const) {
+  test(`V08 explicit leave/rejoin ${policy === 'all' ? 'direct' : 'forced relay'} path`, async ({
+    acceptance,
+  }) => {
+    const pair = await acceptance.launch(policy);
+    const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await registerPair(pair, policy, run);
+    await connectRoom(pair, false);
+    const roomCode = await pair.first.page
+      .locator('.room-header code')
+      .innerText();
+    expect(roomCode).toMatch(/^\d{6}$/u);
+    await proveBidirectionalAudio(pair);
+
+    const explicitLeaveRejoinReport = await proveExplicitLeaveAndRejoin(
+      pair,
+      policy,
+      roomCode,
+      run,
+    );
+    await test.info().attach(`v08-explicit-rejoin-${policy}.json`, {
+      body: JSON.stringify(explicitLeaveRejoinReport, null, 2),
+      contentType: 'application/json',
+    });
+
+    await pair.second.close();
+    await expect(pair.first.page.getByText('正在重新连接')).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(pair.first.page.locator('[title="离线"]')).toBeVisible();
+  });
+}
+
 for (const policy of ['all', 'relay'] as const) {
   test(`real two-peer ${policy === 'all' ? 'direct' : 'forced relay'} path`, async ({
     acceptance,
@@ -802,18 +1871,7 @@ for (const policy of ['all', 'relay'] as const) {
     const pair = await acceptance.launch(policy);
     await proveCameraRequestRejected(pair.first.page);
     const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    await Promise.all([
-      registerThenLogin(
-        pair.first.page,
-        `Alice-${policy}`,
-        `alice-${policy}-${run}@e2e.invalid`,
-      ),
-      registerThenLogin(
-        pair.second.page,
-        `Bob-${policy}`,
-        `bob-${policy}-${run}@e2e.invalid`,
-      ),
-    ]);
+    await registerPair(pair, policy, run);
     await connectRoom(pair, policy === 'all');
     await proveBidirectionalAudio(pair);
     const noiseIntensitySwitchReport = await proveNoiseIntensitySwitching(pair);

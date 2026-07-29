@@ -269,6 +269,8 @@ const capture = createCaptureSourceService({
 const permissions = createScreenPermissionService({
   platform: process.platform,
   platformRelease: acceptancePlatformRelease,
+  processId: process.pid,
+  getAppMetrics: () => app.getAppMetrics(),
   systemPreferences,
   shell,
 });

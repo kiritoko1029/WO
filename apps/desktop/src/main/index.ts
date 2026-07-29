@@ -150,6 +150,8 @@ const capture = createCaptureSourceService({
 const permissions = createScreenPermissionService({
   platform: process.platform,
   platformRelease: release(),
+  processId: process.pid,
+  getAppMetrics: () => app.getAppMetrics(),
   systemPreferences,
   shell,
 });

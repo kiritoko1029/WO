@@ -80,6 +80,7 @@ describe('desktop preload API', () => {
                         status: 'granted',
                         canOpenSettings: false,
                         systemAudioMode: 'loopback',
+                        captureProcessElevated: false,
                       }
                     : authSession;
       return { ok: true, value };
@@ -141,6 +142,7 @@ describe('desktop preload API', () => {
         status: 'granted',
         canOpenSettings: false,
         systemAudioMode: 'loopback',
+        captureProcessElevated: false,
       },
     });
     await bridge.capture.openSettings();
@@ -186,12 +188,20 @@ describe('desktop preload API', () => {
       status: 'granted',
       canOpenSettings: false,
       systemAudioMode: 'loopback',
+      captureProcessElevated: false,
       unexpected: true,
     },
     {
       status: 'granted',
       canOpenSettings: false,
       systemAudioMode: 'macos-loopback',
+      captureProcessElevated: false,
+    },
+    {
+      status: 'granted',
+      canOpenSettings: false,
+      systemAudioMode: 'loopback',
+      captureProcessElevated: 'yes',
     },
   ])('rejects an invalid screen permission capability: %o', async (value) => {
     const bridge = createDesktopApi(

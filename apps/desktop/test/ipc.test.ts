@@ -92,6 +92,7 @@ function createHarness() {
       status: 'granted' as const,
       canOpenSettings: false,
       systemAudioMode: 'loopback' as const,
+      captureProcessElevated: false,
     })),
     openSettings: vi.fn(async () => undefined),
   };
@@ -209,6 +210,7 @@ describe('desktop IPC boundary', () => {
         status: 'granted',
         canOpenSettings: false,
         systemAudioMode: 'loopback',
+        captureProcessElevated: false,
       },
     });
     expect(permissions.status).toHaveBeenCalledOnce();

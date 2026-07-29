@@ -641,6 +641,8 @@ describe('screen permission policy', () => {
       const service = createScreenPermissionService({
         platform: 'darwin',
         platformRelease: '23.6.0',
+        processId: 7,
+        getAppMetrics: () => [],
         systemPreferences: { getMediaAccessStatus },
         shell: { openExternal: vi.fn(async () => undefined) },
       });
@@ -649,6 +651,7 @@ describe('screen permission policy', () => {
         status,
         canOpenSettings: status === 'denied' || status === 'restricted',
         systemAudioMode: 'loopback',
+        captureProcessElevated: false,
       });
       expect(getMediaAccessStatus).toHaveBeenCalledWith('screen');
     },
@@ -659,6 +662,8 @@ describe('screen permission policy', () => {
     const service = createScreenPermissionService({
       platform: 'darwin',
       platformRelease: '23.6.0',
+      processId: 7,
+      getAppMetrics: () => [],
       systemPreferences: { getMediaAccessStatus: () => 'denied' },
       shell: { openExternal },
     });
@@ -675,12 +680,16 @@ describe('screen permission policy', () => {
     const windows = createScreenPermissionService({
       platform: 'win32',
       platformRelease: '10.0.26100',
+      processId: 7,
+      getAppMetrics: () => [{ pid: 7, integrityLevel: 'medium' }],
       systemPreferences: { getMediaAccessStatus: () => 'granted' },
       shell: { openExternal },
     });
     const grantedMac = createScreenPermissionService({
       platform: 'darwin',
       platformRelease: '24.0.0',
+      processId: 7,
+      getAppMetrics: () => [],
       systemPreferences: { getMediaAccessStatus: () => 'granted' },
       shell: { openExternal },
     });
@@ -689,14 +698,46 @@ describe('screen permission policy', () => {
       status: 'granted',
       canOpenSettings: false,
       systemAudioMode: 'loopback',
+      captureProcessElevated: false,
     });
     expect(grantedMac.status()).toEqual({
       status: 'granted',
       canOpenSettings: false,
       systemAudioMode: 'native-picker',
+      captureProcessElevated: false,
     });
     await expect(windows.openSettings()).rejects.toThrow(/unavailable/i);
     await expect(grantedMac.openSettings()).rejects.toThrow(/unavailable/i);
     expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  test('reports only the current elevated Windows process as capture-incompatible', () => {
+    const service = createScreenPermissionService({
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      processId: 7,
+      getAppMetrics: () => [
+        { pid: 7, integrityLevel: 'high' },
+        { pid: 8, integrityLevel: 'medium' },
+      ],
+      systemPreferences: { getMediaAccessStatus: () => 'granted' },
+      shell: { openExternal: vi.fn(async () => undefined) },
+    });
+    const unrelatedElevatedProcess = createScreenPermissionService({
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      processId: 7,
+      getAppMetrics: () => [
+        { pid: 7, integrityLevel: 'medium' },
+        { pid: 8, integrityLevel: 'high' },
+      ],
+      systemPreferences: { getMediaAccessStatus: () => 'granted' },
+      shell: { openExternal: vi.fn(async () => undefined) },
+    });
+
+    expect(service.status().captureProcessElevated).toBe(true);
+    expect(unrelatedElevatedProcess.status().captureProcessElevated).toBe(
+      false,
+    );
   });
 });
