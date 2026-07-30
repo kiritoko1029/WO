@@ -1,4 +1,7 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyInstance,
+  type FastifyServerOptions,
+} from 'fastify';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { HttpError, registerErrorHandler } from '../src/http/errors.ts';
@@ -26,10 +29,14 @@ interface RouteHarnessOptions {
   readonly maxCollisionAttempts?: number;
   readonly prefillTicket?: boolean;
   readonly rateLimited?: boolean;
+  readonly trustProxy?: FastifyServerOptions['trustProxy'];
 }
 
 async function createHarness(options: RouteHarnessOptions) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    trustProxy: options.trustProxy ?? false,
+  });
   openApps.push(app);
   registerErrorHandler(app);
   app.decorateRequest('authIdentity', null);
@@ -177,6 +184,33 @@ describe('POST /v1/realtime/ticket', () => {
     });
     expect(harness.lookedUpUserIds).toEqual([]);
     expect(harness.ticketStore.stats().size).toBe(0);
+  });
+
+  test('uses only the nearest client address behind one trusted proxy hop', async () => {
+    const harness = await createHarness({
+      user: { id: USER_ID, displayName: 'Person', disabledAt: null },
+      rateLimited: true,
+      trustProxy: 1,
+    });
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/v1/realtime/ticket',
+      remoteAddress: '10.0.0.2',
+      headers: {
+        authorization: 'Bearer valid-access-token',
+        'x-forwarded-for': '198.51.100.90, 203.0.113.40',
+        'x-real-ip': '198.51.100.91',
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(harness.consumeTicketAttempt).toHaveBeenCalledWith({
+      userId: USER_ID,
+      remoteIp: '203.0.113.40',
+      requestId: 'signal-ticket',
+    });
+    expect(harness.lookedUpUserIds).toEqual([]);
   });
 
   test.each([

@@ -190,6 +190,12 @@ m-line 客户端不能与当前客户端混合进房；服务端不会重写或�
 （默认 `18080→3000`）和 coturn，则由宿主机上的 Nginx、OpenResty 或 1Panel
 负责 `APP_DOMAIN` 的 HTTPS 与反代。
 
+生产 Server 只信任**一个**直接反向代理跳。`18080` 必须继续绑定
+`127.0.0.1`，不得通过安全组、端口转发或额外 Compose override 暴露公网。
+推荐配置会用 `$remote_addr` 覆盖客户端自带的 `X-Forwarded-For`；不要改回
+`$proxy_add_x_forwarded_for`。若前面增加 CDN、负载均衡器或第二层代理，必须先
+重新定义可信代理地址和跳数并补齐伪造头回归，不能沿用单跳配置直接上线。
+
 ### 必须反代与禁止反代
 
 | 流量                                        | 处理                                                                   |
@@ -238,7 +244,7 @@ location = /v1/realtime {
 
     proxy_set_header Host              $host;
     proxy_set_header X-Real-IP         $remote_addr;
-    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For   $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host  $host;
     proxy_set_header X-Forwarded-Port  $server_port;
@@ -263,7 +269,7 @@ location / {
 
     proxy_set_header Host              $host;
     proxy_set_header X-Real-IP         $remote_addr;
-    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For   $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host  $host;
     proxy_set_header X-Forwarded-Port  $server_port;

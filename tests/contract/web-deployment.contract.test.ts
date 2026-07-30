@@ -38,6 +38,23 @@ describe('Web deployment contract', () => {
     },
   );
 
+  test('keeps the external proxy on one sanitized loopback hop', () => {
+    const deployment = read('docs/deployment.md');
+    const serverEntry = read('apps/server/src/index.ts');
+
+    expect(
+      deployment.match(/proxy_set_header X-Forwarded-For\s+\$remote_addr;/gu),
+    ).toHaveLength(2);
+    expect(deployment).not.toMatch(
+      /proxy_set_header X-Forwarded-For\s+\$proxy_add_x_forwarded_for;/gu,
+    );
+    expect(deployment).toContain('proxy_pass http://127.0.0.1:18080;');
+    expect(deployment).toContain('`18080` 必须继续绑定');
+    expect(serverEntry).toContain(
+      "trustProxy: config.nodeEnv === 'production' ? 1 : false",
+    );
+  });
+
   test('supports an explicit E2E origin without widening desktop certificate trust', () => {
     const webPlaywright = read('apps/web/playwright.config.ts');
     const desktopFixture = read('apps/desktop/e2e/fixtures.ts');

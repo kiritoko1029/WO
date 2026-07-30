@@ -810,9 +810,9 @@ describe('HTTP email/password authentication', () => {
         },
       });
 
-    expect((await request('203.0.113.20')).statusCode).toBe(401);
-    expect((await request('203.0.113.20')).statusCode).toBe(429);
-    expect((await request('203.0.113.21')).statusCode).toBe(401);
+    expect((await request('203.0.113.20, 198.51.100.7')).statusCode).toBe(401);
+    expect((await request('203.0.113.99, 198.51.100.7')).statusCode).toBe(429);
+    expect((await request('203.0.113.20, 198.51.100.8')).statusCode).toBe(401);
   });
 
   test('ignores forged forwarded addresses when no reverse proxy is trusted', async () => {

@@ -7,12 +7,13 @@ import {
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 import { WebSocket } from 'ws';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { createApp } from '../src/app.ts';
 import type { AccessTokenService } from '../src/modules/auth/access-token.ts';
+import type { JoinAttemptLimiter } from '../src/modules/rooms/join-attempt-limiter.ts';
 import { createSignalTicketStore } from '../src/modules/signaling/signal-ticket-store.ts';
 
 interface RunningFixture {
@@ -33,6 +34,8 @@ interface FixtureOptions {
   readonly maxInboundBytesPerWindow?: number;
   readonly requestCacheMaxEntries?: number;
   readonly maxAckEntriesPerConnection?: number;
+  readonly trustProxy?: FastifyServerOptions['trustProxy'];
+  readonly joinAttemptLimiter?: JoinAttemptLimiter;
 }
 
 class SocketInbox {
@@ -132,6 +135,7 @@ async function createFixture(
     accessTokenService,
     readinessCheck: async () => undefined,
     logger: false,
+    trustProxy: options.trustProxy ?? false,
     realtime: {
       identityRepository: {
         async findEmailUserById(userId: string) {
@@ -160,6 +164,9 @@ async function createFixture(
         credentialTtlSeconds: 600,
       },
       now: () => nowMs,
+      ...(options.joinAttemptLimiter === undefined
+        ? {}
+        : { joinAttemptLimiter: options.joinAttemptLimiter }),
       roomRegistryOptions: {
         randomInt: () => 12_345,
         randomUUID: () => `room-${++roomId}`,
@@ -235,6 +242,27 @@ function openSocket(
       'wo-v1',
       `ticket.${ticket}`,
     ]);
+    socket.once('open', () => resolve(socket));
+    socket.once('error', reject);
+  });
+}
+
+function openSocketWithProxyHeaders(
+  fixture: RunningFixture,
+  ticket: string,
+  forwardedFor: string,
+): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(
+      `${fixture.wsUrl}/v1/realtime`,
+      ['wo-v1', `ticket.${ticket}`],
+      {
+        headers: {
+          'x-forwarded-for': forwardedFor,
+          'x-real-ip': '198.51.100.200',
+        },
+      },
+    );
     socket.once('open', () => resolve(socket));
     socket.once('error', reject);
   });
@@ -899,6 +927,44 @@ describe('authenticated signaling gateway', () => {
       headers: { authorization: 'Bearer access-user-2' },
     });
     expect(otherUser.status).toBe(200);
+  });
+
+  test('uses the trusted upgrade IP for WebSocket room-join limiting', async () => {
+    const consume = vi.fn(() => ({
+      allowed: false,
+      remaining: 0,
+      retryAfterMs: 60_000,
+    }));
+    const fixture = await createFixture({
+      trustProxy: 1,
+      joinAttemptLimiter: {
+        consume,
+        getStats: () => ({ keys: 0 }),
+        clear: () => undefined,
+      },
+    });
+    const issued = await issueTicket(fixture, 'user-1');
+    const socket = await openSocketWithProxyHeaders(
+      fixture,
+      issued.ticket,
+      '198.51.100.77, 203.0.113.50',
+    );
+    const client = new SocketInbox(socket);
+
+    sendRequest(client, 'room.join', 'proxy-room-join', {
+      roomCode: '123456',
+    });
+    expect(await client.next(isAck('proxy-room-join'))).toMatchObject({
+      payload: {
+        ok: false,
+        error: { code: 'RATE_LIMITED' },
+      },
+    });
+    expect(consume).toHaveBeenCalledWith({
+      userId: 'user-1',
+      remoteIp: '203.0.113.50',
+      requestId: 'proxy-room-join',
+    });
   });
 
   test('delivers timer-driven room closure and releases the socket binding', async () => {

@@ -380,6 +380,10 @@ describe('production Compose contract', () => {
     const configuration = renderCompose();
     expect(configuration.networks.api_internal?.internal).toBe(true);
     expect(configuration.networks.db_internal?.internal).toBe(true);
+    expect(configuration.services.server?.ports ?? []).toEqual([]);
+    expect(
+      (configuration.services.caddy?.ports ?? []).map(portKey).sort(),
+    ).toEqual(['443-443:443-443/tcp', '80-80:80-80/tcp']);
     expect(serviceNetworks(configuration.services.caddy!)).toEqual(
       expect.arrayContaining(['edge', 'api_internal']),
     );
@@ -394,6 +398,21 @@ describe('production Compose contract', () => {
       'turn_edge',
     ]);
   });
+
+  test.each(['docker-compose.yml', 'docker-compose.external-db.yml'])(
+    '%s publishes the Server through one loopback-only port',
+    (fileName) => {
+      const server = renderRootCompose(fileName).services.server!;
+
+      expect(server.ports).toHaveLength(1);
+      expect(server.ports?.[0]).toMatchObject({
+        host_ip: '127.0.0.1',
+        protocol: 'tcp',
+        published: '18080',
+        target: 3000,
+      });
+    },
+  );
 
   test('renders the explicit TURN host-network profile without Docker NAT', () => {
     const hostEnvironment = {

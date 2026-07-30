@@ -74,6 +74,7 @@ type HarnessOptions = {
   releaseServicesExisted?: boolean;
   rollbackRequiresLegacyPlatform?: boolean;
   rootBoundaryInvalid?: boolean;
+  rootServerPortBoundaryInvalid?: boolean;
   rootSecretBoundaryInvalid?: boolean;
   smokeThrownValue?: unknown;
 };
@@ -170,6 +171,7 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
     releaseServicesExisted = false,
     rollbackRequiresLegacyPlatform = false,
     rootBoundaryInvalid = false,
+    rootServerPortBoundaryInvalid = false,
     rootSecretBoundaryInvalid = false,
     smokeThrownValue,
   } = harnessOptions;
@@ -222,6 +224,9 @@ function createHarness(harnessOptions: HarnessOptions = {}) {
       }
       if (rootBoundaryInvalid) {
         configuration.services.server.image = imageId('f');
+      }
+      if (rootServerPortBoundaryInvalid) {
+        configuration.services.server.ports = [{ host_ip: '0.0.0.0' }];
       }
       if (rootSecretBoundaryInvalid) {
         configuration.secrets.turn_tls_key.file =
@@ -563,6 +568,29 @@ describe('release apply activation safety', () => {
     await expect(
       applyRelease(fixture.options, fixture.dependencies),
     ).rejects.toThrow(/root Compose preflight failed.*not immutable/i);
+    expect(
+      harness.calls.some(
+        ({ arguments_ }) =>
+          arguments_.includes('up') || arguments_.includes('rm'),
+      ),
+    ).toBe(false);
+    expect(
+      (await readdir(fixture.rollbackRoot, { withFileTypes: true })).some(
+        (entry) =>
+          entry.isDirectory() && entry.name.startsWith('wo-release-apply-'),
+      ),
+    ).toBe(false);
+  });
+
+  test('rejects a public Server port before any activation', async () => {
+    const harness = createHarness({ rootServerPortBoundaryInvalid: true });
+    const fixture = await createFixture('external-db', harness.execute);
+
+    await expect(
+      applyRelease(fixture.options, fixture.dependencies),
+    ).rejects.toThrow(
+      /root Compose preflight failed.*server port boundary is not loopback-only/i,
+    );
     expect(
       harness.calls.some(
         ({ arguments_ }) =>
