@@ -110,6 +110,8 @@ function agentConfiguration(directory, overrides = {}) {
         turnAddress: '203.0.113.20',
         turnUdpPort: 3478,
         turnTlsPort: 5349,
+        turnRelayMinPort: 49160,
+        turnRelayMaxPort: 49359,
         controllerAddress: '203.0.113.10',
         controllerPort: 9443,
       },
@@ -608,6 +610,99 @@ describe('agent fail-closed lifecycle', () => {
       restoredFirewall: true,
       childrenStopped: true,
     });
+  });
+
+  test('retries only incomplete cleanup and releases the single-run lock', async () => {
+    const directory = await temporaryDirectory();
+    const children = [];
+    const removeFirewall = vi
+      .fn()
+      .mockResolvedValueOnce({ pass: false })
+      .mockResolvedValueOnce({ pass: true });
+    const dependencies = runtimeDependencies({
+      removeFirewall,
+      spawnTracked: vi.fn(() => {
+        const child = {
+          pid: children.length + 10,
+          exited: new Promise(() => {}),
+          stop: vi.fn(async () => true),
+        };
+        children.push(child);
+        return child;
+      }),
+    });
+    const runtime = createAgentRuntime(
+      agentConfiguration(directory),
+      dependencies,
+    );
+    await runtime.register({
+      authorization: authorization(),
+      runId: 'run-1',
+    });
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.prepare', 1, {
+        packageSha256: hash,
+        source: 'window',
+        path: 'direct',
+      }),
+      context: {
+        role: 'publisher',
+        serverUrl: 'https://rtc.example.test',
+      },
+    });
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.start', 2, { durationMs: 45_000 }),
+    });
+
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('run.cancel', 3, { reason: 'first cleanup' }),
+      }),
+    ).resolves.toMatchObject({
+      cleanup: { restoredFirewall: false, childrenStopped: true },
+    });
+    await expect(
+      runtime.register({
+        authorization: authorization(),
+        runId: 'run-2',
+      }),
+    ).rejects.toEqual(expect.objectContaining({ code: 'RUN_BUSY' }));
+
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('run.cancel', 4, { reason: 'retry cleanup' }),
+      }),
+    ).resolves.toMatchObject({
+      cleanup: { restoredFirewall: true, childrenStopped: true },
+    });
+    expect(removeFirewall).toHaveBeenCalledTimes(2);
+    expect(children.every((child) => child.stop.mock.calls.length === 1)).toBe(
+      true,
+    );
+    expect(
+      runtime
+        .poll({
+          authorization: authorization(),
+          runId: 'run-1',
+          after: 0,
+        })
+        .events.filter((event) => event.type === 'cleanup.ack')
+        .map((event) => event.payload),
+    ).toEqual([
+      { restoredFirewall: false, childrenStopped: true },
+      { restoredFirewall: true, childrenStopped: true },
+    ]);
+    expect(runtime.getSnapshot().activeRunId).toBeNull();
+    await expect(
+      runtime.register({
+        authorization: authorization(),
+        runId: 'run-2',
+      }),
+    ).resolves.toBeDefined();
   });
 
   test('stops already-started children when a later child fails to spawn', async () => {

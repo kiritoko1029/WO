@@ -2,6 +2,35 @@ import { isIP } from 'node:net';
 import { resolve } from 'node:path';
 
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const FIREWALL_CONFIGURATION_FIELDS = Object.freeze([
+  'turnAddress',
+  'turnUdpPort',
+  'turnTlsPort',
+  'turnRelayMinPort',
+  'turnRelayMaxPort',
+  'controllerAddress',
+  'controllerPort',
+]);
+
+export const FIREWALL_RULE_IDS = Object.freeze([
+  'dns-udp',
+  'dns-tcp',
+  'https',
+  'controller',
+  'turn-udp',
+  'turn-tcp',
+  'turn-tls',
+  'turn-relay',
+]);
+
+function hasExactFirewallRuleIds(value) {
+  return (
+    Array.isArray(value) &&
+    value.length === FIREWALL_RULE_IDS.length &&
+    new Set(value).size === FIREWALL_RULE_IDS.length &&
+    FIREWALL_RULE_IDS.every((ruleId) => value.includes(ruleId))
+  );
+}
 
 export class FirewallPolicyError extends Error {
   constructor(code, detail = null) {
@@ -26,43 +55,77 @@ function safeAbsolutePath(value, name) {
   return value;
 }
 
+function requireExactFields(value, expected) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new FirewallPolicyError('INVALID_FIREWALL_REQUEST');
+  }
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (
+    actual.length !== wanted.length ||
+    actual.some((key, index) => key !== wanted[index])
+  ) {
+    throw new FirewallPolicyError('INVALID_FIREWALL_REQUEST');
+  }
+}
+
+export function validateFirewallConfiguration(value) {
+  requireExactFields(value, FIREWALL_CONFIGURATION_FIELDS);
+  if (isIP(value.turnAddress) === 0 || isIP(value.controllerAddress) === 0) {
+    throw new FirewallPolicyError('INVALID_FIREWALL_REQUEST');
+  }
+  const turnUdpPort = safePort(value.turnUdpPort, 'turnUdpPort');
+  const turnTlsPort = safePort(value.turnTlsPort, 'turnTlsPort');
+  const turnRelayMinPort = safePort(value.turnRelayMinPort, 'turnRelayMinPort');
+  const turnRelayMaxPort = safePort(value.turnRelayMaxPort, 'turnRelayMaxPort');
+  if (
+    turnUdpPort === turnTlsPort ||
+    turnRelayMinPort > turnRelayMaxPort ||
+    [turnUdpPort, turnTlsPort].some(
+      (port) => port >= turnRelayMinPort && port <= turnRelayMaxPort,
+    )
+  ) {
+    throw new FirewallPolicyError('INVALID_FIREWALL_REQUEST', {
+      field: 'turnRelayRange',
+    });
+  }
+  return Object.freeze({
+    turnAddress: value.turnAddress,
+    turnUdpPort,
+    turnTlsPort,
+    turnRelayMinPort,
+    turnRelayMaxPort,
+    controllerAddress: value.controllerAddress,
+    controllerPort: safePort(value.controllerPort, 'controllerPort'),
+  });
+}
+
 export function validateFirewallRequest(value) {
   if (
     typeof value !== 'object' ||
     value === null ||
     !['win32', 'darwin'].includes(value.platform) ||
-    !RUN_ID_PATTERN.test(value.runId ?? '') ||
-    isIP(value.turnAddress) === 0 ||
-    isIP(value.controllerAddress) === 0
+    !RUN_ID_PATTERN.test(value.runId ?? '')
   ) {
     throw new FirewallPolicyError('INVALID_FIREWALL_REQUEST');
   }
   const expected = [
     'platform',
     'runId',
-    'turnAddress',
-    'turnUdpPort',
-    'turnTlsPort',
-    'controllerAddress',
-    'controllerPort',
+    ...FIREWALL_CONFIGURATION_FIELDS,
     'desktopExecutable',
     'stateFile',
-  ].sort();
-  const actual = Object.keys(value).sort();
-  if (
-    actual.length !== expected.length ||
-    actual.some((key, index) => key !== expected[index])
-  ) {
-    throw new FirewallPolicyError('INVALID_FIREWALL_REQUEST');
-  }
+  ];
+  requireExactFields(value, expected);
+  const firewall = validateFirewallConfiguration(
+    Object.fromEntries(
+      FIREWALL_CONFIGURATION_FIELDS.map((field) => [field, value[field]]),
+    ),
+  );
   return Object.freeze({
     platform: value.platform,
     runId: value.runId,
-    turnAddress: value.turnAddress,
-    turnUdpPort: safePort(value.turnUdpPort, 'turnUdpPort'),
-    turnTlsPort: safePort(value.turnTlsPort, 'turnTlsPort'),
-    controllerAddress: value.controllerAddress,
-    controllerPort: safePort(value.controllerPort, 'controllerPort'),
+    ...firewall,
     desktopExecutable: safeAbsolutePath(
       value.desktopExecutable,
       'desktopExecutable',
@@ -97,6 +160,10 @@ export function buildFirewallInvocation(repositoryRoot, input, action) {
         String(request.turnUdpPort),
         '-TurnTlsPort',
         String(request.turnTlsPort),
+        '-TurnRelayMinPort',
+        String(request.turnRelayMinPort),
+        '-TurnRelayMaxPort',
+        String(request.turnRelayMaxPort),
         '-ControllerAddress',
         request.controllerAddress,
         '-ControllerPort',
@@ -118,6 +185,8 @@ export function buildFirewallInvocation(repositoryRoot, input, action) {
       request.turnAddress,
       String(request.turnUdpPort),
       String(request.turnTlsPort),
+      String(request.turnRelayMinPort),
+      String(request.turnRelayMaxPort),
       request.controllerAddress,
       String(request.controllerPort),
       request.desktopExecutable,
@@ -127,15 +196,40 @@ export function buildFirewallInvocation(repositoryRoot, input, action) {
   });
 }
 
-export function verifyFirewallEvidence(value) {
+export function verifyFirewallInstallEvidence(value) {
   const failures = [];
   if (value?.elevated !== true) failures.push('NOT_ELEVATED');
   if (value?.watchdogArmed !== true) failures.push('WATCHDOG_NOT_ARMED');
   if (value?.installed !== true) failures.push('RULES_NOT_INSTALLED');
-  if (!Array.isArray(value?.rules) || value.rules.length < 5) {
+  if (!hasExactFirewallRuleIds(value?.manifestRules)) {
     failures.push('RULE_MANIFEST_INCOMPLETE');
   }
+  const expectedRuleCount =
+    FIREWALL_RULE_IDS.length + (value?.platform === 'darwin' ? 1 : 0);
+  if (
+    !['win32', 'darwin'].includes(value?.platform) ||
+    !hasExactFirewallRuleIds(value?.rules) ||
+    value?.ruleCount !== expectedRuleCount
+  ) {
+    failures.push('RULE_STATUS_INCOMPLETE');
+  }
+  if (value?.defaultBlockInstalled !== true) {
+    failures.push('DEFAULT_BLOCK_NOT_INSTALLED');
+  }
+  return Object.freeze({ pass: failures.length === 0, failures });
+}
+
+export function verifyFirewallCleanupEvidence(value) {
+  const failures = [];
+  if (value?.elevated !== true) failures.push('NOT_ELEVATED');
   if (value?.removed !== true) failures.push('RULES_NOT_REMOVED');
+  if (
+    !Array.isArray(value?.residualRules) ||
+    value.residualRules.length !== 0 ||
+    value?.residualRuleCount !== 0
+  ) {
+    failures.push('RULES_STILL_INSTALLED');
+  }
   if (
     typeof value?.policyHashBefore !== 'string' ||
     value.policyHashBefore.length !== 64 ||
@@ -144,4 +238,14 @@ export function verifyFirewallEvidence(value) {
     failures.push('POLICY_NOT_RESTORED');
   }
   return Object.freeze({ pass: failures.length === 0, failures });
+}
+
+export function verifyFirewallEvidence(value) {
+  const install = verifyFirewallInstallEvidence(value);
+  const cleanup = verifyFirewallCleanupEvidence(value);
+  const failures = [...install.failures, ...cleanup.failures];
+  return Object.freeze({
+    pass: failures.length === 0,
+    failures: Object.freeze(failures),
+  });
 }

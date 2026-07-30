@@ -2,7 +2,6 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer as createHttpsServer } from 'node:https';
-import { isIP } from 'node:net';
 import { arch, platform } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -12,7 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   buildFirewallInvocation,
-  verifyFirewallEvidence,
+  validateFirewallConfiguration,
+  verifyFirewallCleanupEvidence,
+  verifyFirewallInstallEvidence,
 } from './firewall-policy.mjs';
 import { parseAcceptanceEnvelope } from './protocol.mjs';
 
@@ -233,26 +234,10 @@ function parseCommandConfiguration(value, config) {
   ) {
     throw new AgentError('COMMAND_CONFIG_INVALID', { name: 'artifacts' });
   }
-  exactKeys(
-    value.firewall,
-    [
-      'turnAddress',
-      'turnUdpPort',
-      'turnTlsPort',
-      'controllerAddress',
-      'controllerPort',
-    ],
-    'COMMAND_CONFIG_INVALID',
-  );
-  if (
-    isIP(value.firewall.turnAddress) === 0 ||
-    isIP(value.firewall.controllerAddress) === 0 ||
-    ![
-      value.firewall.turnUdpPort,
-      value.firewall.turnTlsPort,
-      value.firewall.controllerPort,
-    ].every((port) => Number.isSafeInteger(port) && port >= 1 && port <= 65_535)
-  ) {
+  let firewall;
+  try {
+    firewall = validateFirewallConfiguration(value.firewall);
+  } catch {
     throw new AgentError('COMMAND_CONFIG_INVALID', { name: 'firewall' });
   }
   return Object.freeze({
@@ -268,7 +253,7 @@ function parseCommandConfiguration(value, config) {
         value.artifacts.resources.map((path) => resolve(path)),
       ),
     }),
-    firewall: Object.freeze({ ...value.firewall }),
+    firewall,
   });
 }
 
@@ -564,6 +549,23 @@ async function readEvidence(run) {
   return { samples: samples ?? [], bitrateEvents: bitrateEvents ?? [] };
 }
 
+async function readFirewallStatus(request) {
+  let status;
+  try {
+    status = JSON.parse(
+      await runInvocation(
+        buildFirewallInvocation(REPOSITORY_ROOT, request, 'status'),
+      ),
+    );
+  } catch {
+    throw new AgentError('FIREWALL_STATUS_UNPROVEN');
+  }
+  if (typeof status !== 'object' || status === null || Array.isArray(status)) {
+    throw new AgentError('FIREWALL_STATUS_UNPROVEN');
+  }
+  return status;
+}
+
 async function installFirewall(config, run) {
   run.firewallInstallAttempted = true;
   const request = {
@@ -573,12 +575,27 @@ async function installFirewall(config, run) {
     desktopExecutable: config.commands.artifacts.executable,
     stateFile: resolve(run.directory, 'firewall-state.json'),
   };
+  run.firewallRequest = request;
   await runInvocation(
     buildFirewallInvocation(REPOSITORY_ROOT, request, 'install'),
   );
-  const state = JSON.parse(await readFile(request.stateFile, 'utf8'));
-  run.firewallRequest = request;
+  const state = await parseJsonFile(request.stateFile, MAX_BODY_BYTES);
   run.firewallState = state;
+  const status = await readFirewallStatus(request);
+  run.firewallStatus = status;
+  const evidence = verifyFirewallInstallEvidence({
+    platform: request.platform,
+    elevated: status.elevated,
+    watchdogArmed: state?.watchdogArmed,
+    installed: true,
+    manifestRules: state?.ruleIds,
+    rules: status.installedRuleIds,
+    ruleCount: status.ruleCount,
+    defaultBlockInstalled: status.defaultBlockInstalled,
+  });
+  if (status.runId !== run.id || evidence.pass !== true) {
+    throw new AgentError('FIREWALL_INSTALL_UNPROVEN');
+  }
   run.firewallInstalled = true;
   return { installed: true };
 }
@@ -600,21 +617,20 @@ async function removeFirewall(_config, run) {
   } catch {
     return { pass: false };
   }
+  let status;
+  try {
+    status = await readFirewallStatus(run.firewallRequest);
+  } catch {
+    return { pass: false };
+  }
   const before =
     run.firewallState?.policyHashBefore ?? run.firewallState?.snapshot?.hash;
-  return verifyFirewallEvidence({
-    elevated: true,
-    watchdogArmed: run.firewallState?.watchdogArmed === true,
-    installed: run.firewallInstalled === true,
-    rules: [
-      'dns-udp',
-      'dns-tcp',
-      'https',
-      'controller',
-      'turn-udp',
-      'turn-tls',
-    ],
+  if (status.runId !== run.id) return { pass: false };
+  return verifyFirewallCleanupEvidence({
+    elevated: status.elevated,
     removed: removed?.removed === true,
+    residualRules: status.installedRuleIds,
+    residualRuleCount: status.ruleCount,
     policyHashBefore: before,
     policyHashAfter: removed?.policyHashAfter,
   });
@@ -722,36 +738,58 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
   };
 
   const cleanupRun = async (run) => {
-    if (run.cleanup !== null) return run.cleanup;
-    if (run.heartbeatTimer !== null) {
-      dependencies.clearInterval(run.heartbeatTimer);
-      run.heartbeatTimer = null;
+    if (
+      run.cleanup?.restoredFirewall === true &&
+      run.cleanup.childrenStopped === true
+    ) {
+      return run.cleanup;
     }
-    if (run.timeoutTimer !== null) {
-      dependencies.clearTimeout(run.timeoutTimer);
-      run.timeoutTimer = null;
-    }
-    const stopped = await Promise.allSettled(
-      run.children.map((child) => child.stop()),
-    );
-    const childrenStopped = stopped.every(
-      (result) => result.status === 'fulfilled' && result.value === true,
-    );
-    let restoredFirewall;
+    if (run.cleanupFlight !== null) return run.cleanupFlight;
+    run.cleanupFlight = (async () => {
+      if (run.heartbeatTimer !== null) {
+        dependencies.clearInterval(run.heartbeatTimer);
+        run.heartbeatTimer = null;
+      }
+      if (run.timeoutTimer !== null) {
+        dependencies.clearTimeout(run.timeoutTimer);
+        run.timeoutTimer = null;
+      }
+      let childrenStopped = run.cleanup?.childrenStopped === true;
+      if (!childrenStopped) {
+        const stopped = await Promise.allSettled(
+          run.children.map((child) => child.stop()),
+        );
+        childrenStopped = stopped.every(
+          (result) => result.status === 'fulfilled' && result.value === true,
+        );
+      }
+      let restoredFirewall = run.cleanup?.restoredFirewall === true;
+      if (!restoredFirewall) {
+        try {
+          const firewall = await dependencies.removeFirewall(config, run);
+          restoredFirewall = firewall?.pass === true;
+        } catch {
+          restoredFirewall = false;
+        }
+      }
+      run.cleanup = Object.freeze({ restoredFirewall, childrenStopped });
+      return run.cleanup;
+    })();
     try {
-      const firewall = await dependencies.removeFirewall(config, run);
-      restoredFirewall = firewall?.pass === true;
-    } catch {
-      restoredFirewall = false;
+      return await run.cleanupFlight;
+    } finally {
+      run.cleanupFlight = null;
     }
-    run.cleanup = Object.freeze({ restoredFirewall, childrenStopped });
-    return run.cleanup;
   };
 
   const emitCleanup = (run) => {
-    if (run.cleanupEmitted) return;
-    run.cleanupEmitted = true;
-    emit(run, 'cleanup.ack', run.cleanup);
+    const cleanupEventKey = `${String(run.cleanup.restoredFirewall)}:${String(
+      run.cleanup.childrenStopped,
+    )}`;
+    if (run.cleanupEventKey !== cleanupEventKey) {
+      run.cleanupEventKey = cleanupEventKey;
+      emit(run, 'cleanup.ack', run.cleanup);
+    }
     if (
       run.cleanup.restoredFirewall === true &&
       run.cleanup.childrenStopped === true &&
@@ -954,12 +992,26 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
   };
 
   const cancelRun = async (run, message) => {
-    if (run.cleanup !== null) return { cleanup: run.cleanup };
-    if (!['capable', 'prepared', 'running', 'stopping'].includes(run.state)) {
+    const retryingCleanup =
+      run.cleanup !== null &&
+      (run.cleanup.restoredFirewall !== true ||
+        run.cleanup.childrenStopped !== true);
+    if (
+      run.cleanup?.restoredFirewall === true &&
+      run.cleanup.childrenStopped === true
+    ) {
+      return { cleanup: run.cleanup };
+    }
+    if (
+      !retryingCleanup &&
+      !['capable', 'prepared', 'running', 'stopping'].includes(run.state)
+    ) {
       throw new AgentError('INVALID_STATE');
     }
-    run.state = 'canceling';
-    emit(run, 'run.cancel', message.payload);
+    if (!retryingCleanup) {
+      run.state = 'canceling';
+      emit(run, 'run.cancel', message.payload);
+    }
     await cleanupRun(run);
     emitCleanup(run);
     run.state = 'cleaned';
@@ -987,7 +1039,8 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
         lastCommandMonotonicMs: -1,
         children: [],
         cleanup: null,
-        cleanupEmitted: false,
+        cleanupEventKey: null,
+        cleanupFlight: null,
         failureFlight: null,
         heartbeatTimer: null,
         timeoutTimer: null,
@@ -999,6 +1052,7 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
         firewallInstalled: false,
         firewallRequest: null,
         firewallState: null,
+        firewallStatus: null,
       };
       runs.set(run.id, run);
       activeRunId = run.id;
