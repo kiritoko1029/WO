@@ -180,6 +180,59 @@ describe('call phase projector', () => {
     ).toBeNull();
   });
 
+  test('keeps the selected path while the same transport renegotiates', () => {
+    const machine = createCallMachine({ peerReady: true });
+    const connected = machine.dispatch({
+      type: 'settle',
+      peerReady: true,
+      negotiationEstablished: true,
+      transportConnected: true,
+      connectionPath: 'relay',
+    });
+
+    expect(machine.dispatch({ type: 'negotiate' })).toMatchObject({
+      phase: 'negotiating',
+      connectionPath: 'relay',
+      revision: connected.revision + 1,
+    });
+  });
+
+  test('keeps the selected path while signaling temporarily loses peer readiness', () => {
+    const machine = createCallMachine({ peerReady: true });
+    machine.dispatch({
+      type: 'settle',
+      peerReady: true,
+      negotiationEstablished: true,
+      transportConnected: true,
+      connectionPath: 'relay',
+    });
+
+    expect(
+      machine.dispatch({
+        type: 'settle',
+        peerReady: false,
+        negotiationEstablished: true,
+        transportConnected: true,
+        connectionPath: 'relay',
+      }),
+    ).toMatchObject({
+      phase: 'waiting',
+      connectionPath: 'relay',
+    });
+    expect(
+      machine.dispatch({
+        type: 'settle',
+        peerReady: true,
+        negotiationEstablished: true,
+        transportConnected: true,
+        connectionPath: 'relay',
+      }),
+    ).toMatchObject({
+      phase: 'connected',
+      connectionPath: 'relay',
+    });
+  });
+
   test('has no screen-cleanup API or cancellation generation ownership', () => {
     const machine = createCallMachine({ peerReady: false });
 

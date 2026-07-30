@@ -5,6 +5,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import {
   expect,
   pauseIntegrationCoturn,
+  restartIntegrationService,
   restartIntegrationServer,
   test,
   type AcceptancePair,
@@ -1776,6 +1777,170 @@ async function waitForSameTransportAudioRecovery(
   return recovered;
 }
 
+async function waitForSignalingReconnect(
+  page: Page,
+  before: AcceptanceSnapshot,
+): Promise<AcceptanceSnapshot> {
+  let latest: AcceptanceSnapshot | null = null;
+  await expect
+    .poll(
+      async () => {
+        latest = await requiredDiagnostics(page);
+        return (
+          latest.sockets.length > before.sockets.length &&
+          latest.resources.openSignalingSockets === 1 &&
+          latest.sockets.filter((socket) => socket.state === 1).length === 1 &&
+          before.sockets.some((previous) => {
+            const current = latest?.sockets.find(
+              (candidate) => candidate.id === previous.id,
+            );
+            return (
+              current !== undefined &&
+              current.closes > previous.closes &&
+              current.state === WebSocket.CLOSED
+            );
+          })
+        );
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+  if (latest === null) {
+    throw new Error('Signaling recovery snapshot is unavailable');
+  }
+  return latest;
+}
+
+async function proveN07ProxyRestartRecovery(pair: AcceptancePair) {
+  const [firstBefore, secondBefore, firstSnapshotBefore, secondSnapshotBefore] =
+    await Promise.all([
+      waitForPeer(pair.first.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      waitForPeer(pair.second.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      requiredDiagnostics(pair.first.page),
+      requiredDiagnostics(pair.second.page),
+    ]);
+
+  await restartIntegrationService('caddy');
+
+  const [firstSignalingAfter, secondSignalingAfter] = await Promise.all([
+    waitForSignalingReconnect(pair.first.page, firstSnapshotBefore),
+    waitForSignalingReconnect(pair.second.page, secondSnapshotBefore),
+  ]);
+  const [firstAfter, secondAfter] = await waitForSameTransportAudioRecovery(
+    pair,
+    'relay',
+    firstBefore,
+    secondBefore,
+  );
+
+  return {
+    firstBefore,
+    secondBefore,
+    firstAfter,
+    secondAfter,
+    firstSocketCountBefore: firstSnapshotBefore.sockets.length,
+    secondSocketCountBefore: secondSnapshotBefore.sockets.length,
+    firstSocketCountAfter: firstSignalingAfter.sockets.length,
+    secondSocketCountAfter: secondSignalingAfter.sockets.length,
+    firstStatusHistory: firstSignalingAfter.callStatusHistory,
+    secondStatusHistory: secondSignalingAfter.callStatusHistory,
+  };
+}
+
+async function proveN07CoturnRestartRecovery(pair: AcceptancePair) {
+  const [firstBefore, secondBefore, firstSnapshotBefore, secondSnapshotBefore] =
+    await Promise.all([
+      waitForPeer(pair.first.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      waitForPeer(pair.second.page, (peer) => matchesIcePolicy(peer, 'relay')),
+      requiredDiagnostics(pair.first.page),
+      requiredDiagnostics(pair.second.page),
+    ]);
+
+  await restartIntegrationService('coturn');
+
+  const [firstReconnected, secondReconnected] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer, snapshot) => {
+        const previous = snapshot.peers.find(
+          (candidate) => candidate.id === firstBefore.id,
+        );
+        return (
+          peer.connectionState === 'connected' &&
+          matchesIcePolicy(peer, 'relay') &&
+          previous !== undefined &&
+          previous.iceConnectionStateHistory.includes('disconnected') &&
+          (peer.id !== firstBefore.id ||
+            previous.restartIceCalls > firstBefore.restartIceCalls)
+        );
+      },
+      120_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer, snapshot) => {
+        const previous = snapshot.peers.find(
+          (candidate) => candidate.id === secondBefore.id,
+        );
+        return (
+          peer.connectionState === 'connected' &&
+          matchesIcePolicy(peer, 'relay') &&
+          previous !== undefined &&
+          previous.iceConnectionStateHistory.includes('disconnected') &&
+          (peer.id !== secondBefore.id ||
+            peer.offers + peer.answers >
+              secondBefore.offers + secondBefore.answers)
+        );
+      },
+      120_000,
+    ),
+  ]);
+  const [firstAfter, secondAfter] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer) =>
+        peer.id === firstReconnected.id &&
+        peer.packetsSentAudio > firstReconnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > firstReconnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > firstReconnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > firstReconnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer) =>
+        peer.id === secondReconnected.id &&
+        peer.packetsSentAudio > secondReconnected.packetsSentAudio &&
+        peer.packetsReceivedAudio > secondReconnected.packetsReceivedAudio &&
+        peer.bytesSentAudio > secondReconnected.bytesSentAudio &&
+        peer.bytesReceivedAudio > secondReconnected.bytesReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay'),
+      60_000,
+    ),
+  ]);
+  const [firstSnapshotAfter, secondSnapshotAfter] = await Promise.all([
+    requiredDiagnostics(pair.first.page),
+    requiredDiagnostics(pair.second.page),
+  ]);
+  expectSignalingUnchanged(firstSnapshotBefore, firstSnapshotAfter);
+  expectSignalingUnchanged(secondSnapshotBefore, secondSnapshotAfter);
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+
+  return {
+    firstBefore,
+    secondBefore,
+    firstReconnected,
+    secondReconnected,
+    firstAfter,
+    secondAfter,
+    firstStatusHistory: firstSnapshotAfter.callStatusHistory,
+    secondStatusHistory: secondSnapshotAfter.callStatusHistory,
+  };
+}
+
 async function proveRelayIceRestart(
   pair: AcceptancePair,
 ): Promise<IceRestartRecoveryReport> {
@@ -3239,6 +3404,45 @@ test('V11 server restart closes lost rooms and permits a fresh call', async ({
       null,
       2,
     ),
+    contentType: 'application/json',
+  });
+});
+
+test('N07 Caddy restart reconnects both WSS while relay media stays live', async ({
+  acceptance,
+}) => {
+  test.setTimeout(4 * 60_000);
+  const pair = await acceptance.launch('relay');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+
+  const report = await proveN07ProxyRestartRecovery(pair);
+
+  await test.info().attach('n07-caddy-restart.json', {
+    body: JSON.stringify(report, null, 2),
+    contentType: 'application/json',
+  });
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+});
+
+test('N07 coturn restart rebuilds relay ICE without dropping signaling', async ({
+  acceptance,
+}) => {
+  test.setTimeout(4 * 60_000);
+  const pair = await acceptance.launch('relay');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+
+  const report = await proveN07CoturnRestartRecovery(pair);
+
+  await test.info().attach('n07-coturn-restart.json', {
+    body: JSON.stringify(report, null, 2),
     contentType: 'application/json',
   });
 });

@@ -2653,7 +2653,7 @@ describe('realtime room gateway', () => {
     expect(roomEvents).toEqual([]);
   });
 
-  it('does not create a second offer after an authoritative completed resume', async () => {
+  it('preserves the relay path without a second offer after a completed resume', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -2686,6 +2686,61 @@ describe('realtime room gateway', () => {
         client.request.mock.calls.filter(([type]) => type === 'webrtc.offer'),
       ).toHaveLength(1),
     );
+    const originalOffer = client.request.mock.calls.find(
+      ([type]) => type === 'webrtc.offer',
+    )![1] as { negotiationId: string };
+    (
+      client.requestEnvelope as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({
+      version: PROTOCOL_VERSION,
+      requestId: 'answer-applied-before-completed-resume',
+      type: 'webrtc.answerApplied.ack',
+      payload: { ok: true, data: {} },
+    });
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'answer-before-completed-resume' as never,
+      type: 'webrtc.answer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: originalOffer.negotiationId as never,
+        connectionEpoch: 20,
+        description: { type: 'answer', sdp: 'v=0\r\n' },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(peer.pc.setRemoteDescription).toHaveBeenCalledOnce(),
+    );
+    peer.pc.getStats.mockResolvedValue(
+      new Map([
+        [
+          'transport',
+          {
+            id: 'transport',
+            type: 'transport',
+            selectedCandidatePairId: 'pair',
+          },
+        ],
+        [
+          'pair',
+          {
+            id: 'pair',
+            type: 'candidate-pair',
+            state: 'succeeded',
+            localCandidateId: 'local',
+          },
+        ],
+        [
+          'local',
+          { id: 'local', type: 'local-candidate', candidateType: 'relay' },
+        ],
+      ]),
+    );
+    peer.pc.connectionState = 'connected';
+    peer.pc.iceConnectionState = 'connected';
+    peer.pc.emit('connectionstatechange', {});
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('relay'));
+
     const baseRequest = client.request.getMockImplementation() as (
       type: string,
       payload?: unknown,
@@ -2702,8 +2757,8 @@ describe('realtime room gateway', () => {
             data: {
               roomId: room.roomId,
               role: 'creator',
-              state: 'connected',
-              peer: { userId: 'user-2', displayName: 'Peer', ready: true },
+              state: 'reconnecting',
+              peer: null,
               connectionEpoch: 9,
               rtcConfiguration,
               iceCredentialsExpiresAt: '2026-07-16T16:20:00.000Z',
@@ -2725,6 +2780,7 @@ describe('realtime room gateway', () => {
         client.request.mock.calls.filter(([type]) => type === 'room.resume'),
       ).toHaveLength(1),
     );
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('waiting'));
     client.emit({
       version: PROTOCOL_VERSION,
       eventId: 'ready-after-completed-resume' as never,
@@ -2734,12 +2790,13 @@ describe('realtime room gateway', () => {
         peer: { userId: 'user-2' as never, displayName: 'Peer', ready: true },
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('relay'));
 
     expect(
       client.request.mock.calls.filter(([type]) => type === 'webrtc.offer'),
     ).toHaveLength(1);
     expect(peer.factory).toHaveBeenCalledOnce();
+    expect(peer.pc.close).not.toHaveBeenCalled();
     await call.cleanup();
   });
 

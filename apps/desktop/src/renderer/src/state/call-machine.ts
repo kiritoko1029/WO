@@ -104,16 +104,18 @@ export function createCallMachine(options: CallMachineOptions): CallMachine {
     switch (event.type) {
       case 'settle': {
         if (current.phase === 'failed') return current;
-        if (!event.peerReady) return replace('waiting', null, null);
+        if (!event.peerReady) {
+          return replace('waiting', null, event.connectionPath);
+        }
         if (event.negotiationEstablished && event.transportConnected) {
           return replace('connected', null, event.connectionPath);
         }
-        return replace('negotiating', null, null);
+        return replace('negotiating', null, event.connectionPath);
       }
       case 'negotiate':
         return current.phase === 'failed' || current.phase === 'recovering'
           ? current
-          : replace('negotiating', null, null);
+          : replace('negotiating', null, current.connectionPath);
       case 'recover':
         return current.phase === 'failed'
           ? current

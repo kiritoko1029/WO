@@ -18,6 +18,7 @@ import electronPath from 'electron';
 export { expect };
 
 export type AcceptancePolicy = 'all' | 'relay';
+export type RestartableIntegrationService = 'caddy' | 'coturn' | 'server';
 
 export interface AcceptancePeer {
   readonly application: ElectronApplication;
@@ -100,7 +101,9 @@ export async function pauseIntegrationCoturn(): Promise<() => Promise<void>> {
   };
 }
 
-export async function restartIntegrationServer(): Promise<void> {
+export async function restartIntegrationService(
+  service: RestartableIntegrationService,
+): Promise<void> {
   const commandOptions = {
     cwd: repositoryDirectory,
     timeout: 60_000,
@@ -108,7 +111,7 @@ export async function restartIntegrationServer(): Promise<void> {
   } as const;
   await execFileAsync(
     'docker',
-    [...integrationComposeArguments, 'restart', 'server'],
+    [...integrationComposeArguments, 'restart', service],
     commandOptions,
   );
   await execFileAsync(
@@ -119,10 +122,14 @@ export async function restartIntegrationServer(): Promise<void> {
       '-d',
       '--no-deps',
       '--wait',
-      'server',
+      service,
     ],
     commandOptions,
   );
+}
+
+export async function restartIntegrationServer(): Promise<void> {
+  await restartIntegrationService('server');
 }
 
 function environment(): Record<string, string> {
