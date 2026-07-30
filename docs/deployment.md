@@ -502,6 +502,11 @@ credential、可信 CA 下的错误 SNI，以及保留 `.invalid` 域名的 DNS 
 该测试发生在本机 Docker 网络，只证明本地配置、认证和明确失败语义，不代表
 公网 NAT、防火墙或运营商路径已经可用。
 
+Compose integration 还会使用 `--proxy-reload-proof`：先建立一条 authenticated
+WSS，原位 reload integration Caddy，空闲超过 smoke 的 8 秒请求窗口后要求
+旧连接继续完成应用请求，再从两条新连接完成 WSS Upgrade。它只证明本地 Caddy
+的 graceful reload，不替代生产 OpenResty 的授权 reload 和 3600 秒超时复验。
+
 ## 备份、恢复与升级
 
 备份同时保存 PostgreSQL 自包含 dump 和 Caddy `/data` 状态，并在 manifest 中记录 SHA-256、production/integration profile、数据库名和 PostgreSQL major：

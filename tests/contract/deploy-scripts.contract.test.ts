@@ -709,6 +709,24 @@ describe('operational script contract', () => {
     expect(integrationTest).toContain("'--integration'");
   });
 
+  test('integration smoke keeps active and new WSS through a bounded proxy reload proof', () => {
+    const smoke = read('smoke.mjs');
+    expect(smoke).toContain('Proxy reload proof is restricted');
+    expect(smoke).toContain("'caddy',\n    'reload'");
+    expect(smoke).toContain('proxy reload and idle timeout window');
+    expect(smoke).toContain('clients[0]?.socket.readyState !== WebSocket.OPEN');
+    const integrationTest = readFileSync(
+      resolve(
+        root,
+        'tests',
+        'integration',
+        'compose-stack.integration.test.ts',
+      ),
+      'utf8',
+    );
+    expect(integrationTest).toContain("'--proxy-reload-proof'");
+  });
+
   test('deployment guide documents production, local trust, operations, and honest TURN proof', () => {
     const guide = readFileSync(resolve(root, 'docs', 'deployment.md'), 'utf8');
     for (const marker of [

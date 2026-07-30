@@ -15,6 +15,7 @@ import {
 } from './ops.mjs';
 
 const timeoutMilliseconds = 8_000;
+const proxyReloadIdleMilliseconds = timeoutMilliseconds + 1_000;
 const smokeAccountCount = 3;
 const smokeEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const turnProofInvalidHostname = 'wo-turn-proof.invalid';
@@ -566,12 +567,46 @@ async function verifyTurnProof(envFile, environment, session) {
   process.stdout.write('Smoke: TURN rejected expired credentials\n');
 }
 
+function reloadIntegrationProxy(envFile) {
+  const composeCommand = integrationComposeArguments(
+    envFile,
+    'exec',
+    '-T',
+    'caddy',
+    'caddy',
+    'reload',
+    '--config',
+    '/etc/caddy/Caddyfile',
+    '--adapter',
+    'caddyfile',
+  );
+  const result = spawnSync('docker', composeCommand, {
+    cwd: deployDirectory,
+    encoding: 'utf8',
+    env: composeProcessEnvironment(composeCommand),
+    timeout: 30_000,
+  });
+  if (
+    result.error !== undefined ||
+    result.signal !== null ||
+    result.status !== 0
+  ) {
+    throw new Error('Integration proxy reload did not complete');
+  }
+}
+
 export async function runSmoke() {
   const envFile = resolve(
     argumentValue('--env-file', resolve(deployDirectory, '.env')),
   );
   const environment = loadDeploymentEnvironment(envFile);
   const integration = hasArgument('--integration');
+  const proxyReloadProof = hasArgument('--proxy-reload-proof');
+  if (proxyReloadProof && !integration) {
+    throw new Error(
+      'Proxy reload proof is restricted to the integration profile',
+    );
+  }
   const authenticationRequests = smokeAuthenticationRequests(
     environment,
     integration,
@@ -598,13 +633,27 @@ export async function runSmoke() {
     }
     process.stdout.write('Smoke: authentication ready\n');
 
-    for (const session of sessions) {
+    for (const [index, session] of sessions.entries()) {
       const ticket = await issueTicket(baseUrl, session.accessToken);
       clients.push(await connect(baseUrl, ticket.ticket));
+      if (proxyReloadProof && index === 0) {
+        reloadIntegrationProxy(envFile);
+        await new Promise((resolvePromise) =>
+          setTimeout(resolvePromise, proxyReloadIdleMilliseconds),
+        );
+        if (clients[0]?.socket.readyState !== WebSocket.OPEN) {
+          throw new Error('Active WSS closed during proxy reload');
+        }
+      }
     }
     const [creator, joiner, third] = clients;
 
     const created = await successfulRequest(creator, 'room.create', {});
+    if (proxyReloadProof) {
+      process.stdout.write(
+        'Smoke: active and new WSS passed proxy reload and idle timeout window\n',
+      );
+    }
     if (hasArgument('--turn-proof')) {
       await verifyTurnProof(envFile, environment, created);
     }

@@ -137,6 +137,7 @@ describe.skipIf(!integrationEnabled)('four-service Compose integration', () => {
       `--ca-file=${resolve(deploy, '.certs', 'caddy-authority', 'root.crt')}`,
       '--integration',
       '--turn-proof',
+      '--proxy-reload-proof',
     ]);
   }, 120_000);
 });
