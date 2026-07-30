@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -17,6 +17,7 @@ import {
 const timeoutMilliseconds = 8_000;
 const smokeAccountCount = 3;
 const smokeEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const turnProofInvalidHostname = 'wo-turn-proof.invalid';
 export const smokeP2pMediaPlan = 'mic-system-screen-v1';
 
 export function productionSmokeAccounts(environment) {
@@ -299,6 +300,51 @@ function turnCredentials(session, environment) {
   return { username: server.username, credential: server.credential };
 }
 
+export function createExpiredTurnCredentials(
+  credentials,
+  sharedSecret,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+) {
+  const separatorIndex =
+    typeof credentials?.username === 'string'
+      ? credentials.username.indexOf(':')
+      : -1;
+  if (
+    separatorIndex < 1 ||
+    separatorIndex === credentials.username.length - 1 ||
+    typeof sharedSecret !== 'string' ||
+    sharedSecret.length === 0 ||
+    !Number.isSafeInteger(nowSeconds) ||
+    nowSeconds < 1
+  ) {
+    throw new TypeError('TURN expiration proof input is invalid');
+  }
+  const username = `${nowSeconds - 1}${credentials.username.slice(separatorIndex)}`;
+  return Object.freeze({
+    username,
+    credential: createHmac('sha1', sharedSecret)
+      .update(username, 'utf8')
+      .digest('base64'),
+  });
+}
+
+async function readTurnSharedSecret(environment) {
+  const secret = (
+    await readFile(
+      resolve(
+        deployDirectory,
+        environment.DEPLOY_SECRET_DIR,
+        'turn_shared_secret',
+      ),
+      'utf8',
+    )
+  ).replace(/[\r\n]+$/u, '');
+  if (secret.length === 0) {
+    throw new Error('TURN shared secret is empty');
+  }
+  return secret;
+}
+
 const turnClientScript = String.raw`
 set -eu
 username="$1"
@@ -394,22 +440,9 @@ function runTurnClient(envFile, credentials, transport, shouldPass) {
   }
 }
 
-async function verifyTurnTls(environment) {
-  const certificate = await readFile(
-    resolve(
-      deployDirectory,
-      environment.DEPLOY_SECRET_DIR,
-      'turn_tls_cert.pem',
-    ),
-  );
+async function connectTurnTls(options) {
   await new Promise((resolvePromise, reject) => {
-    const socket = tls.connect({
-      host: '127.0.0.1',
-      port: Number(environment.TURN_TLS_PORT),
-      servername: environment.TURN_HOST,
-      ca: certificate,
-      rejectUnauthorized: true,
-    });
+    const socket = tls.connect(options);
     const timeout = setTimeout(() => {
       socket.destroy();
       reject(new Error('TURN TLS handshake timed out'));
@@ -426,6 +459,78 @@ async function verifyTurnTls(environment) {
   });
 }
 
+function connectionErrorCode(error) {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+  try {
+    return typeof error.code === 'string' ? error.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function expectTurnTlsFailure(options, expectedCodes, label) {
+  try {
+    await connectTurnTls(options);
+  } catch (error) {
+    if (expectedCodes.includes(connectionErrorCode(error))) {
+      return;
+    }
+    throw new Error(`${label} returned an unexpected failure`, {
+      cause: error,
+    });
+  }
+  throw new Error(`${label} unexpectedly succeeded`);
+}
+
+async function verifyTurnTls(environment) {
+  const certificate = await readFile(
+    resolve(
+      deployDirectory,
+      environment.DEPLOY_SECRET_DIR,
+      'turn_tls_cert.pem',
+    ),
+  );
+  const port = Number(environment.TURN_TLS_PORT);
+  await connectTurnTls({
+    host: '127.0.0.1',
+    port,
+    servername: environment.TURN_HOST,
+    ca: certificate,
+    rejectUnauthorized: true,
+  });
+  return { certificate, port };
+}
+
+async function verifyTurnTlsFailures(environment, certificate, port) {
+  await expectTurnTlsFailure(
+    {
+      host: '127.0.0.1',
+      port,
+      servername: turnProofInvalidHostname,
+      ca: certificate,
+      rejectUnauthorized: true,
+    },
+    ['ERR_TLS_CERT_ALTNAME_INVALID'],
+    'TURN TLS hostname mismatch proof',
+  );
+  process.stdout.write('Smoke: TURN rejected an invalid TLS hostname\n');
+
+  await expectTurnTlsFailure(
+    {
+      host: turnProofInvalidHostname,
+      port,
+      servername: turnProofInvalidHostname,
+      ca: certificate,
+      rejectUnauthorized: true,
+    },
+    ['ENOTFOUND'],
+    'TURN DNS failure proof',
+  );
+  process.stdout.write('Smoke: TURN DNS failure was explicit\n');
+}
+
 async function verifyTurnProof(envFile, environment, session) {
   if (!hasArgument('--integration')) {
     throw new Error('TURN proof is restricted to the integration profile');
@@ -439,9 +544,10 @@ async function verifyTurnProof(envFile, environment, session) {
     'Smoke: authenticated TURN-over-TCP UDP relay data passed\n',
   );
 
-  await verifyTurnTls(environment);
+  const { certificate, port } = await verifyTurnTls(environment);
   runTurnClient(envFile, credentials, 'tls', true);
   process.stdout.write('Smoke: authenticated TURN TLS passed\n');
+  await verifyTurnTlsFailures(environment, certificate, port);
 
   const finalCharacter = credentials.credential.at(-1);
   const invalidCredentials = {
@@ -450,6 +556,14 @@ async function verifyTurnProof(envFile, environment, session) {
   };
   runTurnClient(envFile, invalidCredentials, 'udp', false);
   process.stdout.write('Smoke: TURN rejected invalid credentials\n');
+
+  const sharedSecret = await readTurnSharedSecret(environment);
+  const expiredCredentials = createExpiredTurnCredentials(
+    credentials,
+    sharedSecret,
+  );
+  runTurnClient(envFile, expiredCredentials, 'udp', false);
+  process.stdout.write('Smoke: TURN rejected expired credentials\n');
 }
 
 export async function runSmoke() {

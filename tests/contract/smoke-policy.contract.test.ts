@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  createExpiredTurnCredentials,
   productionSmokeAccounts,
   smokeAuthenticationRequests,
   smokeP2pMediaPlan,
@@ -101,4 +102,36 @@ describe('production smoke account policy', () => {
       true,
     );
   });
+
+  test('creates a validly signed credential whose TURN timestamp is expired', () => {
+    const current = Object.freeze({
+      username: '1600:opaque',
+      credential: 'current-credential',
+    });
+
+    expect(
+      createExpiredTurnCredentials(current, 'turn-test-secret', 1_000),
+    ).toEqual({
+      username: '999:opaque',
+      credential: 'R7pdd5A+1xfbTUqiHbwHKiILXys=',
+    });
+    expect(current).toEqual({
+      username: '1600:opaque',
+      credential: 'current-credential',
+    });
+  });
+
+  test.each([
+    [{ username: 'missing-separator' }, 'turn-test-secret', 1_000],
+    [{ username: '1600:' }, 'turn-test-secret', 1_000],
+    [{ username: '1600:opaque' }, '', 1_000],
+    [{ username: '1600:opaque' }, 'turn-test-secret', 0],
+  ])(
+    'rejects malformed TURN expiration proof input',
+    (credentials, secret, nowSeconds) => {
+      expect(() =>
+        createExpiredTurnCredentials(credentials, secret, nowSeconds),
+      ).toThrow(/expiration proof input is invalid/i);
+    },
+  );
 });

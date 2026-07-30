@@ -676,11 +676,14 @@ describe('operational script contract', () => {
     expect(smoke).not.toMatch(/console\.log\([^\n]*(token|sdp)/i);
   });
 
-  test('integration smoke proves authenticated TURN data, TLS, and credential rejection', () => {
+  test('integration smoke proves TURN data and explicit credential, DNS, and TLS failures', () => {
     const smoke = read('smoke.mjs');
     expect(smoke).toContain('turnutils_uclient');
     expect(smoke).toContain('tls.connect');
     expect(smoke).toContain('TURN rejected invalid credentials');
+    expect(smoke).toContain('TURN rejected expired credentials');
+    expect(smoke).toContain('TURN rejected an invalid TLS hostname');
+    expect(smoke).toContain('TURN DNS failure was explicit');
     expect(smoke).toContain('TURN relay data passed');
     expect(smoke).toContain("runTurnClient(envFile, credentials, 'tcp', true)");
     expect(smoke).toContain(

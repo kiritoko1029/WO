@@ -497,9 +497,10 @@ WO_RUN_COMPOSE_INTEGRATION=1 pnpm exec vitest run \
 本地有两条彼此独立的信任链：HTTPS/WSS 使用 Caddy internal CA，`export-local-ca.mjs` 只导出其公开 `root.crt`；`turns:` 使用 `secrets.integration/turn_tls_cert.pem`。CLI smoke 会分别校验两条链。桌面端手工联调时，只在隔离测试机器的系统信任库中加入这两个公开证书，绝不能复制 Caddy CA 私钥或 `turn_tls_key.pem`，也不得关闭 TLS 校验。
 
 `--turn-proof` 使用业务服务签发的短期凭据，验证 UDP、TCP 和
-`turns:` TLS relay 双向数据，以及错误凭据拒绝。该测试发生在本机
-Docker 网络，只证明本地配置和认证链路，不代表公网 NAT、防火墙或
-运营商路径已经可用。
+`turns:` TLS relay 双向数据；负向路径分别验证错误签名、有效签名但过期的
+credential、可信 CA 下的错误 SNI，以及保留 `.invalid` 域名的 DNS 失败。
+该测试发生在本机 Docker 网络，只证明本地配置、认证和明确失败语义，不代表
+公网 NAT、防火墙或运营商路径已经可用。
 
 ## 备份、恢复与升级
 
