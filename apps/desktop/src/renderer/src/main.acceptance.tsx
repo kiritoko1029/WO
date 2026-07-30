@@ -81,6 +81,7 @@ let microphoneDenials = 0;
 const callStatusHistory: string[] = [];
 const liveMicrophoneTracks = new Set<MediaStreamTrack>();
 const liveSystemAudioTracks = new Set<MediaStreamTrack>();
+const activeRnnoiseAudioContexts = new Set<AudioContext>();
 const captureDiagnostic = {
   attempts: 0,
   successes: 0,
@@ -586,8 +587,18 @@ function installAudioFixture(): void {
 }
 
 function installRnnoiseProbe(): void {
+  const nativeClose = AudioContext.prototype.close;
   const nativeCreateScriptProcessor =
     AudioContext.prototype.createScriptProcessor;
+  Object.defineProperty(AudioContext.prototype, 'close', {
+    configurable: true,
+    writable: true,
+    value: function (this: AudioContext): Promise<void> {
+      return nativeClose.call(this).then(() => {
+        activeRnnoiseAudioContexts.delete(this);
+      });
+    },
+  });
   Object.defineProperty(AudioContext.prototype, 'createScriptProcessor', {
     configurable: true,
     writable: true,
@@ -603,6 +614,7 @@ function installRnnoiseProbe(): void {
         numberOfInputChannels,
         numberOfOutputChannels,
       );
+      activeRnnoiseAudioContexts.add(this);
       rnnoiseDiagnostic.processorCreations += 1;
       processor.addEventListener('audioprocess', (event) => {
         const callbackAtMs = performance.now();
@@ -634,6 +646,21 @@ function snapshot(): unknown {
     blockedSignalingAttempts,
     capture: { ...captureDiagnostic },
     rnnoise: { ...rnnoiseDiagnostic },
+    resources: {
+      activePeerConnections: [...peerDiagnostics.values()].filter(
+        (peer) => !peer.closed,
+      ).length,
+      openSignalingSockets: [...signalingSockets.values()].filter(
+        (socket) => socket.state === WebSocket.OPEN,
+      ).length,
+      liveMicrophoneTracks: [...liveMicrophoneTracks].filter(
+        (track) => track.readyState === 'live',
+      ).length,
+      liveSystemAudioTracks: [...liveSystemAudioTracks].filter(
+        (track) => track.readyState === 'live',
+      ).length,
+      activeRnnoiseAudioContexts: activeRnnoiseAudioContexts.size,
+    },
     rnnoiseActive:
       document
         .querySelector('.room-shell')

@@ -1,3 +1,5 @@
+import { writeFile } from 'node:fs/promises';
+
 import type { ElectronApplication, Page } from '@playwright/test';
 
 import {
@@ -70,6 +72,13 @@ interface AcceptanceSnapshot {
     maxCallbackGapMs: number;
     lastCallbackAtMs: number;
   }>;
+  readonly resources: Readonly<{
+    activePeerConnections: number;
+    openSignalingSockets: number;
+    liveMicrophoneTracks: number;
+    liveSystemAudioTracks: number;
+    activeRnnoiseAudioContexts: number;
+  }>;
   readonly rnnoiseActive: boolean;
   readonly peers: readonly PeerDiagnostic[];
   readonly sockets: readonly Readonly<{
@@ -86,6 +95,11 @@ const password = 'Wo-E2E-Password-2026';
 const maxRnnoiseCallbackGapMs = 5_000;
 const maxRnnoiseTotalCpuPercent = 50;
 const maxRnnoiseProcessCpuPercent = 25;
+const v13MinimumSoakDurationMs = 10 * 60_000;
+const v13MaximumSoakDurationMs = 30 * 60_000;
+const v13RecoveryIntervalMs = 60_000;
+const v13MemoryGrowthBudgetKiB = 256 * 1_024;
+const v13ProcessGrowthBudget = 2;
 
 interface ProcessCpuSample {
   readonly pid: number;
@@ -98,6 +112,20 @@ interface AppCpuSample {
   readonly processes: readonly ProcessCpuSample[];
   readonly totalPercentCPUUsage: number;
   readonly maxPercentCPUUsage: number;
+}
+
+interface ProcessMemorySample {
+  readonly pid: number;
+  readonly type: string;
+  readonly workingSetSizeKiB: number;
+  readonly peakWorkingSetSizeKiB: number;
+}
+
+interface AppMemorySample {
+  readonly sampledAt: number;
+  readonly processes: readonly ProcessMemorySample[];
+  readonly totalWorkingSetSizeKiB: number;
+  readonly maxWorkingSetSizeKiB: number;
 }
 
 interface NoiseIntensitySwitchReport {
@@ -256,6 +284,39 @@ async function cpuSample(
     maxRnnoiseProcessCpuPercent,
   );
   return sample;
+}
+
+async function memorySample(
+  application: ElectronApplication,
+): Promise<AppMemorySample> {
+  const processes = await application.evaluate(({ app }) =>
+    app.getAppMetrics().map((metric) => ({
+      pid: metric.pid,
+      type: metric.type,
+      workingSetSizeKiB: metric.memory.workingSetSize,
+      peakWorkingSetSizeKiB: metric.memory.peakWorkingSetSize,
+    })),
+  );
+  expect(processes.length).toBeGreaterThan(0);
+  for (const process of processes) {
+    expect(Number.isFinite(process.workingSetSizeKiB)).toBe(true);
+    expect(process.workingSetSizeKiB).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(process.peakWorkingSetSizeKiB)).toBe(true);
+    expect(process.peakWorkingSetSizeKiB).toBeGreaterThanOrEqual(
+      process.workingSetSizeKiB,
+    );
+  }
+  return {
+    sampledAt: Date.now(),
+    processes,
+    totalWorkingSetSizeKiB: processes.reduce(
+      (total, process) => total + process.workingSetSizeKiB,
+      0,
+    ),
+    maxWorkingSetSizeKiB: Math.max(
+      ...processes.map((process) => process.workingSetSizeKiB),
+    ),
+  };
 }
 
 function activePeer(
@@ -1789,6 +1850,273 @@ async function proveExplicitLeaveAndRejoin(
     newUser,
   };
 }
+
+function v13SoakDurationMs(): number {
+  const configured = process.env['WO_V13_SOAK_MS'];
+  if (configured === undefined) return v13MinimumSoakDurationMs;
+  if (!/^\d+$/u.test(configured)) {
+    throw new Error('WO_V13_SOAK_MS must be an integer number of milliseconds');
+  }
+  const duration = Number(configured);
+  if (
+    !Number.isSafeInteger(duration) ||
+    duration < v13MinimumSoakDurationMs ||
+    duration > v13MaximumSoakDurationMs
+  ) {
+    throw new Error('WO_V13_SOAK_MS must be between 600000 and 1800000');
+  }
+  return duration;
+}
+
+async function waitForV13StableResources(
+  page: Page,
+  expectedPeerConnections: number,
+  expectedSignalingSockets: number,
+): Promise<AcceptanceSnapshot> {
+  let latest: AcceptanceSnapshot | null = null;
+  await expect
+    .poll(
+      async () => {
+        latest = await requiredDiagnostics(page);
+        return {
+          activePeerConnections: latest.resources.activePeerConnections,
+          openSignalingSockets: latest.resources.openSignalingSockets,
+          liveMicrophoneTracks: latest.resources.liveMicrophoneTracks,
+          liveSystemAudioTracks: latest.resources.liveSystemAudioTracks,
+          activeRnnoiseAudioContexts:
+            latest.resources.activeRnnoiseAudioContexts,
+          peerConnections: latest.peers.length,
+          signalingSockets: latest.sockets.length,
+          transitionalSockets: latest.sockets.filter(
+            (socket) => socket.state !== 1 && socket.state !== 3,
+          ).length,
+        };
+      },
+      { timeout: 60_000 },
+    )
+    .toEqual({
+      activePeerConnections: 1,
+      openSignalingSockets: 1,
+      liveMicrophoneTracks: 1,
+      liveSystemAudioTracks: 0,
+      activeRnnoiseAudioContexts: 1,
+      peerConnections: expectedPeerConnections,
+      signalingSockets: expectedSignalingSockets,
+      transitionalSockets: 0,
+    });
+  if (latest === null) throw new Error('V13 resource snapshot is unavailable');
+  expect(latest.peers.filter((peer) => !peer.closed)).toHaveLength(1);
+  expect(latest.sockets.filter((socket) => socket.state === 1)).toHaveLength(1);
+  expect(latest.rnnoiseActive).toBe(true);
+  return latest;
+}
+
+function expectV13MemoryBounded(
+  current: AppMemorySample,
+  baseline: AppMemorySample,
+): void {
+  expect(current.processes.length).toBeLessThanOrEqual(
+    baseline.processes.length + v13ProcessGrowthBudget,
+  );
+  expect(current.totalWorkingSetSizeKiB).toBeLessThanOrEqual(
+    baseline.totalWorkingSetSizeKiB + v13MemoryGrowthBudgetKiB,
+  );
+}
+
+async function collectV13Checkpoint(
+  pair: AcceptancePair,
+  input: {
+    readonly action: string;
+    readonly cycle: number;
+    readonly expectedFirstPeers: number;
+    readonly expectedSecondPeers: number;
+    readonly expectedFirstSockets: number;
+    readonly expectedSecondSockets: number;
+    readonly startedAt: number;
+  },
+): Promise<{
+  readonly action: string;
+  readonly cycle: number;
+  readonly elapsedMs: number;
+  readonly first: Readonly<{
+    snapshot: AcceptanceSnapshot;
+    memory: AppMemorySample;
+  }>;
+  readonly second: Readonly<{
+    snapshot: AcceptanceSnapshot;
+    memory: AppMemorySample;
+  }>;
+}> {
+  const [firstSnapshot, secondSnapshot] = await Promise.all([
+    waitForV13StableResources(
+      pair.first.page,
+      input.expectedFirstPeers,
+      input.expectedFirstSockets,
+    ),
+    waitForV13StableResources(
+      pair.second.page,
+      input.expectedSecondPeers,
+      input.expectedSecondSockets,
+    ),
+  ]);
+  const [firstMemory, secondMemory] = await Promise.all([
+    memorySample(pair.first.application),
+    memorySample(pair.second.application),
+  ]);
+  return {
+    action: input.action,
+    cycle: input.cycle,
+    elapsedMs: Date.now() - input.startedAt,
+    first: { snapshot: firstSnapshot, memory: firstMemory },
+    second: { snapshot: secondSnapshot, memory: secondMemory },
+  };
+}
+
+async function attachV13Json(name: string, value: unknown): Promise<void> {
+  const outputPath = test.info().outputPath(name);
+  await writeFile(outputPath, JSON.stringify(value, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  await test.info().attach(name, {
+    path: outputPath,
+    contentType: 'application/json',
+  });
+}
+
+test('V13 ten-minute call and repeated recovery keep resources bounded', async ({
+  acceptance,
+}) => {
+  test.skip(
+    process.env['WO_RUN_V13_SOAK'] !== '1',
+    'Set WO_RUN_V13_SOAK=1 to run the 10-30 minute resource soak',
+  );
+  const soakDurationMs = v13SoakDurationMs();
+  test.setTimeout(soakDurationMs + 5 * 60_000);
+  const pair = await acceptance.launch('relay');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  const roomCode = await pair.first.page
+    .locator('.room-header code')
+    .innerText();
+  const startedAt = Date.now();
+
+  const initialFirst = await requiredDiagnostics(pair.first.page);
+  const initialSecond = await requiredDiagnostics(pair.second.page);
+  let expectedFirstPeers = initialFirst.peers.length;
+  let expectedSecondPeers = initialSecond.peers.length;
+  let expectedFirstSockets = initialFirst.sockets.length;
+  let expectedSecondSockets = initialSecond.sockets.length;
+  const checkpoints = [
+    await collectV13Checkpoint(pair, {
+      action: 'baseline',
+      cycle: 0,
+      expectedFirstPeers,
+      expectedSecondPeers,
+      expectedFirstSockets,
+      expectedSecondSockets,
+      startedAt,
+    }),
+  ];
+  const baseline = checkpoints[0];
+  if (baseline === undefined) {
+    throw new Error('V13 baseline checkpoint is unavailable');
+  }
+  await attachV13Json('v13-cycle-00-baseline.json', baseline);
+
+  let cycle = 0;
+  let signalingRecoveries = 0;
+  let transportRebuilds = 0;
+  while (Date.now() - startedAt < soakDurationMs) {
+    const scheduledAt = startedAt + (cycle + 1) * v13RecoveryIntervalMs;
+    const waitMs = scheduledAt - Date.now();
+    if (waitMs > 0) await pair.first.page.waitForTimeout(waitMs);
+    cycle += 1;
+
+    let action: string;
+    if (cycle % 2 === 1) {
+      const [firstBefore, secondBefore] = await Promise.all([
+        waitForPeer(
+          pair.first.page,
+          (peer) => peer.connectionState === 'connected',
+        ),
+        waitForPeer(
+          pair.second.page,
+          (peer) => peer.connectionState === 'connected',
+        ),
+      ]);
+      const dropFirst = signalingRecoveries % 2 === 0;
+      expect(
+        await dropSignaling(dropFirst ? pair.first.page : pair.second.page),
+      ).toBe(1);
+      if (dropFirst) expectedFirstSockets += 1;
+      else expectedSecondSockets += 1;
+      signalingRecoveries += 1;
+      action = dropFirst ? 'drop-first-wss' : 'drop-second-wss';
+      await expectConnectedParticipants(
+        pair,
+        'relay',
+        'Alice-relay',
+        'Bob-relay',
+      );
+      await waitForSameTransportAudioRecovery(
+        pair,
+        'relay',
+        firstBefore,
+        secondBefore,
+      );
+    } else {
+      const departure = await leaveJoinerExplicitly(pair, 'Bob-relay');
+      await joinExistingRoomAndProveAudio(
+        pair,
+        'relay',
+        roomCode,
+        'Alice-relay',
+        'Bob-relay',
+        departure,
+      );
+      expectedFirstPeers += 1;
+      expectedSecondPeers += 1;
+      expectedSecondSockets += 1;
+      transportRebuilds += 1;
+      action = 'explicit-leave-rejoin';
+    }
+
+    const checkpoint = await collectV13Checkpoint(pair, {
+      action,
+      cycle,
+      expectedFirstPeers,
+      expectedSecondPeers,
+      expectedFirstSockets,
+      expectedSecondSockets,
+      startedAt,
+    });
+    expectV13MemoryBounded(checkpoint.first.memory, baseline.first.memory);
+    expectV13MemoryBounded(checkpoint.second.memory, baseline.second.memory);
+    checkpoints.push(checkpoint);
+    await attachV13Json(
+      `v13-cycle-${String(cycle).padStart(2, '0')}-${action}.json`,
+      checkpoint,
+    );
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  expect(elapsedMs).toBeGreaterThanOrEqual(soakDurationMs);
+  expect(signalingRecoveries).toBeGreaterThanOrEqual(5);
+  expect(transportRebuilds).toBeGreaterThanOrEqual(5);
+  await attachV13Json('v13-resource-soak-summary.json', {
+    soakDurationMs,
+    elapsedMs,
+    cycles: cycle,
+    signalingRecoveries,
+    transportRebuilds,
+    memoryGrowthBudgetKiB: v13MemoryGrowthBudgetKiB,
+    processGrowthBudget: v13ProcessGrowthBudget,
+    checkpoints,
+  });
+});
 
 for (const policy of ['all', 'relay'] as const) {
   test(`V09 WSS short/long recovery ${policy === 'all' ? 'direct' : 'forced relay'} path`, async ({
