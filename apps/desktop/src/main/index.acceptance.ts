@@ -52,6 +52,7 @@ import {
 } from './package-smoke.js';
 import { createScreenPermissionService } from './permissions.js';
 import { createRealtimeTicketBroker } from './realtime-ticket-broker.js';
+import { createRendererRecovery } from './renderer-recovery.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 import { createSecureSessionStore } from './secure-session-store.js';
 import {
@@ -277,7 +278,7 @@ const permissions = createScreenPermissionService({
   systemPreferences,
   shell,
 });
-let guardCaptureShutdown = (_window: BrowserWindow): void => undefined;
+let guardCaptureShutdown: (window: BrowserWindow) => void = () => undefined;
 if (ownsSingleInstance && packageSmokeRequest === null) {
   const captureShutdown = installCaptureShutdown({
     app,
@@ -294,6 +295,7 @@ function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow(
     createWindowOptions(join(directory, '../preload/index.js')),
   );
+  let windowClosing = false;
   guardCaptureShutdown(window);
   const csp = buildContentSecurityPolicy(runtime.realtimeOrigin);
   installContentSecurityPolicy(
@@ -316,9 +318,24 @@ function createMainWindow(): BrowserWindow {
   const clearCaptureSources = (): void => capture.clear(window.webContents.id);
   window.webContents.on('did-start-navigation', clearCaptureSources);
   window.webContents.once('destroyed', clearCaptureSources);
+  const rendererRecovery = createRendererRecovery({
+    clearCaptureSources,
+    canReloadRenderer: () => !windowClosing,
+    isWindowDestroyed: () => window.isDestroyed(),
+    reloadRenderer: () => window.loadURL(runtime.rendererEntry),
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    rendererRecovery.rendererGone(details);
+  });
+  window.webContents.on('unresponsive', () => {
+    rendererRecovery.rendererUnresponsive();
+  });
   if (packageSmokeRequest === null) {
     window.once('ready-to-show', () => window.show());
   }
+  window.on('close', () => {
+    windowClosing = true;
+  });
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });

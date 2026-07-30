@@ -316,9 +316,7 @@ describe('desktop preload API', () => {
     );
 
     expect(source).toMatch(/contextBridge\.exposeInMainWorld\(\s*'desktop'/u);
-    expect(source).toContain(
-      'createDesktopApi(invoke, subscribeCaptureStop)',
-    );
+    expect(source).toContain('createDesktopApi(invoke, subscribeCaptureStop)');
     expect(source).toMatch(
       /contextBridge\.exposeInMainWorld\(\s*'woShell',\s*createDesktopShellBridge\(invoke, subscribeNotification\)/u,
     );

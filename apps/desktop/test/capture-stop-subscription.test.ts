@@ -7,9 +7,7 @@ import {
 import { createCaptureStopSubscribe } from '../src/preload/capture-stop-subscription.js';
 
 function createHarness() {
-  let handler:
-    | ((event: unknown, requestId: unknown) => void)
-    | undefined;
+  let handler: ((event: unknown, requestId: unknown) => void) | undefined;
   const ipcRenderer = {
     on: vi.fn(
       (

@@ -17,7 +17,10 @@ interface PreventableEvent {
 }
 
 interface CaptureShutdownApp {
-  on(event: 'before-quit', listener: (event: PreventableEvent) => void): unknown;
+  on(
+    event: 'before-quit',
+    listener: (event: PreventableEvent) => void,
+  ): unknown;
   removeListener(
     event: 'before-quit',
     listener: (event: PreventableEvent) => void,
@@ -97,14 +100,8 @@ export function installCaptureShutdown(
   }
 
   const pendingStops = new Map<number, PendingStop>();
-  const prepareFlights = new WeakMap<
-    CaptureShutdownWindow,
-    Promise<void>
-  >();
-  const guardedWindows = new Map<
-    CaptureShutdownWindow,
-    () => void
-  >();
+  const prepareFlights = new WeakMap<CaptureShutdownWindow, Promise<void>>();
+  const guardedWindows = new Map<CaptureShutdownWindow, () => void>();
   const closeAllowed = new WeakSet<CaptureShutdownWindow>();
   let requestSequence = 0;
   let quitFlight: Promise<void> | null = null;
@@ -167,10 +164,7 @@ export function installCaptureShutdown(
         const senderId = (
           event as { readonly sender?: { readonly id?: unknown } }
         ).sender?.id;
-        if (
-          pending === undefined ||
-          senderId !== pending.webContentsId
-        ) {
+        if (pending === undefined || senderId !== pending.webContentsId) {
           throw invalidArguments();
         }
         pending.finish();

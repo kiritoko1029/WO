@@ -9,7 +9,10 @@ import { installCaptureShutdown } from '../src/main/capture-shutdown.js';
 const rendererEntry = 'file:///C:/app/out/renderer/index.html';
 
 function createHarness() {
-  const appListeners = new Map<string, (event: { preventDefault(): void }) => void>();
+  const appListeners = new Map<
+    string,
+    (event: { preventDefault(): void }) => void
+  >();
   const ipcHandlers = new Map<
     string,
     (event: unknown, ...arguments_: readonly unknown[]) => unknown
@@ -38,10 +41,7 @@ function createHarness() {
     handle: vi.fn(
       (
         channel: string,
-        handler: (
-          event: unknown,
-          ...arguments_: readonly unknown[]
-        ) => unknown,
+        handler: (event: unknown, ...arguments_: readonly unknown[]) => unknown,
       ) => {
         ipcHandlers.set(channel, handler);
       },
@@ -144,15 +144,15 @@ describe('desktop capture shutdown', () => {
     );
     expect(harness.app.quit).not.toHaveBeenCalled();
 
-    const response = harness.ipcHandlers
-      .get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)
-      ?.(harness.trustedEvent, 1);
+    const response = harness.ipcHandlers.get(
+      DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL,
+    )?.(harness.trustedEvent, 1);
 
     expect(response).toEqual({ ok: true, value: null });
     await vi.waitFor(() => expect(harness.app.quit).toHaveBeenCalledOnce());
-    expect(harness.clearCaptureSources.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.webContents.send.mock.invocationCallOrder[0]!,
-    );
+    expect(
+      harness.clearCaptureSources.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.webContents.send.mock.invocationCallOrder[0]!);
 
     const allowedEvent = harness.emitBeforeQuit();
     expect(allowedEvent.preventDefault).not.toHaveBeenCalled();
@@ -168,9 +168,9 @@ describe('desktop capture shutdown', () => {
     expect(harness.webContents.send).toHaveBeenCalledOnce();
 
     const mainFrame = { url: rendererEntry };
-    const foreign = harness.ipcHandlers
-      .get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)
-      ?.( { senderFrame: mainFrame, sender: { id: 99, mainFrame } }, 1);
+    const foreign = harness.ipcHandlers.get(
+      DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL,
+    )?.({ senderFrame: mainFrame, sender: { id: 99, mainFrame } }, 1);
     expect(foreign).toEqual(
       expect.objectContaining({
         ok: false,
@@ -179,9 +179,9 @@ describe('desktop capture shutdown', () => {
     );
     expect(harness.app.quit).not.toHaveBeenCalled();
 
-    const stale = harness.ipcHandlers
-      .get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)
-      ?.(harness.trustedEvent, 2);
+    const stale = harness.ipcHandlers.get(
+      DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL,
+    )?.(harness.trustedEvent, 2);
     expect(stale).toEqual(
       expect.objectContaining({
         ok: false,
@@ -190,9 +190,10 @@ describe('desktop capture shutdown', () => {
     );
     expect(harness.app.quit).not.toHaveBeenCalled();
 
-    harness.ipcHandlers
-      .get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)
-      ?.(harness.trustedEvent, 1);
+    harness.ipcHandlers.get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)?.(
+      harness.trustedEvent,
+      1,
+    );
     await vi.waitFor(() => expect(harness.app.quit).toHaveBeenCalledOnce());
   });
 
@@ -203,9 +204,10 @@ describe('desktop capture shutdown', () => {
     expect(closeEvent.preventDefault).toHaveBeenCalledOnce();
     expect(harness.window.close).not.toHaveBeenCalled();
 
-    harness.ipcHandlers
-      .get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)
-      ?.(harness.trustedEvent, 1);
+    harness.ipcHandlers.get(DESKTOP_CAPTURE_STOP_COMPLETED_CHANNEL)?.(
+      harness.trustedEvent,
+      1,
+    );
     await vi.waitFor(() => expect(harness.window.close).toHaveBeenCalledOnce());
 
     const preparedEvent = harness.emitWindowClose();

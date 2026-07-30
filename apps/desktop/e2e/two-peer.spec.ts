@@ -227,6 +227,31 @@ async function requiredDiagnostics(page: Page): Promise<AcceptanceSnapshot> {
   return value;
 }
 
+interface RecoveredRendererState {
+  readonly bodyText: string;
+  readonly snapshot: AcceptanceSnapshot | null;
+}
+
+async function recoveredRendererState(
+  application: ElectronApplication,
+): Promise<RecoveredRendererState> {
+  return application.evaluate(async ({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (window === undefined || window.isDestroyed()) {
+      throw new Error('Recovered renderer window is missing');
+    }
+    return window.webContents.executeJavaScript(`
+      (async () => ({
+        bodyText: document.body.innerText,
+        snapshot:
+          typeof window.woAcceptance?.snapshot === 'function'
+            ? await window.woAcceptance.snapshot()
+            : null
+      }))()
+    `);
+  });
+}
+
 async function connectionStatus(page: Page): Promise<string> {
   return page.locator('.room-identity > strong').innerText();
 }
@@ -995,8 +1020,10 @@ async function waitForLifecycleCaptureActive(
     }> | null;
     readonly expectedCaptureAttempts: number;
     readonly expectedRemoteCaptureAttempts: number;
+    readonly policy?: AcceptancePolicy;
   },
 ) {
+  const policy = input.policy ?? 'relay';
   await Promise.all([
     expect(pair.first.page.getByLabel('屏幕共享状态')).toBeVisible({
       timeout: 45_000,
@@ -1022,7 +1049,7 @@ async function waitForLifecycleCaptureActive(
         peer.packetsSentAudio > 5 &&
         peer.packetsReceivedAudio > 5 &&
         peer.inboundAudioEnergy > 0 &&
-        matchesIcePolicy(peer, 'relay') &&
+        matchesIcePolicy(peer, policy) &&
         snapshot.capture.attempts === input.expectedCaptureAttempts &&
         snapshot.capture.successes === input.expectedCaptureAttempts &&
         snapshot.capture.videoTracks === 1 &&
@@ -1042,7 +1069,7 @@ async function waitForLifecycleCaptureActive(
         peer.packetsSentAudio > 5 &&
         peer.packetsReceivedAudio > 5 &&
         peer.inboundAudioEnergy > 0 &&
-        matchesIcePolicy(peer, 'relay') &&
+        matchesIcePolicy(peer, policy) &&
         snapshot.capture.attempts === input.expectedRemoteCaptureAttempts &&
         snapshot.resources.activePeerConnections === 1 &&
         snapshot.resources.liveMicrophoneTracks === 1 &&
@@ -1146,7 +1173,7 @@ async function waitForLifecycleShareStopped(
 async function proveOwnerProcessRelease(
   pair: AcceptancePair,
   input: {
-    readonly mode: 'exit' | 'crash';
+    readonly mode: 'exit' | 'process-crash';
     readonly active: Awaited<ReturnType<typeof waitForLifecycleCaptureActive>>;
   },
 ) {
@@ -1157,7 +1184,7 @@ async function proveOwnerProcessRelease(
 
   const terminationStartedAtMs = Date.now();
   const termination =
-    input.mode === 'exit' ? pair.first.close() : pair.first.crash();
+    input.mode === 'exit' ? pair.first.close() : pair.first.killProcess();
   const buttonAvailable = (async () => {
     await expect(availableShareButton).toBeVisible({
       timeout: input.mode === 'exit' ? 15_000 : 30_000,
@@ -1241,6 +1268,123 @@ async function proveOwnerProcessRelease(
     ownerBefore: input.active.first,
     survivorBefore: input.active.second,
     survivorAfterDeparture,
+    survivorAcquired,
+  };
+}
+
+async function proveRendererCrashRecovery(
+  pair: AcceptancePair,
+  active: Awaited<ReturnType<typeof waitForLifecycleCaptureActive>>,
+) {
+  const mainProcess = pair.first.application.process();
+  const crashStartedAtMs = Date.now();
+  await pair.first.crashRenderer();
+  expect(mainProcess.exitCode).toBeNull();
+  expect(mainProcess.signalCode).toBeNull();
+
+  const busyButton = pair.second.page.getByRole('button', {
+    name: 'Alice-all正在共享',
+  });
+  await expect(busyButton).toBeVisible({ timeout: 5_000 });
+  await expect(busyButton).toBeDisabled();
+  const survivorBeforeExpiry = await requiredDiagnostics(pair.second.page);
+
+  await Promise.all([
+    expect(
+      pair.second.page.locator('video[aria-label$="的共享屏幕"]'),
+    ).toHaveCount(0, { timeout: 30_000 }),
+    expect(pair.second.page.getByText('正在重新连接')).toBeVisible({
+      timeout: 30_000,
+    }),
+    expect(pair.second.page.locator('[title="离线"]')).toBeVisible({
+      timeout: 30_000,
+    }),
+  ]);
+
+  let recoveredRenderer: RecoveredRendererState | null = null;
+  await expect
+    .poll(
+      async () => {
+        recoveredRenderer = await recoveredRendererState(
+          pair.first.application,
+        );
+        return {
+          homeVisible: recoveredRenderer.bodyText.includes('创建房间'),
+          resources: recoveredRenderer.snapshot?.resources ?? null,
+        };
+      },
+      { timeout: 30_000 },
+    )
+    .toEqual({
+      homeVisible: true,
+      resources: {
+        activePeerConnections: 0,
+        openSignalingSockets: 0,
+        liveMicrophoneTracks: 0,
+        liveSystemAudioTracks: 0,
+        activeRnnoiseAudioContexts: 0,
+      },
+    });
+  expect(mainProcess.exitCode).toBeNull();
+  expect(mainProcess.signalCode).toBeNull();
+
+  const availableShareButton = pair.second.page.getByRole('button', {
+    name: '共享屏幕',
+  });
+  await expect(availableShareButton).toBeVisible({ timeout: 30_000 });
+  await expect(availableShareButton).toBeEnabled();
+  const buttonAvailableAfterMs = Date.now() - crashStartedAtMs;
+  const survivorAfterExpiry = await waitForPeer(
+    pair.second.page,
+    (peer, snapshot) =>
+      peer.id === active.second.id &&
+      snapshot.resources.activePeerConnections === 1 &&
+      snapshot.resources.openSignalingSockets === 1 &&
+      snapshot.resources.liveMicrophoneTracks === 1 &&
+      snapshot.resources.liveSystemAudioTracks === 0 &&
+      snapshot.resources.activeRnnoiseAudioContexts === 1,
+    30_000,
+  );
+
+  await startMotionShare(pair.second.page, pair.motionTitle, true);
+  const survivorAcquired = await waitForPeer(
+    pair.second.page,
+    (peer, snapshot) =>
+      peer.id === survivorAfterExpiry.id &&
+      snapshot.capture.attempts === 1 &&
+      snapshot.capture.successes === 1 &&
+      snapshot.capture.videoTracks === 1 &&
+      snapshot.capture.audioTracks === 1 &&
+      snapshot.capture.width > 0 &&
+      snapshot.capture.height > 0 &&
+      snapshot.resources.activePeerConnections === 1 &&
+      snapshot.resources.openSignalingSockets === 1 &&
+      snapshot.resources.liveMicrophoneTracks === 1 &&
+      snapshot.resources.liveSystemAudioTracks === 1 &&
+      snapshot.resources.activeRnnoiseAudioContexts === 1,
+    30_000,
+  );
+
+  await pair.second.page.getByRole('button', { name: '停止共享' }).click();
+  await expect(pair.second.page.getByLabel('屏幕共享状态')).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  await expect
+    .poll(
+      async () =>
+        (await requiredDiagnostics(pair.second.page)).resources
+          .liveSystemAudioTracks,
+      { timeout: 30_000 },
+    )
+    .toBe(0);
+
+  return {
+    buttonAvailableAfterMs,
+    ownerBefore: active.first,
+    survivorBefore: active.second,
+    survivorBeforeExpiry,
+    recoveredRenderer,
+    survivorAfterExpiry,
     survivorAcquired,
   };
 }
@@ -2794,11 +2938,11 @@ test('S13 lock and suspend release screen video, system audio, and lease', async
   ).toHaveCount(0, { timeout: 30_000 });
 });
 
-for (const mode of ['exit', 'crash'] as const) {
+for (const mode of ['exit', 'process-crash'] as const) {
   const title =
     mode === 'exit'
       ? 'normal exit releases active capture and lease before TTL'
-      : 'hard crash permits takeover within the lease TTL bound';
+      : 'hard process crash falls back to lease TTL';
   test(`S13 ${title}`, async ({ acceptance }) => {
     test.setTimeout(4 * 60_000);
     const pair = await acceptance.launch('relay');
@@ -2821,6 +2965,32 @@ for (const mode of ['exit', 'crash'] as const) {
     });
   });
 }
+
+test('S13 renderer crash reloads the app and expires its lease on direct transport', async ({
+  acceptance,
+}) => {
+  test.setTimeout(4 * 60_000);
+  const pair = await acceptance.launch('all');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'all', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  await expectConnectedParticipants(pair, 'all', 'Alice-all', 'Bob-all');
+
+  await startMotionShare(pair.first.page, pair.motionTitle, true);
+  const active = await waitForLifecycleCaptureActive(pair, {
+    previous: null,
+    expectedCaptureAttempts: 1,
+    expectedRemoteCaptureAttempts: 0,
+    policy: 'all',
+  });
+  const report = await proveRendererCrashRecovery(pair, active);
+
+  await test.info().attach('s13-renderer-crash-direct.json', {
+    body: JSON.stringify(report, null, 2),
+    contentType: 'application/json',
+  });
+});
 
 test('S13 screen lease expires when maintenance stalls on a live connection', async ({
   acceptance,

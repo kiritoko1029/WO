@@ -23,7 +23,8 @@ export interface AcceptancePeer {
   readonly application: ElectronApplication;
   readonly page: Page;
   close(): Promise<void>;
-  crash(): Promise<void>;
+  crashRenderer(): Promise<void>;
+  killProcess(): Promise<void>;
 }
 
 export interface AcceptancePair {
@@ -282,14 +283,43 @@ function peer(application: ElectronApplication, page: Page): AcceptancePeer {
       closed = true;
       await closeApplication(application);
     },
-    crash: async () => {
+    crashRenderer: async () => {
+      if (closed) return;
+      const processHandle = application.process();
+      const rendererCrash = page.waitForEvent('crash', { timeout: 10_000 });
+      const rendererReload = application.evaluate(async ({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        if (window === undefined) {
+          throw new Error('Acceptance renderer window is missing');
+        }
+        const loaded = new Promise<void>((resolveLoaded, rejectLoaded) => {
+          const timer = setTimeout(
+            () => rejectLoaded(new Error('Acceptance renderer did not reload')),
+            30_000,
+          );
+          window.webContents.once('did-finish-load', () => {
+            clearTimeout(timer);
+            resolveLoaded();
+          });
+        });
+        window.webContents.forcefullyCrashRenderer();
+        await loaded;
+      });
+      await Promise.all([rendererCrash, rendererReload]);
+      if (
+        processHandle.exitCode !== null ||
+        processHandle.signalCode !== null
+      ) {
+        throw new Error(
+          'Acceptance Electron main process exited with its renderer',
+        );
+      }
+    },
+    killProcess: async () => {
       if (closed) return;
       const processHandle = application.process();
       await application
-        .evaluate(({ BrowserWindow }) => {
-          for (const window of BrowserWindow.getAllWindows()) {
-            window.webContents.forcefullyCrashRenderer();
-          }
+        .evaluate(() => {
           process.kill(process.pid, 'SIGKILL');
         })
         .catch(() => undefined);
@@ -380,7 +410,11 @@ async function launchPair(policy: AcceptancePolicy): Promise<AcceptancePair> {
         });
         application.process().stderr?.on('data', (chunk: Buffer) => {
           const message = chunk.toString('utf8');
-          if (/WO_ACCEPTANCE_|DESKTOP_STARTUP_FAILED/u.test(message)) {
+          if (
+            /WO_ACCEPTANCE_|DESKTOP_STARTUP_FAILED|Renderer process gone|Renderer reload failed/u.test(
+              message,
+            )
+          ) {
             process.stderr.write(`[${name}-main] ${message}`);
           }
         });

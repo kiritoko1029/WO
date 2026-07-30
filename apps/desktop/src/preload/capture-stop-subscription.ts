@@ -27,10 +27,7 @@ export function createCaptureStopSubscribe(
           Promise.resolve().then(() => listener()),
         ),
       );
-      if (
-        !Number.isSafeInteger(requestId) ||
-        (requestId as number) <= 0
-      ) {
+      if (!Number.isSafeInteger(requestId) || (requestId as number) <= 0) {
         void completion;
         return;
       }

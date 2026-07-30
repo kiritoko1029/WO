@@ -54,6 +54,7 @@ import {
 } from './package-smoke.js';
 import { registerDesktopProtocol } from './protocol-registration.js';
 import { createRealtimeTicketBroker } from './realtime-ticket-broker.js';
+import { createRendererRecovery } from './renderer-recovery.js';
 import {
   loadRuntimeConfig,
   resolveDevelopmentProfile,
@@ -157,7 +158,7 @@ const permissions = createScreenPermissionService({
   systemPreferences,
   shell,
 });
-let guardCaptureShutdown = (_window: BrowserWindow): void => undefined;
+let guardCaptureShutdown: (window: BrowserWindow) => void = () => undefined;
 if (ownsSingleInstance && packageSmokeRequest === null) {
   const captureShutdown = installCaptureShutdown({
     app,
@@ -174,6 +175,7 @@ function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow(
     createWindowOptions(join(directory, '../preload/index.js')),
   );
+  let windowClosing = false;
   guardCaptureShutdown(window);
   // Dev mode runs against the Vite dev server, which injects an inline HMR
   // client and relies on eval for dependency optimization. Production CSP
@@ -205,29 +207,24 @@ function createMainWindow(): BrowserWindow {
   const clearCaptureSources = (): void => capture.clear(window.webContents.id);
   window.webContents.on('did-start-navigation', clearCaptureSources);
   window.webContents.once('destroyed', clearCaptureSources);
-  // A blank window with no diagnostic is the worst-case UX for a renderer
-  // crash. Log the reason so it shows up in the terminal/log file, and try
-  // to reload once in dev mode so the developer is not stuck on white screen.
+  const rendererRecovery = createRendererRecovery({
+    clearCaptureSources,
+    canReloadRenderer: () => !windowClosing,
+    isWindowDestroyed: () => window.isDestroyed(),
+    reloadRenderer: () => window.loadURL(runtime.rendererEntry),
+  });
   window.webContents.on('render-process-gone', (_event, details) => {
-    console.error(
-      '[main] Renderer process gone:',
-      `reason=${details.reason}`,
-      `exitCode=${details.exitCode}`,
-    );
-    if (!app.isPackaged && !window.isDestroyed()) {
-      window
-        .loadURL(runtime.rendererEntry)
-        .catch((error: unknown) =>
-          console.error('[main] Renderer reload failed:', error),
-        );
-    }
+    rendererRecovery.rendererGone(details);
   });
   window.webContents.on('unresponsive', () => {
-    console.error('[main] Renderer became unresponsive');
+    rendererRecovery.rendererUnresponsive();
   });
   if (packageSmokeRequest === null) {
     window.once('ready-to-show', () => window.show());
   }
+  window.on('close', () => {
+    windowClosing = true;
+  });
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
     void stopLanSession();
