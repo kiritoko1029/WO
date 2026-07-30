@@ -23,7 +23,10 @@ export type Invoke = (
   ...arguments_: readonly unknown[]
 ) => Promise<unknown>;
 
-export type Subscribe = (channel: string, listener: () => void) => () => void;
+export type Subscribe = (
+  channel: string,
+  listener: () => void | Promise<void>,
+) => () => void;
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input);
@@ -321,7 +324,7 @@ export function createDesktopApi(
       ),
     openSettings: () =>
       invokeDesktop(invoke, 'desktop:capture:open-settings', [], parseNull),
-    subscribeStopRequested: (listener: () => void) =>
+    subscribeStopRequested: (listener: () => void | Promise<void>) =>
       subscribe(DESKTOP_CAPTURE_STOP_REQUESTED_CHANNEL, listener),
   });
   return Object.freeze({ auth, realtime, capture });

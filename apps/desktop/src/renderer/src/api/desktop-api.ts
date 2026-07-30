@@ -105,7 +105,7 @@ export function createRendererDesktopApi(
         return null;
       });
     },
-    subscribeStopRequested: (listener: () => void) =>
+    subscribeStopRequested: (listener: () => void | Promise<void>) =>
       bridge.capture.subscribeStopRequested(listener),
   });
   return Object.freeze({ auth, realtime, capture });

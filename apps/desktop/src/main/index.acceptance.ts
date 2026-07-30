@@ -31,6 +31,7 @@ import {
   installDisplayMediaHandler,
 } from './capture-sources.js';
 import { installCaptureLifecycle } from './capture-lifecycle.js';
+import { installCaptureShutdown } from './capture-shutdown.js';
 import { createMainHttpClient } from './http-client.js';
 import { registerDesktopIpc } from './ipc.js';
 import {
@@ -276,11 +277,24 @@ const permissions = createScreenPermissionService({
   systemPreferences,
   shell,
 });
+let guardCaptureShutdown = (_window: BrowserWindow): void => undefined;
+if (ownsSingleInstance && packageSmokeRequest === null) {
+  const captureShutdown = installCaptureShutdown({
+    app,
+    ipcMain,
+    rendererEntry: runtime.rendererEntry,
+    getMainWindow: () => mainWindow,
+    clearCaptureSources: (webContentsId) => capture.clear(webContentsId),
+  });
+  guardCaptureShutdown = captureShutdown.guardWindow;
+  app.once('will-quit', captureShutdown.dispose);
+}
 
 function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow(
     createWindowOptions(join(directory, '../preload/index.js')),
   );
+  guardCaptureShutdown(window);
   const csp = buildContentSecurityPolicy(runtime.realtimeOrigin);
   installContentSecurityPolicy(
     window.webContents.session,

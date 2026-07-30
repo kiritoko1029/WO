@@ -887,7 +887,7 @@ export function createCallController(
     options.gateway.desktop.capture.subscribeStopRequested?.(() => {
       const active = screenController;
       if (active === null) return;
-      void active.stop().catch(() => undefined);
+      return active.stop().catch(() => undefined);
     });
   if (unsubscribeCaptureStop !== undefined) {
     subscriptions.push(unsubscribeCaptureStop);

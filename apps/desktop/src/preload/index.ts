@@ -1,17 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { createDesktopApi } from './api.js';
+import { createCaptureStopSubscribe } from './capture-stop-subscription.js';
 import { createDesktopClipboardBridge } from './clipboard-api.js';
 import { createDesktopLanBridge } from './lan-api.js';
 import { createDesktopShellBridge } from './shell-config-api.js';
 
 const invoke = (channel: string, ...arguments_: readonly unknown[]) =>
   ipcRenderer.invoke(channel, ...arguments_);
-const subscribe = (channel: string, listener: () => void) => {
+const subscribeNotification = (channel: string, listener: () => void) => {
   const handler = () => listener();
   ipcRenderer.on(channel, handler);
   return () => ipcRenderer.removeListener(channel, handler);
 };
+const subscribeCaptureStop = createCaptureStopSubscribe(ipcRenderer);
 const subscribeValue = (
   channel: string,
   listener: (value: unknown) => void,
@@ -21,14 +23,17 @@ const subscribeValue = (
   return () => ipcRenderer.removeListener(channel, handler);
 };
 
-contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke, subscribe));
+contextBridge.exposeInMainWorld(
+  'desktop',
+  createDesktopApi(invoke, subscribeCaptureStop),
+);
 contextBridge.exposeInMainWorld(
   'woLan',
   createDesktopLanBridge(invoke, subscribeValue),
 );
 contextBridge.exposeInMainWorld(
   'woShell',
-  createDesktopShellBridge(invoke, subscribe),
+  createDesktopShellBridge(invoke, subscribeNotification),
 );
 contextBridge.exposeInMainWorld(
   'woClipboard',

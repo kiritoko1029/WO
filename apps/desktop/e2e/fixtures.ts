@@ -23,6 +23,7 @@ export interface AcceptancePeer {
   readonly application: ElectronApplication;
   readonly page: Page;
   close(): Promise<void>;
+  crash(): Promise<void>;
 }
 
 export interface AcceptancePair {
@@ -280,6 +281,26 @@ function peer(application: ElectronApplication, page: Page): AcceptancePeer {
       if (closed) return;
       closed = true;
       await closeApplication(application);
+    },
+    crash: async () => {
+      if (closed) return;
+      const processHandle = application.process();
+      await application
+        .evaluate(({ BrowserWindow }) => {
+          for (const window of BrowserWindow.getAllWindows()) {
+            window.webContents.forcefullyCrashRenderer();
+          }
+          process.kill(process.pid, 'SIGKILL');
+        })
+        .catch(() => undefined);
+      await forceProcessTreeExit(processHandle);
+      if (
+        processHandle.exitCode === null &&
+        processHandle.signalCode === null
+      ) {
+        throw new Error('Acceptance Electron process did not exit after crash');
+      }
+      closed = true;
     },
   });
 }

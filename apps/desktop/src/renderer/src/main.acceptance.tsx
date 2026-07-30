@@ -59,8 +59,10 @@ declare global {
       dropSignaling(): number;
       holdDisconnectedIceEvents(): number;
       pauseSignaling(): number;
+      pauseScreenLeaseMaintenance(): number;
       resetRnnoiseCallbackGap(): number;
       resumeSignaling(): number;
+      resumeScreenLeaseMaintenance(): number;
       stopLocalMicrophoneTrack(): number;
       stopLocalScreenTrack(): number;
       stopLocalSystemAudioTrack(): number;
@@ -77,6 +79,9 @@ let reportSequence = 0;
 let signalingDrops = 0;
 let signalingPaused = false;
 let blockedSignalingAttempts = 0;
+let screenLeaseMaintenancePaused = false;
+let blockedScreenLeaseRenewals = 0;
+let blockedScreenLeaseReleases = 0;
 let microphoneDenials = 0;
 const callStatusHistory: string[] = [];
 const liveMicrophoneTracks = new Set<MediaStreamTrack>();
@@ -441,6 +446,32 @@ function installWebSocketProbe(): void {
     }
     const socket = new NativeWebSocket(url, protocols);
     if (signaling) {
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        if (screenLeaseMaintenancePaused && typeof data === 'string') {
+          try {
+            const message = JSON.parse(data) as unknown;
+            const type =
+              typeof message === 'object' &&
+              message !== null &&
+              'type' in message &&
+              typeof message.type === 'string'
+                ? message.type
+                : null;
+            if (type === 'screen.renew') {
+              blockedScreenLeaseRenewals += 1;
+              return;
+            }
+            if (type === 'screen.release') {
+              blockedScreenLeaseReleases += 1;
+              return;
+            }
+          } catch {
+            // Non-JSON signaling payloads continue through the native socket.
+          }
+        }
+        send(data);
+      };
       const diagnostic: SocketDiagnostic = {
         id: ++socketSequence,
         state: socket.readyState,
@@ -644,6 +675,9 @@ function snapshot(): unknown {
     signalingDrops,
     signalingPaused,
     blockedSignalingAttempts,
+    screenLeaseMaintenancePaused,
+    blockedScreenLeaseRenewals,
+    blockedScreenLeaseReleases,
     capture: { ...captureDiagnostic },
     rnnoise: { ...rnnoiseDiagnostic },
     resources: {
@@ -698,9 +732,18 @@ Object.defineProperty(window, 'woAcceptanceControl', {
       signalingPaused = true;
       return dropOpenSignalingSockets();
     },
+    pauseScreenLeaseMaintenance: () => {
+      screenLeaseMaintenancePaused = true;
+      return 1;
+    },
     resumeSignaling: () => {
       if (!signalingPaused) return 0;
       signalingPaused = false;
+      return 1;
+    },
+    resumeScreenLeaseMaintenance: () => {
+      if (!screenLeaseMaintenancePaused) return 0;
+      screenLeaseMaintenancePaused = false;
       return 1;
     },
     resetRnnoiseCallbackGap: () => {

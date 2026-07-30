@@ -316,11 +316,14 @@ describe('desktop preload API', () => {
     );
 
     expect(source).toMatch(/contextBridge\.exposeInMainWorld\(\s*'desktop'/u);
-    expect(source).toContain('createDesktopApi(invoke, subscribe)');
+    expect(source).toContain(
+      'createDesktopApi(invoke, subscribeCaptureStop)',
+    );
     expect(source).toMatch(
-      /contextBridge\.exposeInMainWorld\(\s*'woShell',\s*createDesktopShellBridge\(invoke, subscribe\)/u,
+      /contextBridge\.exposeInMainWorld\(\s*'woShell',\s*createDesktopShellBridge\(invoke, subscribeNotification\)/u,
     );
     expect(source).toContain('createDesktopApi');
+    expect(source).toContain('createCaptureStopSubscribe');
     expect(source).toContain('createDesktopShellBridge');
     expect(source).not.toContain('ipcRenderer.send');
     expect(source).toContain('ipcRenderer.on(channel, handler)');
