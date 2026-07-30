@@ -4,6 +4,7 @@ import {
   signalTicketResponseSchema,
 } from '@wo/protocol';
 
+import { DESKTOP_CAPTURE_STOP_REQUESTED_CHANNEL } from '../ipc-channels.js';
 import {
   createDesktopIpcFailure,
   parseDesktopIpcEnvelope,
@@ -21,6 +22,8 @@ export type Invoke = (
   channel: string,
   ...arguments_: readonly unknown[]
 ) => Promise<unknown>;
+
+export type Subscribe = (channel: string, listener: () => void) => () => void;
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input);
@@ -229,7 +232,10 @@ function parseEmailOnly(input: unknown): Readonly<{ email: string }> {
   return Object.freeze({ email: input.email });
 }
 
-export function createDesktopApi(invoke: Invoke): Readonly<DesktopBridge> {
+export function createDesktopApi(
+  invoke: Invoke,
+  subscribe: Subscribe,
+): Readonly<DesktopBridge> {
   const auth = Object.freeze({
     register: (input: Parameters<DesktopBridge['auth']['register']>[0]) =>
       invokeDesktop(
@@ -315,6 +321,8 @@ export function createDesktopApi(invoke: Invoke): Readonly<DesktopBridge> {
       ),
     openSettings: () =>
       invokeDesktop(invoke, 'desktop:capture:open-settings', [], parseNull),
+    subscribeStopRequested: (listener: () => void) =>
+      subscribe(DESKTOP_CAPTURE_STOP_REQUESTED_CHANNEL, listener),
   });
   return Object.freeze({ auth, realtime, capture });
 }

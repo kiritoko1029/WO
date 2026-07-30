@@ -25,6 +25,7 @@ import {
   createCaptureSourceService,
   installDisplayMediaHandler,
 } from './capture-sources.js';
+import { installCaptureLifecycle } from './capture-lifecycle.js';
 import {
   installExtraCaCertificateVerifier,
   installExtraCaFromEnvironment,
@@ -290,9 +291,13 @@ if (ownsSingleInstance) {
         });
       }
       if (packageSmokeRequest === null) {
-        powerMonitor.on('suspend', () => {
-          void stopLanSession();
+        const removeCaptureLifecycle = installCaptureLifecycle({
+          powerMonitor,
+          getMainWindow: () => mainWindow,
+          clearCaptureSources: (webContentsId) => capture.clear(webContentsId),
+          stopLanSession: () => stopLanSession(),
         });
+        app.once('will-quit', removeCaptureLifecycle);
       }
       mainWindow = createMainWindow();
       await mainWindow.loadURL(runtime.rendererEntry);

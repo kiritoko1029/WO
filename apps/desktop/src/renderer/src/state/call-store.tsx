@@ -883,6 +883,15 @@ export function createCallController(
     acceptedResetNegotiationId !== null &&
     reset.negotiationId !== acceptedResetNegotiationId;
   const subscriptions: Array<() => void> = [];
+  const unsubscribeCaptureStop =
+    options.gateway.desktop.capture.subscribeStopRequested?.(() => {
+      const active = screenController;
+      if (active === null) return;
+      void active.stop().catch(() => undefined);
+    });
+  if (unsubscribeCaptureStop !== undefined) {
+    subscriptions.push(unsubscribeCaptureStop);
+  }
   let cleanupCall: () => Promise<void> = async () => undefined;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let deviceChangeHandler: (() => void) | null = null;

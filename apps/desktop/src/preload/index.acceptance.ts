@@ -8,8 +8,13 @@ const iceTransportPolicy =
   process.env.WO_ACCEPTANCE_ICE_POLICY === 'relay' ? 'relay' : 'all';
 const invoke = (channel: string, ...arguments_: readonly unknown[]) =>
   ipcRenderer.invoke(channel, ...arguments_);
+const subscribe = (channel: string, listener: () => void) => {
+  const handler = () => listener();
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+};
 
-contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke));
+contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke, subscribe));
 contextBridge.exposeInMainWorld('woShell', createDesktopShellBridge(invoke));
 contextBridge.exposeInMainWorld(
   'woClipboard',

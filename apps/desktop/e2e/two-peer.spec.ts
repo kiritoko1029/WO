@@ -983,6 +983,163 @@ async function waitForActiveScreenAndSystemAudio(
   };
 }
 
+async function waitForLifecycleCaptureActive(
+  pair: AcceptancePair,
+  input: {
+    readonly previous: Readonly<{
+      first: PeerDiagnostic;
+      second: PeerDiagnostic;
+    }> | null;
+    readonly expectedCaptureAttempts: number;
+    readonly expectedRemoteCaptureAttempts: number;
+  },
+) {
+  await Promise.all([
+    expect(pair.first.page.getByLabel('屏幕共享状态')).toBeVisible({
+      timeout: 45_000,
+    }),
+    expect(
+      pair.second.page.locator('video[aria-label$="的共享屏幕"]'),
+    ).toBeVisible({ timeout: 45_000 }),
+  ]);
+  const matchesPrevious = (
+    peer: PeerDiagnostic,
+    previous: PeerDiagnostic | undefined,
+  ): boolean =>
+    previous === undefined ||
+    (peer.id === previous.id &&
+      peer.offers + peer.answers === previous.offers + previous.answers);
+  const [first, second] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer, snapshot) =>
+        matchesPrevious(peer, input.previous?.first) &&
+        peer.connectionState === 'connected' &&
+        peer.liveRemoteAudioTracks >= 1 &&
+        peer.packetsSentAudio > 5 &&
+        peer.packetsReceivedAudio > 5 &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay') &&
+        snapshot.capture.attempts === input.expectedCaptureAttempts &&
+        snapshot.capture.successes === input.expectedCaptureAttempts &&
+        snapshot.capture.videoTracks === 1 &&
+        snapshot.capture.audioTracks === 1 &&
+        snapshot.resources.activePeerConnections === 1 &&
+        snapshot.resources.liveMicrophoneTracks === 1 &&
+        snapshot.resources.liveSystemAudioTracks === 1,
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer, snapshot) =>
+        matchesPrevious(peer, input.previous?.second) &&
+        peer.connectionState === 'connected' &&
+        peer.liveRemoteAudioTracks === 2 &&
+        peer.liveRemoteVideoTracks === 1 &&
+        peer.packetsSentAudio > 5 &&
+        peer.packetsReceivedAudio > 5 &&
+        peer.inboundAudioEnergy > 0 &&
+        matchesIcePolicy(peer, 'relay') &&
+        snapshot.capture.attempts === input.expectedRemoteCaptureAttempts &&
+        snapshot.resources.activePeerConnections === 1 &&
+        snapshot.resources.liveMicrophoneTracks === 1 &&
+        snapshot.resources.liveSystemAudioTracks === 0,
+      60_000,
+    ),
+  ]);
+  const [firstSnapshot, secondSnapshot] = await Promise.all([
+    requiredDiagnostics(pair.first.page),
+    requiredDiagnostics(pair.second.page),
+  ]);
+  return {
+    first,
+    second,
+    firstCapture: firstSnapshot.capture,
+    firstResources: firstSnapshot.resources,
+    secondResources: secondSnapshot.resources,
+  };
+}
+
+async function emitCaptureLifecycleEvent(
+  application: ElectronApplication,
+  event: 'lock-screen' | 'suspend',
+): Promise<void> {
+  const emitted = await application.evaluate(
+    ({ powerMonitor }, eventName) => powerMonitor.emit(eventName),
+    event,
+  );
+  expect(emitted).toBe(true);
+}
+
+async function waitForLifecycleShareStopped(
+  pair: AcceptancePair,
+  input: {
+    readonly previous: Readonly<{
+      first: PeerDiagnostic;
+      second: PeerDiagnostic;
+    }>;
+    readonly expectedCaptureAttempts: number;
+  },
+) {
+  await Promise.all([
+    expect(pair.first.page.getByLabel('屏幕共享状态')).toHaveCount(0, {
+      timeout: 30_000,
+    }),
+    expect(
+      pair.second.page.locator('video[aria-label$="的共享屏幕"]'),
+    ).toHaveCount(0, { timeout: 30_000 }),
+  ]);
+  const [first, second] = await waitForSameTransportAudioRecovery(
+    pair,
+    'relay',
+    input.previous.first,
+    input.previous.second,
+  );
+  await expect
+    .poll(
+      async () => {
+        const [sharer, receiver] = await Promise.all([
+          requiredDiagnostics(pair.first.page),
+          requiredDiagnostics(pair.second.page),
+        ]);
+        return {
+          captureAttempts: sharer.capture.attempts,
+          sharer: sharer.resources,
+          receiver: receiver.resources,
+        };
+      },
+      { timeout: 30_000 },
+    )
+    .toEqual({
+      captureAttempts: input.expectedCaptureAttempts,
+      sharer: {
+        activePeerConnections: 1,
+        openSignalingSockets: 1,
+        liveMicrophoneTracks: 1,
+        liveSystemAudioTracks: 0,
+        activeRnnoiseAudioContexts: 1,
+      },
+      receiver: {
+        activePeerConnections: 1,
+        openSignalingSockets: 1,
+        liveMicrophoneTracks: 1,
+        liveSystemAudioTracks: 0,
+        activeRnnoiseAudioContexts: 1,
+      },
+    });
+  const [sharerSnapshot, receiverSnapshot] = await Promise.all([
+    requiredDiagnostics(pair.first.page),
+    requiredDiagnostics(pair.second.page),
+  ]);
+  return {
+    first,
+    second,
+    sharerCapture: sharerSnapshot.capture,
+    sharerResources: sharerSnapshot.resources,
+    receiverResources: receiverSnapshot.resources,
+  };
+}
+
 async function proveRemoteAudioTrackIsolation(pair: AcceptancePair) {
   const firstWithBoth = await waitForPeer(
     pair.first.page,
@@ -2429,6 +2586,83 @@ test('S12 active screen and system audio survive rejoin, WSS drop, and ICE reset
     ),
     contentType: 'application/json',
   });
+});
+
+test('S13 lock and suspend release screen video, system audio, and lease', async ({
+  acceptance,
+}) => {
+  test.setTimeout(4 * 60_000);
+  const pair = await acceptance.launch('relay');
+  const reversedPair: AcceptancePair = {
+    first: pair.second,
+    second: pair.first,
+    motionTitle: pair.motionTitle,
+    launchAdditional: () => pair.launchAdditional(),
+    close: () => pair.close(),
+  };
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+
+  await startMotionShare(pair.first.page, pair.motionTitle, true);
+  const aliceActive = await waitForLifecycleCaptureActive(pair, {
+    previous: null,
+    expectedCaptureAttempts: 1,
+    expectedRemoteCaptureAttempts: 0,
+  });
+  await emitCaptureLifecycleEvent(pair.first.application, 'lock-screen');
+  const afterLock = await waitForLifecycleShareStopped(pair, {
+    previous: aliceActive,
+    expectedCaptureAttempts: 1,
+  });
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+
+  await startMotionShare(pair.second.page, pair.motionTitle, true);
+  const bobActive = await waitForLifecycleCaptureActive(reversedPair, {
+    previous: {
+      first: afterLock.second,
+      second: afterLock.first,
+    },
+    expectedCaptureAttempts: 1,
+    expectedRemoteCaptureAttempts: 1,
+  });
+  await emitCaptureLifecycleEvent(pair.second.application, 'suspend');
+  const afterSuspend = await waitForLifecycleShareStopped(reversedPair, {
+    previous: bobActive,
+    expectedCaptureAttempts: 1,
+  });
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+
+  await startMotionShare(pair.first.page, pair.motionTitle, true);
+  const aliceReacquired = await waitForLifecycleCaptureActive(pair, {
+    previous: {
+      first: afterSuspend.second,
+      second: afterSuspend.first,
+    },
+    expectedCaptureAttempts: 2,
+    expectedRemoteCaptureAttempts: 1,
+  });
+
+  await test.info().attach('s13-capture-lifecycle-relay.json', {
+    body: JSON.stringify(
+      {
+        aliceActive,
+        afterLock,
+        bobActive,
+        afterSuspend,
+        aliceReacquired,
+      },
+      null,
+      2,
+    ),
+    contentType: 'application/json',
+  });
+
+  await pair.first.page.getByRole('button', { name: '停止共享' }).click();
+  await expect(
+    pair.second.page.locator('video[aria-label$="的共享屏幕"]'),
+  ).toHaveCount(0, { timeout: 30_000 });
 });
 
 test('V11 account takeover closes the superseded desktop without auto-resume', async ({

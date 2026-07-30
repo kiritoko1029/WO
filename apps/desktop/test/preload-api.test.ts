@@ -2,9 +2,12 @@ import { readFile } from 'node:fs/promises';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { DESKTOP_CAPTURE_STOP_REQUESTED_CHANNEL } from '../src/ipc-channels.js';
 import { createDesktopApi } from '../src/preload/api.js';
 import type { DesktopBridge } from '../src/preload/types.js';
 import { createRendererDesktopApi } from '../src/renderer/src/api/desktop-api.js';
+
+const unusedSubscribe = () => () => undefined;
 
 function cloneBridge(bridge: DesktopBridge): DesktopBridge {
   return {
@@ -37,6 +40,8 @@ function cloneBridge(bridge: DesktopBridge): DesktopBridge {
         structuredClone(await bridge.capture.permission()),
       openSettings: async () =>
         structuredClone(await bridge.capture.openSettings()),
+      subscribeStopRequested: (listener) =>
+        bridge.capture.subscribeStopRequested(listener),
     },
   };
 }
@@ -85,7 +90,9 @@ describe('desktop preload API', () => {
                     : authSession;
       return { ok: true, value };
     });
-    const bridge = createDesktopApi(invoke);
+    const removeListener = vi.fn();
+    const subscribe = vi.fn(() => removeListener);
+    const bridge = createDesktopApi(invoke, subscribe);
 
     expect(Object.keys(bridge)).toEqual(['auth', 'realtime', 'capture']);
     expect(Object.keys(bridge.auth)).toEqual([
@@ -105,6 +112,7 @@ describe('desktop preload API', () => {
       'select',
       'permission',
       'openSettings',
+      'subscribeStopRequested',
     ]);
     expect(Object.isFrozen(bridge)).toBe(true);
     expect(Object.isFrozen(bridge.auth)).toBe(true);
@@ -146,6 +154,14 @@ describe('desktop preload API', () => {
       },
     });
     await bridge.capture.openSettings();
+    const stopListener = vi.fn();
+    const unsubscribe = bridge.capture.subscribeStopRequested(stopListener);
+    expect(subscribe).toHaveBeenCalledWith(
+      DESKTOP_CAPTURE_STOP_REQUESTED_CHANNEL,
+      stopListener,
+    );
+    unsubscribe();
+    expect(removeListener).toHaveBeenCalledOnce();
 
     expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
       'desktop:auth:register',
@@ -174,6 +190,7 @@ describe('desktop preload API', () => {
           },
         ],
       }),
+      unusedSubscribe,
     );
 
     await expect(bridge.capture.list()).resolves.toMatchObject({
@@ -206,6 +223,7 @@ describe('desktop preload API', () => {
   ])('rejects an invalid screen permission capability: %o', async (value) => {
     const bridge = createDesktopApi(
       vi.fn().mockResolvedValue({ ok: true, value }),
+      unusedSubscribe,
     );
 
     await expect(bridge.capture.permission()).resolves.toMatchObject({
@@ -228,6 +246,7 @@ describe('desktop preload API', () => {
           },
         ],
       }),
+      unusedSubscribe,
     );
 
     await expect(bridge.capture.list()).resolves.toEqual({
@@ -254,7 +273,9 @@ describe('desktop preload API', () => {
           message: 'unsafe mismatched server detail',
         },
       });
-    const api = createRendererDesktopApi(cloneBridge(createDesktopApi(invoke)));
+    const api = createRendererDesktopApi(
+      cloneBridge(createDesktopApi(invoke, unusedSubscribe)),
+    );
 
     await expect(api.auth.refresh()).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
@@ -277,6 +298,7 @@ describe('desktop preload API', () => {
       cloneBridge(
         createDesktopApi(
           vi.fn().mockRejectedValue(new Error('main stack token=secret')),
+          unusedSubscribe,
         ),
       ),
     );
@@ -294,6 +316,7 @@ describe('desktop preload API', () => {
     );
 
     expect(source).toMatch(/contextBridge\.exposeInMainWorld\(\s*'desktop'/u);
+    expect(source).toContain('createDesktopApi(invoke, subscribe)');
     expect(source).toMatch(
       /contextBridge\.exposeInMainWorld\(\s*'woShell',\s*createDesktopShellBridge\(invoke, subscribe\)/u,
     );

@@ -21,7 +21,7 @@ const subscribeValue = (
   return () => ipcRenderer.removeListener(channel, handler);
 };
 
-contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke));
+contextBridge.exposeInMainWorld('desktop', createDesktopApi(invoke, subscribe));
 contextBridge.exposeInMainWorld(
   'woLan',
   createDesktopLanBridge(invoke, subscribeValue),

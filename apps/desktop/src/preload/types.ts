@@ -73,6 +73,7 @@ export interface DesktopApi {
     select(token: string): Promise<void>;
     permission(): Promise<ScreenPermissionSnapshot>;
     openSettings(): Promise<void>;
+    subscribeStopRequested?(listener: () => void): () => void;
   };
 }
 
@@ -110,6 +111,7 @@ export interface DesktopBridge {
     select(token: string): Promise<DesktopIpcEnvelope<null>>;
     permission(): Promise<DesktopIpcEnvelope<ScreenPermissionSnapshot>>;
     openSettings(): Promise<DesktopIpcEnvelope<null>>;
+    subscribeStopRequested(listener: () => void): () => void;
   };
 }
 

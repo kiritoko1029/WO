@@ -10,6 +10,7 @@ import type { DesktopBridge } from '../src/preload/types.js';
 import { createRendererDesktopApi } from '../src/renderer/src/api/desktop-api.js';
 
 const rendererEntry = 'file:///C:/app/out/renderer/index.html';
+const unusedSubscribe = () => () => undefined;
 
 function cloneBridge(bridge: DesktopBridge): DesktopBridge {
   return {
@@ -42,6 +43,8 @@ function cloneBridge(bridge: DesktopBridge): DesktopBridge {
         structuredClone(await bridge.capture.permission()),
       openSettings: async () =>
         structuredClone(await bridge.capture.openSettings()),
+      subscribeStopRequested: (listener) =>
+        bridge.capture.subscribeStopRequested(listener),
     },
   };
 }
@@ -301,7 +304,9 @@ describe('desktop IPC boundary', () => {
       structuredClone(
         await harness.handlers.get(channel)?.(harness.event, ...arguments_),
       );
-    const api = createRendererDesktopApi(cloneBridge(createDesktopApi(invoke)));
+    const api = createRendererDesktopApi(
+      cloneBridge(createDesktopApi(invoke, unusedSubscribe)),
+    );
 
     await expect(api.auth.refresh()).rejects.toMatchObject({
       code: 'NETWORK_ERROR',

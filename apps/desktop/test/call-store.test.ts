@@ -3944,6 +3944,86 @@ describe('realtime room gateway', () => {
     expect(peer.pc.close).not.toHaveBeenCalled();
   });
 
+  it('releases screen video, system audio, and lease on an OS stop request', async () => {
+    const stopListeners = new Set<() => void>();
+    const unsubscribeStop = vi.fn(() => {
+      stopListeners.clear();
+    });
+    const subscribeStopRequested = vi.fn((listener: () => void) => {
+      stopListeners.add(listener);
+      return unsubscribeStop;
+    });
+    const lifecycleDesktop = {
+      ...desktop,
+      capture: {
+        ...desktop.capture,
+        subscribeStopRequested,
+      },
+    } as unknown as DesktopApi;
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop: lifecycleDesktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const microphone = audioTrack();
+    const screenTrack = videoTrack();
+    const systemAudioTrack = audioTrack();
+    const peer = peerConnectionFactory();
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(microphone)),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+        getDisplayMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [screenTrack, systemAudioTrack],
+          getVideoTracks: () => [screenTrack],
+          getAudioTracks: () => [systemAudioTrack],
+        }),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+    });
+    await call.start();
+    await call.prepareScreenShare();
+    await call.selectScreenSource('00000000-0000-4000-8000-000000000001');
+    call.setScreenSystemAudioEnabled(true);
+    await call.startScreenShare();
+
+    expect(peer.transceivers[0]!.sender.track).toBe(microphone);
+    expect(peer.transceivers[1]!.sender.track).toBe(systemAudioTrack);
+    expect(peer.transceivers[2]!.sender.track).toBe(screenTrack);
+
+    for (const listener of stopListeners) listener();
+
+    await vi.waitFor(() =>
+      expect(call.getSnapshot()).toMatchObject({
+        screenState: 'idle',
+        localScreenTrack: null,
+        screenSystemAudioEnabled: false,
+      }),
+    );
+    expect(peer.transceivers[1]!.sender.track).toBeNull();
+    expect(peer.transceivers[2]!.sender.track).toBeNull();
+    expect(screenTrack.stop).toHaveBeenCalledOnce();
+    expect(systemAudioTrack.stop).toHaveBeenCalledOnce();
+    expect(
+      client.request.mock.calls.filter(([type]) => type === 'screen.release'),
+    ).toHaveLength(1);
+    expect(peer.transceivers[0]!.sender.track).toBe(microphone);
+    expect(microphone.stop).not.toHaveBeenCalled();
+    expect(peer.pc.close).not.toHaveBeenCalled();
+
+    await call.cleanup();
+
+    expect(unsubscribeStop).toHaveBeenCalledOnce();
+    expect(stopListeners).toHaveLength(0);
+    expect(
+      client.request.mock.calls.filter(([type]) => type === 'screen.release'),
+    ).toHaveLength(1);
+  });
+
   it('rejects stale screen callbacks after cleanup without acquiring a lease', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({

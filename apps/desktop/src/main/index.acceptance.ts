@@ -10,6 +10,7 @@ import {
   desktopCapturer,
   ipcMain,
   net,
+  powerMonitor,
   protocol,
   safeStorage,
   session,
@@ -29,6 +30,7 @@ import {
   createCaptureSourceService,
   installDisplayMediaHandler,
 } from './capture-sources.js';
+import { installCaptureLifecycle } from './capture-lifecycle.js';
 import { createMainHttpClient } from './http-client.js';
 import { registerDesktopIpc } from './ipc.js';
 import {
@@ -366,6 +368,15 @@ if (ownsSingleInstance) {
           }),
         );
       });
+      if (packageSmokeRequest === null) {
+        const removeCaptureLifecycle = installCaptureLifecycle({
+          powerMonitor,
+          getMainWindow: () => mainWindow,
+          clearCaptureSources: (webContentsId) => capture.clear(webContentsId),
+          stopLanSession: () => Promise.resolve(),
+        });
+        app.once('will-quit', removeCaptureLifecycle);
+      }
       mainWindow = createMainWindow();
       await mainWindow.loadURL(runtime.rendererEntry);
       if (packageSmokeRequest !== null) {
