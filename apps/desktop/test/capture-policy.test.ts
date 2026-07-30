@@ -21,6 +21,14 @@ const sources = [
   { id: 'screen:202:0', name: 'Entire screen' },
 ] as const;
 
+function deferred<Value>() {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe('desktop capture source policy', () => {
   test('issues opaque short-lived tokens bound to one WebContents', () => {
     let nowMs = 1_000;
@@ -45,6 +53,7 @@ describe('desktop capture source policy', () => {
     expect(JSON.stringify(listed)).not.toContain('screen:202:0');
     broker.select(7, listed[0]!.token);
     expect(() => broker.consumeSelected(8)).toThrow(/unavailable/i);
+    expect(broker.peekSelected(7)).toBe(sources[0]);
     expect(broker.consumeSelected(7)).toBe(sources[0]);
     expect(() => broker.consumeSelected(7)).toThrow(/unavailable/i);
     expect(() => broker.select(7, listed[1]!.token)).toThrow(/not enumerated/i);
@@ -183,6 +192,75 @@ describe('desktop capture source policy', () => {
     }
   });
 
+  test('rejects out-of-order source listings without replacing the latest broker state', async () => {
+    let token = 0;
+    const broker = createCaptureSourceBroker<DesktopCaptureSource>({
+      randomToken: () =>
+        `00000000-0000-4000-8000-${String(++token).padStart(12, '0')}`,
+    });
+    const first = deferred<readonly DesktopCaptureSource[]>();
+    const second = deferred<readonly DesktopCaptureSource[]>();
+    const staleSource = {
+      id: 'window:101:0',
+      name: 'Stale window',
+      thumbnail: {
+        toDataURL: () => 'data:image/png;base64,AAAA',
+        getSize: () => ({ width: 320, height: 180 }),
+      },
+    };
+    const currentSource = {
+      id: 'screen:202:0',
+      name: 'Current screen',
+      thumbnail: {
+        toDataURL: () => 'data:image/png;base64,BBBB',
+        getSize: () => ({ width: 320, height: 180 }),
+      },
+    };
+    const getSources = vi
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const service = createCaptureSourceService({
+      broker,
+      desktopCapturer: { getSources },
+    });
+
+    const staleListing = service.list(9);
+    const currentListing = service.list(9);
+    second.resolve([currentSource]);
+    const [currentSummary] = await currentListing;
+    first.resolve([staleSource]);
+
+    await expect(staleListing).rejects.toThrow(/superseded/i);
+    broker.select(9, currentSummary!.token);
+    expect(broker.consumeSelected(9)).toBe(currentSource);
+  });
+
+  test('does not repopulate capture tokens after clearing an in-flight listing', async () => {
+    const broker = createCaptureSourceBroker<DesktopCaptureSource>();
+    const pendingSources = deferred<readonly DesktopCaptureSource[]>();
+    const service = createCaptureSourceService({
+      broker,
+      desktopCapturer: { getSources: () => pendingSources.promise },
+    });
+    const pendingListing = service.list(9);
+
+    service.clear(9);
+    pendingSources.resolve([
+      {
+        id: 'window:101:0',
+        name: 'Late window',
+        thumbnail: {
+          toDataURL: () => 'data:image/png;base64,AAAA',
+          getSize: () => ({ width: 320, height: 180 }),
+        },
+      },
+    ]);
+
+    await expect(pendingListing).rejects.toThrow(/superseded/i);
+    expect(() => broker.peekSelected(9)).toThrow(/unavailable/i);
+  });
+
   test('normalizes hostile platform titles instead of failing the picker', async () => {
     let token = 0;
     const broker = createCaptureSourceBroker<DesktopCaptureSource>({
@@ -309,16 +387,186 @@ describe('desktop capture source policy', () => {
     );
   });
 
+  test('grants a Windows window once with target process-tree audio', async () => {
+    const broker = createCaptureSourceBroker({
+      randomToken: () => '00000000-0000-4000-8000-000000000001',
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    const resolveWindowsWindowProcessId = vi.fn(async () => 4_321);
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      currentProcessId: 99,
+      resolveWindowsWindowProcessId,
+    });
+    const callback = vi.fn();
+    const request = {
+      frame: mainFrame,
+      securityOrigin: 'https://app.example.test',
+      videoRequested: true,
+      audioRequested: false,
+      userGesture: true,
+    };
+
+    handler?.({ ...request, audioRequested: true }, callback);
+    await vi.waitFor(() =>
+      expect(callback).toHaveBeenLastCalledWith({
+        video: sources[0],
+        audio: {
+          id: 'applicationLoopback:4321',
+          name: 'Selected application audio',
+        },
+      }),
+    );
+    expect(resolveWindowsWindowProcessId).toHaveBeenCalledWith('101', 99);
+    // Second call: source already consumed, callback falls back gracefully.
+    handler?.(request, callback);
+    expect(callback).toHaveBeenLastCalledWith({});
+    expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
+      expect.any(Function),
+      { useSystemPicker: false },
+    );
+  });
+
+  test('revokes a pending Windows audio grant when source identity refreshes', async () => {
+    let token = 0;
+    const broker = createCaptureSourceBroker({
+      randomToken: () =>
+        `00000000-0000-4000-8000-${String(++token).padStart(12, '0')}`,
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    const processId = deferred<number | null>();
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      currentProcessId: 99,
+      resolveWindowsWindowProcessId: () => processId.promise,
+    });
+    const callback = vi.fn();
+
+    handler?.(
+      {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: true,
+        userGesture: true,
+      },
+      callback,
+    );
+    expect(callback).not.toHaveBeenCalled();
+
+    const refreshedSource = {
+      id: sources[0].id,
+      name: 'Private document refreshed',
+    };
+    const [refreshed] = broker.replaceAvailable(12, [refreshedSource]);
+    expect(refreshed!.token).toBe(summary!.token);
+    processId.resolve(4_321);
+
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
+    expect(callback).toHaveBeenLastCalledWith({});
+    expect(broker.peekSelected(12)).toBe(refreshedSource);
+  });
+
+  test('preserves a new source selection while an old Windows audio grant resolves', async () => {
+    let token = 0;
+    const broker = createCaptureSourceBroker({
+      randomToken: () =>
+        `00000000-0000-4000-8000-${String(++token).padStart(12, '0')}`,
+    });
+    const listed = broker.replaceAvailable(12, sources);
+    broker.select(12, listed[0]!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    const processId = deferred<number | null>();
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      currentProcessId: 99,
+      resolveWindowsWindowProcessId: () => processId.promise,
+    });
+    const callback = vi.fn();
+
+    handler?.(
+      {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: true,
+        userGesture: true,
+      },
+      callback,
+    );
+    expect(callback).not.toHaveBeenCalled();
+
+    broker.select(12, listed[1]!.token);
+    processId.resolve(4_321);
+
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
+    expect(callback).toHaveBeenLastCalledWith({});
+    expect(broker.peekSelected(12)).toBe(sources[1]);
+    expect(broker.consumeSelected(12)).toBe(sources[1]);
+  });
+
   test.each([
     ['win32', '10.0.26100'],
     ['darwin', '23.2.0'],
   ] as const)(
-    'grants a selected source once with loopback on %s %s',
-    (platform, platformRelease) => {
+    'grants a selected screen with WO playback excluded on %s %s',
+    async (platform, platformRelease) => {
       const broker = createCaptureSourceBroker({
         randomToken: () => '00000000-0000-4000-8000-000000000001',
       });
-      const [summary] = broker.replaceAvailable(12, [sources[0]]);
+      const [summary] = broker.replaceAvailable(12, [sources[1]]);
       broker.select(12, summary!.token);
       const mainFrame = { url: 'https://app.example.test/index.html' };
       let handler:
@@ -341,29 +589,82 @@ describe('desktop capture source policy', () => {
         platformRelease,
       });
       const callback = vi.fn();
-      const request = {
+
+      handler?.(
+        {
+          frame: mainFrame,
+          securityOrigin: 'https://app.example.test',
+          videoRequested: true,
+          audioRequested: true,
+          userGesture: true,
+        },
+        callback,
+      );
+      await vi.waitFor(() =>
+        expect(callback).toHaveBeenLastCalledWith({
+          video: sources[1],
+          audio: {
+            id: 'loopbackWithoutChrome',
+            name: 'System audio without WO playback',
+          },
+        }),
+      );
+    },
+  );
+
+  test('fails closed instead of widening a macOS custom-picker window to system audio', async () => {
+    const broker = createCaptureSourceBroker({
+      randomToken: () => '00000000-0000-4000-8000-000000000001',
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'darwin',
+      platformRelease: '23.2.0',
+    });
+    const callback = vi.fn();
+
+    handler?.(
+      {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: true,
+        userGesture: true,
+      },
+      callback,
+    );
+
+    await vi.waitFor(() => expect(callback).toHaveBeenLastCalledWith({}));
+    callback.mockClear();
+    handler?.(
+      {
         frame: mainFrame,
         securityOrigin: 'https://app.example.test',
         videoRequested: true,
         audioRequested: false,
         userGesture: true,
-      };
-
-      handler?.({ ...request, audioRequested: true }, callback);
-      // Audio is now allowed — handler provides loopback audio alongside video.
-      expect(callback).toHaveBeenLastCalledWith({
-        video: sources[0],
-        audio: 'loopback',
-      });
-      // Second call: source already consumed, callback falls back gracefully.
-      handler?.(request, callback);
-      expect(callback).toHaveBeenLastCalledWith({});
-      expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
-        expect.any(Function),
-        { useSystemPicker: false },
-      );
-    },
-  );
+      },
+      callback,
+    );
+    expect(callback).toHaveBeenLastCalledWith({ video: sources[0] });
+  });
 
   test('fails closed for unsupported system audio without consuming the selected source', () => {
     const broker = createCaptureSourceBroker({
@@ -498,6 +799,13 @@ describe('desktop capture source policy', () => {
       isDisplayCaptureRequestAllowed(
         { ...base, securityOrigin: 'https://evil.example' },
         policy,
+      ),
+    ).toBe(false);
+    const malformedMainFrame = { url: 'not a URL' };
+    expect(
+      isDisplayCaptureRequestAllowed(
+        { ...base, frame: malformedMainFrame },
+        { ...policy, mainFrame: malformedMainFrame },
       ),
     ).toBe(false);
     for (const securityOrigin of [

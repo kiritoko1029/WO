@@ -25,14 +25,29 @@ export const DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
     }),
   });
 
-export const SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS: DisplayMediaStreamOptions =
+interface ProgramAudioTrackConstraints extends MediaTrackConstraints {
+  readonly restrictOwnAudio: true;
+  readonly suppressLocalAudioPlayback: false;
+}
+
+interface ProgramAudioDisplayMediaStreamOptions extends DisplayMediaStreamOptions {
+  readonly audio: ProgramAudioTrackConstraints;
+  readonly systemAudio: 'include';
+  readonly windowAudio: 'window';
+}
+
+export const SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS: ProgramAudioDisplayMediaStreamOptions =
   Object.freeze({
     audio: Object.freeze({
       autoGainControl: false,
       echoCancellation: false,
       noiseSuppression: false,
+      restrictOwnAudio: true,
+      suppressLocalAudioPlayback: false,
     }),
+    systemAudio: 'include',
     video: DISPLAY_CAPTURE_CONSTRAINTS.video,
+    windowAudio: 'window',
   });
 
 export type ScreenShareState =

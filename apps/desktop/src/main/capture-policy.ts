@@ -22,7 +22,12 @@ export interface CaptureSourceBroker<Source extends CaptureSource> {
     sources: readonly Source[],
   ): readonly CaptureSourceToken[];
   select(webContentsId: number, token: string): void;
+  peekSelected(webContentsId: number): Source;
   consumeSelected(webContentsId: number): Source;
+  consumeSelectedIfUnchanged(
+    webContentsId: number,
+    expectedSource: Source,
+  ): Source;
   clear(webContentsId: number): void;
 }
 
@@ -96,6 +101,36 @@ export function createCaptureSourceBroker<Source extends CaptureSource>(
   }
   const contexts = new Map<number, CaptureContext<Source>>();
 
+  const selectedSource = (
+    webContentsId: number,
+    consume: boolean,
+    expectedSource?: Source,
+  ): Source => {
+    assertWebContentsId(webContentsId);
+    const context = contexts.get(webContentsId);
+    if (context === undefined) {
+      throw new Error('Capture source context is unavailable');
+    }
+    const token = context.selectedToken;
+    if (token === null) throw new Error('No capture source is selected');
+    const entry = context.available.get(token);
+    if (entry === undefined) throw new Error('No capture source is selected');
+    if (entry.expiresAtMs <= readNow(now)) {
+      if (consume) {
+        contexts.delete(webContentsId);
+      } else {
+        context.available.delete(token);
+        context.selectedToken = null;
+      }
+      throw new Error('Capture source token expired');
+    }
+    if (expectedSource !== undefined && entry.source !== expectedSource) {
+      throw new Error('Capture source selection changed');
+    }
+    if (consume) contexts.delete(webContentsId);
+    return entry.source;
+  };
+
   return Object.freeze({
     replaceAvailable(webContentsId: number, sources: readonly Source[]) {
       assertWebContentsId(webContentsId);
@@ -163,22 +198,14 @@ export function createCaptureSourceBroker<Source extends CaptureSource>(
       }
       context.selectedToken = token;
     },
-    consumeSelected(webContentsId: number) {
-      assertWebContentsId(webContentsId);
-      const context = contexts.get(webContentsId);
-      if (context === undefined) {
-        throw new Error('Capture source context is unavailable');
-      }
-      const token = context.selectedToken;
-      if (token === null) throw new Error('No capture source is selected');
-      const entry = context.available.get(token);
-      contexts.delete(webContentsId);
-      if (entry === undefined) throw new Error('No capture source is selected');
-      if (entry.expiresAtMs <= readNow(now)) {
-        throw new Error('Capture source token expired');
-      }
-      return entry.source;
-    },
+    peekSelected: (webContentsId: number) =>
+      selectedSource(webContentsId, false),
+    consumeSelected: (webContentsId: number) =>
+      selectedSource(webContentsId, true),
+    consumeSelectedIfUnchanged: (
+      webContentsId: number,
+      expectedSource: Source,
+    ) => selectedSource(webContentsId, true, expectedSource),
     clear(webContentsId: number) {
       contexts.delete(webContentsId);
     },
@@ -256,15 +283,19 @@ export function isDisplayCaptureRequestAllowed(
   // entry as http://127.0.0.1:5173/; the existing origin normalization (also
   // used for securityOrigin below) treats those as equivalent.
   const frameUrl = String(request.frame.url);
-  if (
-    captureSecurityOrigin(frameUrl) !==
-    captureSecurityOrigin(policy.rendererEntry)
-  ) {
+  let frameOrigin: string;
+  let rendererOrigin: string;
+  try {
+    frameOrigin = captureSecurityOrigin(frameUrl);
+    rendererOrigin = captureSecurityOrigin(policy.rendererEntry);
+  } catch {
+    return false;
+  }
+  if (frameOrigin !== rendererOrigin) {
     return false;
   }
   return (
-    canonicalDisplaySecurityOrigin(request.securityOrigin) ===
-      captureSecurityOrigin(policy.rendererEntry) &&
+    canonicalDisplaySecurityOrigin(request.securityOrigin) === rendererOrigin &&
     request.videoRequested &&
     request.userGesture
   );

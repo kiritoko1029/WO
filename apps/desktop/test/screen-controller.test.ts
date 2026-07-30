@@ -486,16 +486,24 @@ describe('single screen controller', () => {
         autoGainControl: false,
         echoCancellation: false,
         noiseSuppression: false,
+        restrictOwnAudio: true,
+        suppressLocalAudioPlayback: false,
       },
+      systemAudio: 'include',
       video: DISPLAY_CAPTURE_CONSTRAINTS.video,
+      windowAudio: 'window',
     });
     expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith({
       audio: {
         autoGainControl: false,
         echoCancellation: false,
         noiseSuppression: false,
+        restrictOwnAudio: true,
+        suppressLocalAudioPlayback: false,
       },
+      systemAudio: 'include',
       video: DISPLAY_CAPTURE_CONSTRAINTS.video,
+      windowAudio: 'window',
     });
     expect(audioTrack.contentHint).toBe('music');
     expect(harness.audioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);

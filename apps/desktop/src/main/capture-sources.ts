@@ -3,6 +3,11 @@ import type {
   CaptureSourceBroker,
   DisplayCaptureRequest,
 } from './capture-policy.js';
+import {
+  resolveCaptureAudioTarget,
+  type CaptureAudioDevice,
+  type WindowsWindowProcessResolver,
+} from './capture-audio-target.js';
 import { isDisplayCaptureRequestAllowed } from './capture-policy.js';
 import { systemAudioModeForPlatform } from './permissions.js';
 
@@ -95,14 +100,30 @@ function thumbnailData(source: DesktopCaptureSource): {
 export function createCaptureSourceService<Source extends DesktopCaptureSource>(
   dependencies: CaptureSourceServiceDependencies<Source>,
 ): CaptureSourceService {
+  const activeListings = new Map<number, object>();
+
   return Object.freeze({
     async list(webContentsId: number) {
-      const sources = await dependencies.desktopCapturer.getSources({
-        types: ['screen', 'window'],
-        fetchWindowIcons: false,
-        thumbnailSize: { width: 200, height: 112 },
-      });
+      const listing = Object.freeze({});
+      activeListings.set(webContentsId, listing);
+      let sources: readonly Source[];
+      try {
+        sources = await dependencies.desktopCapturer.getSources({
+          types: ['screen', 'window'],
+          fetchWindowIcons: false,
+          thumbnailSize: { width: 200, height: 112 },
+        });
+      } catch (error) {
+        if (activeListings.get(webContentsId) === listing) {
+          activeListings.delete(webContentsId);
+        }
+        throw error;
+      }
+      if (activeListings.get(webContentsId) !== listing) {
+        throw new Error('Capture source listing was superseded');
+      }
       if (sources.length > MAX_CAPTURE_SOURCES) {
+        activeListings.delete(webContentsId);
         dependencies.broker.clear(webContentsId);
         throw new RangeError('Too many capture sources');
       }
@@ -139,15 +160,22 @@ export function createCaptureSourceService<Source extends DesktopCaptureSource>(
             thumbnailDataUrl: item.thumbnailDataUrl,
           });
         });
+        activeListings.delete(webContentsId);
         return Object.freeze(summaries);
       } catch (error) {
-        dependencies.broker.clear(webContentsId);
+        if (activeListings.get(webContentsId) === listing) {
+          activeListings.delete(webContentsId);
+          dependencies.broker.clear(webContentsId);
+        }
         throw error;
       }
     },
     select: (webContentsId: number, token: string) =>
       dependencies.broker.select(webContentsId, token),
-    clear: (webContentsId: number) => dependencies.broker.clear(webContentsId),
+    clear(webContentsId: number) {
+      activeListings.delete(webContentsId);
+      dependencies.broker.clear(webContentsId);
+    },
   });
 }
 
@@ -166,6 +194,28 @@ export interface DisplayMediaSession {
   ): void;
 }
 
+function grantCaptureAudioDevice(
+  callback: (
+    streams: Readonly<{
+      video?: CaptureSource;
+      audio?: 'loopback' | 'loopbackWithMute';
+    }>,
+  ) => void,
+  video: CaptureSource,
+  audio: CaptureAudioDevice,
+): void {
+  // Electron 43 keeps an intentionally undocumented { id, name } escape hatch
+  // in DisplayMediaDeviceChosen. Keep the public Session type narrow and
+  // isolate the runtime-only device descriptor at this boundary.
+  const callbackWithAudioDevice = callback as unknown as (
+    streams: Readonly<{
+      video: CaptureSource;
+      audio: CaptureAudioDevice;
+    }>,
+  ) => void;
+  callbackWithAudioDevice({ video, audio });
+}
+
 export function installDisplayMediaHandler<
   Source extends CaptureSource,
 >(input: {
@@ -175,42 +225,76 @@ export function installDisplayMediaHandler<
   readonly broker: CaptureSourceBroker<Source>;
   readonly platform?: NodeJS.Platform;
   readonly platformRelease: string;
+  readonly currentProcessId?: number;
+  readonly resolveWindowsWindowProcessId?: WindowsWindowProcessResolver;
 }): void {
+  const platform = input.platform ?? process.platform;
+  const currentProcessId = input.currentProcessId ?? process.pid;
   const systemAudioMode = systemAudioModeForPlatform(
-    input.platform ?? process.platform,
+    platform,
     input.platformRelease,
   );
   input.session.setDisplayMediaRequestHandler(
     (request, callback) => {
+      let completed = false;
+      const complete = (
+        streams: Readonly<{
+          video?: CaptureSource;
+          audio?: 'loopback' | 'loopbackWithMute';
+        }>,
+      ): void => {
+        if (completed) return;
+        completed = true;
+        callback(streams);
+      };
       if (
         !isDisplayCaptureRequestAllowed(request, {
           mainFrame: input.webContents.mainFrame,
           rendererEntry: input.rendererEntry,
         })
       ) {
-        callback({});
+        complete({});
         return;
       }
       // When enabled, Electron's macOS picker is the sole source authority and
       // this handler is not expected to run. Fail closed if Electron falls
       // back to it instead of consuming a custom-picker broker token.
       if (systemAudioMode === 'native-picker') {
-        callback({});
+        complete({});
         return;
       }
       if (request.audioRequested && systemAudioMode !== 'loopback') {
-        callback({});
+        complete({});
         return;
       }
       try {
-        const video = input.broker.consumeSelected(input.webContents.id);
-        const audio =
-          request.audioRequested && systemAudioMode === 'loopback'
-            ? 'loopback'
-            : undefined;
-        callback(audio !== undefined ? { video, audio } : { video });
+        if (!request.audioRequested) {
+          complete({
+            video: input.broker.consumeSelected(input.webContents.id),
+          });
+          return;
+        }
+        const video = input.broker.peekSelected(input.webContents.id);
+        void resolveCaptureAudioTarget({
+          source: video,
+          platform,
+          currentProcessId,
+          resolveWindowsWindowProcessId: input.resolveWindowsWindowProcessId,
+        })
+          .then((audio) => {
+            if (audio === null) {
+              complete({});
+              return;
+            }
+            const committed = input.broker.consumeSelectedIfUnchanged(
+              input.webContents.id,
+              video,
+            );
+            grantCaptureAudioDevice(complete, committed, audio);
+          })
+          .catch(() => complete({}));
       } catch {
-        callback({});
+        complete({});
       }
     },
     { useSystemPicker: systemAudioMode === 'native-picker' },
