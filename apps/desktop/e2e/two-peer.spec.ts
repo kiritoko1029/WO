@@ -3,6 +3,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import {
   expect,
   pauseIntegrationCoturn,
+  restartIntegrationServer,
   test,
   type AcceptancePair,
   type AcceptancePolicy,
@@ -76,6 +77,8 @@ interface AcceptanceSnapshot {
     state: number;
     opens: number;
     closes: number;
+    lastCloseCode: number | null;
+    lastCloseReason: string | null;
   }>[];
 }
 
@@ -404,6 +407,13 @@ async function registerPair(
       `bob-${policy}-${run}@e2e.invalid`,
     ),
   ]);
+}
+
+async function loginExisting(page: Page, email: string): Promise<void> {
+  await page.getByLabel('邮箱').fill(email);
+  await page.getByLabel('密码').fill(password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(page.getByRole('button', { name: '创建房间' })).toBeVisible();
 }
 
 async function proveCameraRequestRejected(page: Page): Promise<void> {
@@ -1829,6 +1839,166 @@ test('V10 ICE failed/authoritative reset forced relay path', async ({
     contentType: 'application/json',
   });
   await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+});
+
+test('V11 account takeover closes the superseded desktop without auto-resume', async ({
+  acceptance,
+}) => {
+  const pair = await acceptance.launch('all');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const joinerEmail = `bob-all-${run}@e2e.invalid`;
+  await registerPair(pair, 'all', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  const roomCode = pair.first.page.locator('.room-header code');
+  await expect(roomCode).toHaveText(/^\d{6}$/u);
+  const code = await roomCode.innerText();
+  const creatorBefore = await waitForPeer(
+    pair.first.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+  const supersededBefore = await requiredDiagnostics(pair.second.page);
+  const supersededSocketBefore = supersededBefore.sockets.find(
+    (socket) => socket.state === 1,
+  );
+  expect(supersededSocketBefore).toBeDefined();
+  const supersededPeer = await waitForPeer(
+    pair.second.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+  const replacement = await pair.launchAdditional();
+  await loginExisting(replacement.page, joinerEmail);
+  await replacement.page.getByLabel('房间码').fill(code);
+  await replacement.page.getByRole('button', { name: '加入房间' }).click();
+
+  await expect(
+    pair.second.page.getByText('账号已在另一台设备接管，当前通话已结束'),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(
+    pair.second.page.getByRole('button', { name: '创建房间' }),
+  ).toBeVisible();
+  const closedPeer = await waitForClosedPeer(
+    pair.second.page,
+    supersededPeer.id,
+  );
+  await expect(replacement.page.locator('.room-header code')).toHaveText(code);
+
+  const activePair: AcceptancePair = {
+    first: pair.first,
+    second: replacement,
+    motionTitle: pair.motionTitle,
+    launchAdditional: pair.launchAdditional,
+    close: pair.close,
+  };
+  await expectConnectedParticipants(activePair, 'all', 'Alice-all', 'Bob-all');
+  await proveBidirectionalAudio(activePair);
+  const creatorAfter = await waitForPeer(
+    pair.first.page,
+    (peer) =>
+      peer.id > creatorBefore.id && peer.connectionState === 'connected',
+  );
+  const replacementPeer = await waitForPeer(
+    replacement.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+  const supersededAfter = await requiredDiagnostics(pair.second.page);
+  expect(supersededAfter.sockets).toHaveLength(supersededBefore.sockets.length);
+  expect(
+    supersededAfter.sockets.filter((socket) => socket.state === 1),
+  ).toHaveLength(0);
+  const supersededSocketAfter = supersededAfter.sockets.find(
+    (socket) => socket.id === supersededSocketBefore?.id,
+  );
+  expect(supersededSocketAfter).toMatchObject({
+    closes: 1,
+    lastCloseCode: 4409,
+    lastCloseReason: 'SESSION_REPLACED',
+  });
+
+  await test.info().attach('v11-account-takeover.json', {
+    body: JSON.stringify(
+      {
+        roomCodeLength: code.length,
+        creatorBeforeId: creatorBefore.id,
+        creatorAfterId: creatorAfter.id,
+        supersededPeerId: supersededPeer.id,
+        oldPeerClosed: closedPeer.closed,
+        replacementPeerId: replacementPeer.id,
+        socketsBefore: supersededBefore.sockets.length,
+        socketsAfter: supersededAfter.sockets.length,
+        openSocketsAfter: supersededAfter.sockets.filter(
+          (socket) => socket.state === 1,
+        ).length,
+        supersededCloseCode: supersededSocketAfter?.lastCloseCode,
+        supersededCloseReason: supersededSocketAfter?.lastCloseReason,
+        freshBidirectionalAudio: true,
+      },
+      null,
+      2,
+    ),
+    contentType: 'application/json',
+  });
+});
+
+test('V11 server restart closes lost rooms and permits a fresh call', async ({
+  acceptance,
+}) => {
+  const pair = await acceptance.launch('all');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'all', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  const firstBefore = await waitForPeer(
+    pair.first.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+  const secondBefore = await waitForPeer(
+    pair.second.page,
+    (peer) => peer.connectionState === 'connected',
+  );
+
+  await restartIntegrationServer();
+
+  const restartMessage = '服务已重启，原房间已关闭';
+  await expect(pair.first.page.getByText(restartMessage)).toBeVisible({
+    timeout: 45_000,
+  });
+  await expect(pair.second.page.getByText(restartMessage)).toBeVisible({
+    timeout: 45_000,
+  });
+  const firstClosed = await waitForClosedPeer(pair.first.page, firstBefore.id);
+  const secondClosed = await waitForClosedPeer(
+    pair.second.page,
+    secondBefore.id,
+  );
+
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  const firstAfter = await waitForPeer(
+    pair.first.page,
+    (peer) => peer.connectionState === 'connected' && peer.id > firstBefore.id,
+  );
+  const secondAfter = await waitForPeer(
+    pair.second.page,
+    (peer) => peer.connectionState === 'connected' && peer.id > secondBefore.id,
+  );
+
+  await test.info().attach('v11-server-restart.json', {
+    body: JSON.stringify(
+      {
+        firstBeforeId: firstBefore.id,
+        secondBeforeId: secondBefore.id,
+        firstClosed: firstClosed.closed,
+        secondClosed: secondClosed.closed,
+        firstAfterId: firstAfter.id,
+        secondAfterId: secondAfter.id,
+        freshBidirectionalAudio: true,
+      },
+      null,
+      2,
+    ),
+    contentType: 'application/json',
+  });
 });
 
 for (const policy of ['all', 'relay'] as const) {

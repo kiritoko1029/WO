@@ -415,6 +415,54 @@ describe('typed signaling client', () => {
     }
   });
 
+  it('refreshes once when an established socket expires authorization and reconnects', async () => {
+    const desktop = createDesktop();
+    desktop.realtime.issueTicket
+      .mockResolvedValueOnce(grant('Q'))
+      .mockRejectedValueOnce(
+        Object.assign(new Error('expired'), { code: 'AUTH_REQUIRED' }),
+      )
+      .mockResolvedValueOnce(grant('T'));
+    const sockets: FakeSocket[] = [];
+    const events: unknown[] = [];
+    const client = createSignalingClient({
+      desktop,
+      createWebSocket: (_url, protocols) => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        expect(protocols[1]).toBe(
+          `ticket.${ticket(sockets.length === 1 ? 'Q' : 'T')}`,
+        );
+        return socket;
+      },
+      makeRequestId: () => 'authorization-expiry',
+    });
+    client.subscribeConnection((event) => events.push(event));
+
+    const firstConnection = client.connect('initial-access-token');
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    await firstConnection;
+    sockets[0]!.serverClose(4401, 'AUTH_EXPIRED');
+
+    const resumedConnection = client.connect('initial-access-token');
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    sockets[1]!.open();
+    await resumedConnection;
+
+    expect(desktop.auth.refresh).toHaveBeenCalledOnce();
+    expect(desktop.realtime.issueTicket.mock.calls).toEqual([
+      ['initial-access-token'],
+      ['initial-access-token'],
+      ['refreshed-access-token'],
+    ]);
+    expect(events).toEqual([
+      { state: 'open' },
+      { state: 'closed', code: 4401, reason: 'AUTH_EXPIRED' },
+      { state: 'open' },
+    ]);
+  });
+
   it('times out silent handshakes and validates the negotiated wo-v1 protocol on every bounded attempt', async () => {
     vi.useFakeTimers();
     const desktop = createDesktop();

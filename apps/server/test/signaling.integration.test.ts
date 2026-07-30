@@ -995,15 +995,6 @@ describe('authenticated signaling gateway', () => {
       ok: false,
       error: { code: 'STALE_CONNECTION' },
     });
-    sendRequest(creator, 'webrtc.iceServers.refresh', 'stale-epoch', {
-      roomId,
-      connectionEpoch: creatorEpoch + 1,
-      negotiationId: 'not-started',
-    });
-    expect((await creator.next(isAck('stale-epoch'))).payload).toMatchObject({
-      ok: false,
-      error: { code: 'STALE_CONNECTION' },
-    });
 
     sendRequest(joiner, 'webrtc.offer', 'forbidden-offer', {
       roomId,
@@ -1286,6 +1277,89 @@ describe('authenticated signaling gateway', () => {
       code: 4409,
       reason: 'SESSION_REPLACED',
     });
+
+    const staleEpochRequests = [
+      {
+        type: 'peer.ready',
+        payload: { roomId, connectionEpoch: intermediateEpoch },
+      },
+      {
+        type: 'webrtc.offer',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-offer',
+          description: { type: 'offer', sdp: 'v=0\r\n' },
+        },
+      },
+      {
+        type: 'webrtc.answer',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-answer',
+          description: { type: 'answer', sdp: 'v=0\r\n' },
+        },
+      },
+      {
+        type: 'webrtc.answerApplied',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-answer-applied',
+        },
+      },
+      {
+        type: 'webrtc.iceCandidate',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-candidate',
+          candidate: null,
+        },
+      },
+      {
+        type: 'webrtc.restartRequested',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-restart-request',
+        },
+      },
+      {
+        type: 'webrtc.iceRestart',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-ice-restart',
+          description: { type: 'offer', sdp: 'v=0\r\n' },
+        },
+      },
+      {
+        type: 'webrtc.iceServers.refresh',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-ice-refresh',
+        },
+      },
+      {
+        type: 'webrtc.recoveryReset',
+        payload: {
+          roomId,
+          connectionEpoch: intermediateEpoch,
+          negotiationId: 'stale-recovery-reset',
+        },
+      },
+    ] as const;
+    for (const [index, request] of staleEpochRequests.entries()) {
+      const requestId = `stale-epoch-${index}`;
+      sendRequest(replacement, request.type, requestId, request.payload);
+      expect((await replacement.next(isAck(requestId))).payload).toMatchObject({
+        ok: false,
+        error: { code: 'STALE_CONNECTION' },
+      });
+    }
 
     sendRequest(replacement, 'peer.ready', 'replacement-ready', {
       roomId,

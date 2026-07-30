@@ -25,7 +25,7 @@ import {
 } from '@wo/protocol';
 
 import type { PublicAuthSession } from '../preload/types.js';
-import type { MainHttpClient } from './http-client.js';
+import { DesktopHttpError, type MainHttpClient } from './http-client.js';
 import type { SecureSessionStore } from './secure-session-store.js';
 
 export type AuthRegisterResult =
@@ -100,6 +100,28 @@ export function createAuthSessionBroker(
   ): Promise<PublicAuthSession> => {
     await options.sessionStore.write(response.refreshToken);
     return publicSession(response, now());
+  };
+
+  const rejectFailedRefresh = async (error: unknown): Promise<never> => {
+    if (!(error instanceof DesktopHttpError) || error.status !== 401) {
+      throw error;
+    }
+    let clearFailed = false;
+    let clearError: unknown;
+    try {
+      await options.sessionStore.clear();
+    } catch (caughtError) {
+      clearFailed = true;
+      clearError = caughtError;
+    }
+    if (clearFailed) {
+      throw new AggregateError(
+        [error, clearError],
+        'Authentication refresh failed and the stored session could not be cleared',
+        { cause: error },
+      );
+    }
+    throw error;
   };
 
   const authorizedPost = async <Body, Response>(
@@ -205,11 +227,13 @@ export function createAuthSessionBroker(
       const operation = exclusive(async () => {
         const refreshToken = await options.sessionStore.read();
         if (refreshToken === null) throw new AuthSessionBrokerError();
-        const response = await options.http.post({
-          path: '/v1/auth/refresh',
-          body: { refreshToken },
-          responseSchema: authRefreshResponseSchema,
-        });
+        const response = await options.http
+          .post({
+            path: '/v1/auth/refresh',
+            body: { refreshToken },
+            responseSchema: authRefreshResponseSchema,
+          })
+          .catch(rejectFailedRefresh);
         return persistResponse(response);
       });
       refreshInFlight = operation;

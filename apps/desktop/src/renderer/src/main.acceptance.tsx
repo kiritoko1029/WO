@@ -47,6 +47,8 @@ interface SocketDiagnostic {
   state: number;
   opens: number;
   closes: number;
+  lastCloseCode: number | null;
+  lastCloseReason: string | null;
 }
 
 declare global {
@@ -443,15 +445,19 @@ function installWebSocketProbe(): void {
         state: socket.readyState,
         opens: 0,
         closes: 0,
+        lastCloseCode: null,
+        lastCloseReason: null,
       };
       signalingSockets.set(socket, diagnostic);
       socket.addEventListener('open', () => {
         diagnostic.state = socket.readyState;
         diagnostic.opens += 1;
       });
-      socket.addEventListener('close', () => {
+      socket.addEventListener('close', (event) => {
         diagnostic.state = socket.readyState;
         diagnostic.closes += 1;
+        diagnostic.lastCloseCode = event.code;
+        diagnostic.lastCloseReason = event.reason;
       });
     }
     return socket;

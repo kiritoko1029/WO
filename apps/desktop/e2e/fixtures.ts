@@ -29,6 +29,7 @@ export interface AcceptancePair {
   readonly first: AcceptancePeer;
   readonly second: AcceptancePeer;
   readonly motionTitle: string;
+  launchAdditional(): Promise<AcceptancePeer>;
   close(): Promise<void>;
 }
 
@@ -95,6 +96,31 @@ export async function pauseIntegrationCoturn(): Promise<() => Promise<void>> {
     await execFileAsync('docker', ['unpause', containerId], commandOptions);
     resumed = true;
   };
+}
+
+export async function restartIntegrationServer(): Promise<void> {
+  const commandOptions = {
+    cwd: repositoryDirectory,
+    timeout: 60_000,
+    windowsHide: true,
+  } as const;
+  await execFileAsync(
+    'docker',
+    [...integrationComposeArguments, 'restart', 'server'],
+    commandOptions,
+  );
+  await execFileAsync(
+    'docker',
+    [
+      ...integrationComposeArguments,
+      'up',
+      '-d',
+      '--no-deps',
+      '--wait',
+      'server',
+    ],
+    commandOptions,
+  );
 }
 
 function environment(): Record<string, string> {
@@ -310,69 +336,101 @@ async function launchPair(policy: AcceptancePolicy): Promise<AcceptancePair> {
       { timeout: 15_000 },
     );
 
-    const launchPeer = async (name: string) => {
-      const application = await electron.launch({
-        executablePath: electronPath,
-        args: ['--host-resolver-rules=MAP rtc.localhost 127.0.0.1', mainEntry],
-        cwd: desktopDirectory,
-        env: {
-          ...baseEnvironment,
-          ELECTRON_RENDERER_URL: renderer.url,
-          NODE_EXTRA_CA_CERTS: caddyAuthority,
-          WO_API_ORIGIN: apiOrigin,
-          WO_ACCEPTANCE_AUDIO_FILE: audioFile,
-          WO_ACCEPTANCE_ICE_POLICY: policy,
-          WO_ACCEPTANCE_USER_DATA_DIR: join(temporaryRoot, `${name}-profile`),
-        },
-        timeout: 30_000,
-      });
-      application.process().stderr?.on('data', (chunk: Buffer) => {
-        const message = chunk.toString('utf8');
-        if (/WO_ACCEPTANCE_|DESKTOP_STARTUP_FAILED/u.test(message)) {
-          process.stderr.write(`[${name}-main] ${message}`);
-        }
-      });
-      const page = await application.firstWindow();
-      page.on('console', (message) => {
-        const text = message.text();
-        if (
-          !text.startsWith('failed to asynchronously prepare wasm:') &&
-          !text.startsWith('Aborted(')
-        ) {
-          return;
-        }
-        const details = text
-          .replaceAll(renderer.url, 'renderer:///')
-          .slice(0, 1_024);
-        process.stderr.write(`[${name}-renderer] ${details}\n`);
-      });
-      page.on('pageerror', (error) => {
-        const details = (error.stack ?? error.message)
-          .replaceAll(renderer.url, 'renderer:///')
-          .slice(0, 4_096);
-        process.stderr.write(`[${name}] ${details}\n`);
-      });
-      await page.getByRole('heading', { name: '登录 WO' }).waitFor({
-        timeout: 30_000,
-      });
-      return { application, page };
+    const launchPeer = async (name: string): Promise<AcceptancePeer> => {
+      let application: ElectronApplication | null = null;
+      try {
+        application = await electron.launch({
+          executablePath: electronPath,
+          args: [
+            '--host-resolver-rules=MAP rtc.localhost 127.0.0.1',
+            mainEntry,
+          ],
+          cwd: desktopDirectory,
+          env: {
+            ...baseEnvironment,
+            ELECTRON_RENDERER_URL: renderer.url,
+            NODE_EXTRA_CA_CERTS: caddyAuthority,
+            WO_API_ORIGIN: apiOrigin,
+            WO_ACCEPTANCE_AUDIO_FILE: audioFile,
+            WO_ACCEPTANCE_ICE_POLICY: policy,
+            WO_ACCEPTANCE_USER_DATA_DIR: join(temporaryRoot, `${name}-profile`),
+          },
+          timeout: 30_000,
+        });
+        application.process().stderr?.on('data', (chunk: Buffer) => {
+          const message = chunk.toString('utf8');
+          if (/WO_ACCEPTANCE_|DESKTOP_STARTUP_FAILED/u.test(message)) {
+            process.stderr.write(`[${name}-main] ${message}`);
+          }
+        });
+        const page = await application.firstWindow();
+        page.on('console', (message) => {
+          const text = message.text();
+          if (
+            !text.startsWith('failed to asynchronously prepare wasm:') &&
+            !text.startsWith('Aborted(')
+          ) {
+            return;
+          }
+          const details = text
+            .replaceAll(renderer.url, 'renderer:///')
+            .slice(0, 1_024);
+          process.stderr.write(`[${name}-renderer] ${details}\n`);
+        });
+        page.on('pageerror', (error) => {
+          const details = (error.stack ?? error.message)
+            .replaceAll(renderer.url, 'renderer:///')
+            .slice(0, 4_096);
+          process.stderr.write(`[${name}] ${details}\n`);
+        });
+        await page.getByRole('heading', { name: '登录 WO' }).waitFor({
+          timeout: 30_000,
+        });
+        return peer(application, page);
+      } catch (error) {
+        await closeApplication(application);
+        throw error;
+      }
     };
 
-    const firstLaunch = await launchPeer('first');
-    firstApplication = firstLaunch.application;
-    const secondLaunch = await launchPeer('second');
-    secondApplication = secondLaunch.application;
-    const first = peer(firstLaunch.application, firstLaunch.page);
-    const second = peer(secondLaunch.application, secondLaunch.page);
+    const first = await launchPeer('first');
+    firstApplication = first.application;
+    const second = await launchPeer('second');
+    secondApplication = second.application;
+    const additionalPeers: AcceptancePeer[] = [];
+    let additionalPeerSequence = 0;
     let closed = false;
     return Object.freeze({
       first,
       second,
       motionTitle,
+      launchAdditional: async () => {
+        if (closed) {
+          throw new Error(
+            'Cannot launch a peer after the acceptance pair closed',
+          );
+        }
+        additionalPeerSequence += 1;
+        const additionalPeer = await launchPeer(
+          `additional-${additionalPeerSequence}`,
+        );
+        if (closed) {
+          await additionalPeer.close();
+          throw new Error(
+            'Acceptance pair closed while an additional peer was launching',
+          );
+        }
+        additionalPeers.push(additionalPeer);
+        return additionalPeer;
+      },
       close: async () => {
         if (closed) return;
         closed = true;
-        await Promise.allSettled([first.close(), second.close()]);
+        await Promise.allSettled([
+          first.close(),
+          second.close(),
+          ...additionalPeers.map((additionalPeer) => additionalPeer.close()),
+        ]);
         await closeApplication(motionApplication);
         if (rendererServer !== null) await closeServer(rendererServer);
         await rm(temporaryRoot, {

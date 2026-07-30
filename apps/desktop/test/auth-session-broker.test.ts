@@ -4,7 +4,10 @@ import {
   AuthSessionBrokerError,
   createAuthSessionBroker,
 } from '../src/main/auth-session-broker.js';
-import type { MainHttpClient } from '../src/main/http-client.js';
+import {
+  DesktopHttpError,
+  type MainHttpClient,
+} from '../src/main/http-client.js';
 import {
   SecureSessionStoreError,
   type SecureSessionStore,
@@ -157,6 +160,68 @@ describe('auth session broker', () => {
       AuthSessionBrokerError,
     );
     expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('clears a rejected refresh session once for coalesced callers', async () => {
+    const store = createStore('expired-refresh');
+    const http = createHttp();
+    const rejection = new DesktopHttpError(
+      401,
+      'AUTH_REQUIRED',
+      'Authentication is required',
+    );
+    http.post.mockRejectedValue(rejection);
+    const broker = createAuthSessionBroker({ http, sessionStore: store });
+
+    const first = broker.refresh();
+    const second = broker.refresh();
+    expect(second).toBe(first);
+
+    await Promise.all([
+      expect(first).rejects.toBe(rejection),
+      expect(second).rejects.toBe(rejection),
+    ]);
+    expect(store.clear).toHaveBeenCalledOnce();
+    await expect(store.read()).resolves.toBeNull();
+  });
+
+  it('preserves a refresh session after a non-authentication failure', async () => {
+    const store = createStore('stored-refresh');
+    const http = createHttp();
+    const rejection = new DesktopHttpError(
+      null,
+      'NETWORK_ERROR',
+      'The server is unavailable',
+    );
+    http.post.mockRejectedValue(rejection);
+    const broker = createAuthSessionBroker({ http, sessionStore: store });
+
+    await expect(broker.refresh()).rejects.toBe(rejection);
+
+    expect(store.clear).not.toHaveBeenCalled();
+    await expect(store.read()).resolves.toBe('stored-refresh');
+  });
+
+  it('preserves both failures when a rejected refresh session cannot be cleared', async () => {
+    const store = createStore('expired-refresh');
+    const clearError = new SecureSessionStoreError(
+      'Unable to clear secure session',
+    );
+    store.clear.mockRejectedValue(clearError);
+    const http = createHttp();
+    const rejection = new DesktopHttpError(
+      401,
+      'AUTH_REQUIRED',
+      'Authentication is required',
+    );
+    http.post.mockRejectedValue(rejection);
+    const broker = createAuthSessionBroker({ http, sessionStore: store });
+
+    const failure = await broker.refresh().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([rejection, clearError]);
+    expect((failure as AggregateError).cause).toBe(rejection);
   });
 
   it('does not send HTTP when the origin-bound local session is rejected', async () => {
