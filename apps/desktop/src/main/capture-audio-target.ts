@@ -4,7 +4,7 @@ import { win32 } from 'node:path';
 const SIGNED_INT64_MIN = -(2n ** 63n);
 const SIGNED_INT64_MAX = 2n ** 63n - 1n;
 const WINDOWS_PROCESS_ID_MAX = 0xffff_ffff;
-const WINDOWS_PROCESS_PROBE_TIMEOUT_MS = 2_500;
+const WINDOWS_PROCESS_PROBE_TIMEOUT_MS = 10_000;
 const WINDOWS_PROCESS_PROBE_MAX_BUFFER_BYTES = 4_096;
 const WINDOWS_CAPTURE_HANDLE_ENV = 'WO_CAPTURE_AUDIO_WINDOW_HANDLE';
 const WINDOWS_CURRENT_PROCESS_ID_ENV = 'WO_CAPTURE_AUDIO_CURRENT_PROCESS_ID';
@@ -358,6 +358,19 @@ function parseWindowsProcessProbeOutput(
   return value.pid;
 }
 
+function windowsProcessProbeFailureCode(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return 'UNKNOWN';
+  if ('killed' in error && error.killed === true) return 'TERMINATED';
+  if (!('code' in error)) return 'UNKNOWN';
+  const code = error.code;
+  if (typeof code === 'string' && /^[A-Z0-9_-]{1,32}$/u.test(code)) {
+    return code;
+  }
+  return typeof code === 'number' && Number.isSafeInteger(code)
+    ? `EXIT_${code}`
+    : 'UNKNOWN';
+}
+
 export async function resolveWindowsWindowProcessId(
   windowHandle: string,
   options: WindowsWindowProcessResolverOptions = {},
@@ -413,7 +426,10 @@ export async function resolveWindowsWindowProcessId(
       },
     );
     return parseWindowsProcessProbeOutput(result.stdout, result.stderr);
-  } catch {
+  } catch (error) {
+    console.warn(
+      `[capture-audio-target] Windows process probe failed: ${windowsProcessProbeFailureCode(error)}`,
+    );
     return null;
   }
 }

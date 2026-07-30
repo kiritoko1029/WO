@@ -68,7 +68,7 @@ describe('desktop capture audio targets', () => {
     expect(options).toMatchObject({
       encoding: 'utf8',
       maxBuffer: 4_096,
-      timeout: 2_500,
+      timeout: 10_000,
       windowsHide: true,
       env: {
         SAFE_PARENT_VALUE: 'preserved',
@@ -132,6 +132,27 @@ describe('desktop capture audio targets', () => {
       }),
     ).resolves.toBeNull();
     expect(execFile).not.toHaveBeenCalled();
+  });
+
+  test('logs a bounded failure code when the Windows probe is terminated', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const execFile = vi.fn<CaptureAudioExecFile>(async () => {
+      throw Object.assign(new Error('sensitive child process details'), {
+        killed: true,
+      });
+    });
+
+    await expect(
+      resolveWindowsWindowProcessId('101', {
+        environment: { SystemRoot: 'C:\\Windows' },
+        execFile,
+      }),
+    ).resolves.toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      '[capture-audio-target] Windows process probe failed: TERMINATED',
+    );
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('sensitive');
+    warn.mockRestore();
   });
 
   test('maps a Windows window to Chromium application process-tree loopback', async () => {

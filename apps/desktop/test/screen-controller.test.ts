@@ -428,6 +428,124 @@ describe('single screen controller', () => {
     ]);
   });
 
+  test('waits for an in-flight source refresh before starting capture', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    const refresh = deferred<
+      Array<{
+        token: string;
+        name: string;
+        kind: 'window';
+        thumbnailDataUrl: string;
+      }>
+    >();
+    harness.desktop.list.mockImplementationOnce(() => refresh.promise);
+
+    const refreshing = harness.controller.refreshSources();
+    const started = harness.controller.startSelectedCapture();
+
+    expect(harness.controller.getSnapshot().state).toBe('capturing');
+    expect(harness.mediaDevices.getDisplayMedia).not.toHaveBeenCalled();
+    refresh.resolve([
+      {
+        token: '00000000-0000-4000-8000-000000000001',
+        name: 'Editor refreshed',
+        kind: 'window',
+        thumbnailDataUrl: 'data:image/png;base64,AAAA',
+      },
+    ]);
+    await refreshing;
+    await started;
+
+    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
+      SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
+    );
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      systemAudioEnabled: true,
+    });
+    expect(harness.audioSender.replaceTrack).toHaveBeenCalledWith(audioTrack);
+  });
+
+  test('fails before display capture when an in-flight refresh removes the selected source', async () => {
+    const harness = createHarness();
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    const refresh = deferred<
+      Array<{
+        token: string;
+        name: string;
+        kind: 'window';
+        thumbnailDataUrl: string;
+      }>
+    >();
+    harness.desktop.list.mockImplementationOnce(() => refresh.promise);
+
+    const refreshing = harness.controller.refreshSources();
+    const started = harness.controller.startSelectedCapture();
+
+    refresh.resolve([]);
+    await refreshing;
+    await expect(started).rejects.toMatchObject({ code: 'INVALID_STATE' });
+
+    expect(harness.mediaDevices.getDisplayMedia).not.toHaveBeenCalled();
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'error',
+      selectedToken: null,
+      systemAudioEnabled: false,
+    });
+  });
+
+  test('keeps the selected source when an in-flight refresh fails before capture', async () => {
+    const videoTrack = new FakeTrack();
+    const audioTrack = new FakeTrack('audio');
+    const harness = createHarness({
+      capture: Promise.resolve(streamWith(videoTrack, audioTrack)),
+    });
+    await harness.controller.prepare();
+    await harness.controller.selectSource(
+      '00000000-0000-4000-8000-000000000001',
+    );
+    harness.controller.setSystemAudioEnabled(true);
+    const refresh = deferred<
+      Array<{
+        token: string;
+        name: string;
+        kind: 'window';
+        thumbnailDataUrl: string;
+      }>
+    >();
+    harness.desktop.list.mockImplementationOnce(() => refresh.promise);
+
+    const refreshing = harness.controller.refreshSources();
+    const started = harness.controller.startSelectedCapture();
+
+    refresh.reject(new Error('source enumeration failed'));
+    await refreshing;
+    await started;
+
+    expect(harness.mediaDevices.getDisplayMedia).toHaveBeenCalledWith(
+      SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS,
+    );
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      state: 'sharing',
+      selectedToken: '00000000-0000-4000-8000-000000000001',
+      systemAudioEnabled: true,
+      error: null,
+    });
+  });
+
   test('does not let a stale refresh block a later picker lifecycle', async () => {
     const harness = createHarness();
     await harness.controller.prepare();

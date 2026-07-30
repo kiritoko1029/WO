@@ -722,12 +722,6 @@ export function createScreenController(
       const systemAudioEnabled = snapshot.systemAudioEnabled;
       const nativeSystemPicker = systemAudioMode === 'native-picker';
       const systemAudioRequested = nativeSystemPicker || systemAudioEnabled;
-      const selectedSource =
-        snapshot.selectedToken === null
-          ? null
-          : (snapshot.sources.find(
-              (source) => source.token === snapshot.selectedToken,
-            ) ?? null);
       if (systemAudioEnabled && systemAudioMode === 'unsupported') {
         return fail(
           Object.assign(new Error('System audio capture is unavailable'), {
@@ -735,24 +729,46 @@ export function createScreenController(
           }),
         );
       }
-      let capturePromise: Promise<MediaStream>;
-      try {
-        capturePromise = Promise.resolve(
-          mediaDevices.getDisplayMedia(
-            systemAudioRequested
-              ? SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS
-              : DISPLAY_CAPTURE_CONSTRAINTS,
-          ),
-        );
-      } catch (error) {
-        console.error(
-          '[screen-controller] getDisplayMedia threw synchronously:',
-          error,
-        );
-        return fail(error);
-      }
+      const pendingRefresh = refreshPromise;
       update({ state: 'capturing', error: null });
       startPromise = (async () => {
+        if (pendingRefresh !== null) {
+          await pendingRefresh;
+          assertCurrent(expectedGeneration);
+        }
+        const selectedSource =
+          snapshot.selectedToken === null
+            ? null
+            : (snapshot.sources.find(
+                (source) => source.token === snapshot.selectedToken,
+              ) ?? null);
+        if (!nativeSystemPicker && selectedSource === null) {
+          return failCaptureStage(
+            expectedGeneration,
+            new ScreenControllerError('INVALID_STATE'),
+            'CAPTURE_REQUEST_REJECTED',
+          );
+        }
+        let capturePromise: Promise<MediaStream>;
+        try {
+          capturePromise = Promise.resolve(
+            mediaDevices.getDisplayMedia(
+              systemAudioRequested
+                ? SYSTEM_AUDIO_DISPLAY_CAPTURE_CONSTRAINTS
+                : DISPLAY_CAPTURE_CONSTRAINTS,
+            ),
+          );
+        } catch (error) {
+          console.error(
+            '[screen-controller] getDisplayMedia threw synchronously:',
+            error,
+          );
+          return failCaptureStage(
+            expectedGeneration,
+            error,
+            'CAPTURE_REQUEST_REJECTED',
+          );
+        }
         let stream: MediaStream;
         try {
           stream = await capturePromise;
