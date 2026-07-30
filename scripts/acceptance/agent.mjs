@@ -11,9 +11,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   buildFirewallInvocation,
+  firewallRuleEvidenceForNetworkFault,
+  matchesFirewallNetworkFaultRuleEvidence,
   validateFirewallConfiguration,
   verifyFirewallCleanupEvidence,
   verifyFirewallInstallEvidence,
+  verifyFirewallNetworkFaultEvidence,
 } from './firewall-policy.mjs';
 import { parseAcceptanceEnvelope } from './protocol.mjs';
 
@@ -32,6 +35,8 @@ const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const COMMAND_TYPES = new Set([
   'run.prepare',
   'run.start',
+  'network.fault.apply',
+  'network.fault.clear',
   'run.stop',
   'run.cancel',
 ]);
@@ -636,6 +641,79 @@ async function removeFirewall(_config, run) {
   });
 }
 
+async function readNetworkFault(run, profile, active) {
+  if (run.firewallRequest === null) {
+    throw new AgentError('NETWORK_FAULT_UNSUPPORTED');
+  }
+  let status;
+  try {
+    status = await readFirewallStatus(run.firewallRequest);
+  } catch {
+    throw new AgentError(
+      active ? 'NETWORK_FAULT_APPLY_UNPROVEN' : 'NETWORK_FAULT_CLEAR_UNPROVEN',
+    );
+  }
+  const evidence = verifyFirewallNetworkFaultEvidence(
+    {
+      platform: run.firewallRequest.platform,
+      elevated: status.elevated,
+      enabledRules: status.enabledRuleIds,
+      disabledRules: status.disabledRuleIds,
+      ruleCount: status.ruleCount,
+      defaultBlockInstalled: status.defaultBlockInstalled,
+    },
+    active ? profile : null,
+  );
+  if (status.runId !== run.id || evidence.pass !== true) {
+    throw new AgentError(
+      active ? 'NETWORK_FAULT_APPLY_UNPROVEN' : 'NETWORK_FAULT_CLEAR_UNPROVEN',
+    );
+  }
+  const ruleEvidence = firewallRuleEvidenceForNetworkFault(
+    active ? profile : null,
+  );
+  return Object.freeze({
+    profile,
+    scope: 'client-egress',
+    active,
+    enabledRuleIds: ruleEvidence.enabledRuleIds,
+    disabledRuleIds: ruleEvidence.disabledRuleIds,
+  });
+}
+
+async function setNetworkFault(run, profile, active) {
+  if (run.firewallRequest === null) {
+    throw new AgentError('NETWORK_FAULT_UNSUPPORTED');
+  }
+  try {
+    await runInvocation(
+      buildFirewallInvocation(
+        REPOSITORY_ROOT,
+        run.firewallRequest,
+        active ? 'fault-apply' : 'fault-clear',
+        profile,
+      ),
+    );
+  } catch {
+    throw new AgentError(
+      active ? 'NETWORK_FAULT_APPLY_UNPROVEN' : 'NETWORK_FAULT_CLEAR_UNPROVEN',
+    );
+  }
+  return readNetworkFault(run, profile, active);
+}
+
+function applyNetworkFault(_config, run, profile) {
+  return setNetworkFault(run, profile, true);
+}
+
+function clearNetworkFault(_config, run, profile) {
+  return setNetworkFault(run, profile, false);
+}
+
+function inspectNetworkFault(_config, run, profile, active) {
+  return readNetworkFault(run, profile, active);
+}
+
 async function installPackage(spec, options) {
   if (spec === null) return;
   await runInvocation(spec, options);
@@ -651,6 +729,9 @@ function runtimeDefaults() {
     spawnTracked,
     installFirewall,
     removeFirewall,
+    applyNetworkFault,
+    clearNetworkFault,
+    inspectNetworkFault,
     readEvidence,
     setInterval,
     clearInterval,
@@ -681,6 +762,12 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
   const dependencies = { ...runtimeDefaults(), ...dependencyOverrides };
   const runs = new Map();
   let activeRunId = null;
+
+  const enqueueRunCommand = (run, operation) => {
+    const flight = run.commandFlight.then(operation);
+    run.commandFlight = flight.catch(() => undefined);
+    return flight;
+  };
 
   const authenticate = (authorization) => {
     if (!tokenMatches(config.token, authorization)) {
@@ -978,6 +1065,84 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
     return {};
   };
 
+  const applyNetworkFaultCommand = async (run, message) => {
+    if (run.state !== 'running') throw new AgentError('INVALID_STATE');
+    if (run.firewallInstalled !== true) {
+      throw new AgentError('NETWORK_FAULT_UNSUPPORTED');
+    }
+    const profile = message.payload.profile;
+    if (profile === 'turn-relay-range') {
+      throw new AgentError('NETWORK_FAULT_REQUIRES_SERVICE');
+    }
+    if (run.activeNetworkFault !== null && run.activeNetworkFault !== profile) {
+      throw new AgentError('NETWORK_FAULT_ACTIVE');
+    }
+    const changed = run.activeNetworkFault === null;
+    const fault = changed
+      ? await dependencies.applyNetworkFault(config, run, profile)
+      : await dependencies.inspectNetworkFault(config, run, profile, true);
+    if (
+      fault?.profile !== profile ||
+      fault.scope !== 'client-egress' ||
+      fault.active !== true ||
+      !matchesFirewallNetworkFaultRuleEvidence(fault, profile)
+    ) {
+      throw new AgentError('NETWORK_FAULT_APPLY_UNPROVEN');
+    }
+    const ruleEvidence = firewallRuleEvidenceForNetworkFault(profile);
+    run.activeNetworkFault = profile;
+    emit(run, 'network.fault.apply', message.payload);
+    return {
+      networkFault: Object.freeze({
+        profile,
+        scope: 'client-egress',
+        active: true,
+        changed,
+        enabledRuleIds: ruleEvidence.enabledRuleIds,
+        disabledRuleIds: ruleEvidence.disabledRuleIds,
+      }),
+    };
+  };
+
+  const clearNetworkFaultCommand = async (run, message) => {
+    if (run.state !== 'running') throw new AgentError('INVALID_STATE');
+    if (run.firewallInstalled !== true) {
+      throw new AgentError('NETWORK_FAULT_UNSUPPORTED');
+    }
+    const profile = message.payload.profile;
+    if (profile === 'turn-relay-range') {
+      throw new AgentError('NETWORK_FAULT_REQUIRES_SERVICE');
+    }
+    if (run.activeNetworkFault !== null && run.activeNetworkFault !== profile) {
+      throw new AgentError('NETWORK_FAULT_ACTIVE');
+    }
+    const changed = run.activeNetworkFault === profile;
+    const fault = changed
+      ? await dependencies.clearNetworkFault(config, run, profile)
+      : await dependencies.inspectNetworkFault(config, run, profile, false);
+    if (
+      fault?.profile !== profile ||
+      fault.scope !== 'client-egress' ||
+      fault.active !== false ||
+      !matchesFirewallNetworkFaultRuleEvidence(fault)
+    ) {
+      throw new AgentError('NETWORK_FAULT_CLEAR_UNPROVEN');
+    }
+    const ruleEvidence = firewallRuleEvidenceForNetworkFault();
+    run.activeNetworkFault = null;
+    emit(run, 'network.fault.clear', message.payload);
+    return {
+      networkFault: Object.freeze({
+        profile,
+        scope: 'client-egress',
+        active: false,
+        changed,
+        enabledRuleIds: ruleEvidence.enabledRuleIds,
+        disabledRuleIds: ruleEvidence.disabledRuleIds,
+      }),
+    };
+  };
+
   const stopRun = async (run) => {
     if (run.state !== 'running') throw new AgentError('INVALID_STATE');
     await captureEvidence(run);
@@ -1035,6 +1200,7 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
         events: [],
         eventSequence: 0,
         commandSequence: 0,
+        commandFlight: Promise.resolve(),
         lastEventMonotonicMs: -1,
         lastCommandMonotonicMs: -1,
         children: [],
@@ -1053,6 +1219,7 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
         firewallRequest: null,
         firewallState: null,
         firewallStatus: null,
+        activeNetworkFault: null,
       };
       runs.set(run.id, run);
       activeRunId = run.id;
@@ -1084,30 +1251,40 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
       }
       const run = runs.get(message.runId);
       if (run === undefined) throw new AgentError('RUN_NOT_FOUND');
-      validateCommandClock(run, message);
-      try {
-        switch (message.type) {
-          case 'run.prepare':
-            return await prepareRun(run, message, request.context);
-          case 'run.start':
-            if (request.context !== undefined)
-              throw new AgentError('INVALID_REQUEST');
-            return await startRun(run, message);
-          case 'run.stop':
-            if (request.context !== undefined)
-              throw new AgentError('INVALID_REQUEST');
-            return await stopRun(run);
-          case 'run.cancel':
-            if (request.context !== undefined)
-              throw new AgentError('INVALID_REQUEST');
-            return await cancelRun(run, message);
-          default:
-            throw new AgentError('INVALID_COMMAND');
+      return enqueueRunCommand(run, async () => {
+        validateCommandClock(run, message);
+        try {
+          switch (message.type) {
+            case 'run.prepare':
+              return await prepareRun(run, message, request.context);
+            case 'run.start':
+              if (request.context !== undefined)
+                throw new AgentError('INVALID_REQUEST');
+              return await startRun(run, message);
+            case 'network.fault.apply':
+              if (request.context !== undefined)
+                throw new AgentError('INVALID_REQUEST');
+              return await applyNetworkFaultCommand(run, message);
+            case 'network.fault.clear':
+              if (request.context !== undefined)
+                throw new AgentError('INVALID_REQUEST');
+              return await clearNetworkFaultCommand(run, message);
+            case 'run.stop':
+              if (request.context !== undefined)
+                throw new AgentError('INVALID_REQUEST');
+              return await stopRun(run);
+            case 'run.cancel':
+              if (request.context !== undefined)
+                throw new AgentError('INVALID_REQUEST');
+              return await cancelRun(run, message);
+            default:
+              throw new AgentError('INVALID_COMMAND');
+          }
+        } catch (error) {
+          await failRun(run, error);
+          throw new AgentError(safeFailureCode(error));
         }
-      } catch (error) {
-        await failRun(run, error);
-        throw new AgentError(safeFailureCode(error));
-      }
+      });
     },
     poll(request) {
       exactKeys(request, ['authorization', 'runId', 'after']);
@@ -1120,17 +1297,19 @@ export function createAgentRuntime(config, dependencyOverrides = {}) {
       if (activeRunId === null) return;
       const run = runs.get(activeRunId);
       if (run !== undefined) {
-        await cancelRun(
-          run,
-          parseAcceptanceEnvelope({
-            version: 1,
-            type: 'run.cancel',
-            runId: run.id,
-            sequence: run.commandSequence + 1,
-            wallClockMs: dependencies.now(),
-            monotonicMs: dependencies.monotonicNow(),
-            payload: { reason: 'agent shutdown' },
-          }),
+        await enqueueRunCommand(run, () =>
+          cancelRun(
+            run,
+            parseAcceptanceEnvelope({
+              version: 1,
+              type: 'run.cancel',
+              runId: run.id,
+              sequence: run.commandSequence + 1,
+              wallClockMs: dependencies.now(),
+              monotonicMs: dependencies.monotonicNow(),
+              payload: { reason: 'agent shutdown' },
+            }),
+          ),
         );
       }
     },

@@ -1,6 +1,8 @@
 import { isIP } from 'node:net';
 import { resolve } from 'node:path';
 
+import { ACCEPTANCE_NETWORK_FAULT_PROFILES } from './protocol.mjs';
+
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const FIREWALL_CONFIGURATION_FIELDS = Object.freeze([
   'turnAddress',
@@ -23,13 +25,23 @@ export const FIREWALL_RULE_IDS = Object.freeze([
   'turn-relay',
 ]);
 
-function hasExactFirewallRuleIds(value) {
+const NETWORK_FAULT_RULE_IDS = Object.freeze({
+  'udp-all': Object.freeze(['dns-udp', 'turn-udp', 'turn-relay']),
+  'turn-3478': Object.freeze(['turn-udp', 'turn-tcp']),
+  'turn-tls-5349': Object.freeze(['turn-tls']),
+});
+
+function hasExactRuleIds(actual, expected) {
   return (
-    Array.isArray(value) &&
-    value.length === FIREWALL_RULE_IDS.length &&
-    new Set(value).size === FIREWALL_RULE_IDS.length &&
-    FIREWALL_RULE_IDS.every((ruleId) => value.includes(ruleId))
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    new Set(actual).size === expected.length &&
+    expected.every((ruleId) => actual.includes(ruleId))
   );
+}
+
+function hasExactFirewallRuleIds(value) {
+  return hasExactRuleIds(value, FIREWALL_RULE_IDS);
 }
 
 export class FirewallPolicyError extends Error {
@@ -39,6 +51,36 @@ export class FirewallPolicyError extends Error {
     this.code = code;
     this.detail = detail;
   }
+}
+
+export function firewallRuleIdsForNetworkFault(profile) {
+  if (!ACCEPTANCE_NETWORK_FAULT_PROFILES.includes(profile)) {
+    throw new FirewallPolicyError('INVALID_NETWORK_FAULT_PROFILE');
+  }
+  const ruleIds = NETWORK_FAULT_RULE_IDS[profile];
+  if (ruleIds === undefined) {
+    throw new FirewallPolicyError('NETWORK_FAULT_REQUIRES_SERVICE');
+  }
+  return ruleIds;
+}
+
+export function firewallRuleEvidenceForNetworkFault(profile = null) {
+  const disabledRuleIds =
+    profile === null ? [] : firewallRuleIdsForNetworkFault(profile);
+  return Object.freeze({
+    enabledRuleIds: Object.freeze(
+      FIREWALL_RULE_IDS.filter((ruleId) => !disabledRuleIds.includes(ruleId)),
+    ),
+    disabledRuleIds: Object.freeze([...disabledRuleIds]),
+  });
+}
+
+export function matchesFirewallNetworkFaultRuleEvidence(value, profile = null) {
+  const expected = firewallRuleEvidenceForNetworkFault(profile);
+  return (
+    hasExactRuleIds(value?.enabledRuleIds, expected.enabledRuleIds) &&
+    hasExactRuleIds(value?.disabledRuleIds, expected.disabledRuleIds)
+  );
 }
 
 function safePort(value, name) {
@@ -134,9 +176,24 @@ export function validateFirewallRequest(value) {
   });
 }
 
-export function buildFirewallInvocation(repositoryRoot, input, action) {
+export function buildFirewallInvocation(
+  repositoryRoot,
+  input,
+  action,
+  faultProfile,
+) {
   const request = validateFirewallRequest(input);
-  if (!['install', 'remove', 'status'].includes(action)) {
+  const faultAction = action === 'fault-apply' || action === 'fault-clear';
+  if (
+    !['install', 'remove', 'status', 'fault-apply', 'fault-clear'].includes(
+      action,
+    )
+  ) {
+    throw new FirewallPolicyError('INVALID_FIREWALL_ACTION');
+  }
+  if (faultAction) {
+    firewallRuleIdsForNetworkFault(faultProfile);
+  } else if (faultProfile !== undefined) {
     throw new FirewallPolicyError('INVALID_FIREWALL_ACTION');
   }
   if (request.platform === 'win32') {
@@ -172,6 +229,7 @@ export function buildFirewallInvocation(repositoryRoot, input, action) {
         request.desktopExecutable,
         '-StateFile',
         request.stateFile,
+        ...(faultAction ? ['-FaultProfile', faultProfile] : []),
       ]),
       shell: false,
     });
@@ -191,9 +249,39 @@ export function buildFirewallInvocation(repositoryRoot, input, action) {
       String(request.controllerPort),
       request.desktopExecutable,
       request.stateFile,
+      ...(faultAction ? [faultProfile] : []),
     ]),
     shell: false,
   });
+}
+
+export function verifyFirewallNetworkFaultEvidence(value, profile = null) {
+  const failures = [];
+  const expectedRules = firewallRuleEvidenceForNetworkFault(profile);
+  if (value?.elevated !== true) failures.push('NOT_ELEVATED');
+  if (
+    !['win32', 'darwin'].includes(value?.platform) ||
+    !matchesFirewallNetworkFaultRuleEvidence(
+      {
+        enabledRuleIds: value?.enabledRules,
+        disabledRuleIds: value?.disabledRules,
+      },
+      profile,
+    )
+  ) {
+    failures.push('FAULT_RULE_STATUS_MISMATCH');
+  }
+  const expectedRuleCount =
+    value?.platform === 'darwin'
+      ? expectedRules.enabledRuleIds.length + 1
+      : FIREWALL_RULE_IDS.length;
+  if (value?.ruleCount !== expectedRuleCount) {
+    failures.push('FAULT_RULE_COUNT_MISMATCH');
+  }
+  if (value?.defaultBlockInstalled !== true) {
+    failures.push('DEFAULT_BLOCK_NOT_INSTALLED');
+  }
+  return Object.freeze({ pass: failures.length === 0, failures });
 }
 
 export function verifyFirewallInstallEvidence(value) {

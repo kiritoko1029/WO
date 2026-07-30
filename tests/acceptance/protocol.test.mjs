@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  ACCEPTANCE_NETWORK_FAULT_PROFILES,
   AcceptanceProtocolError,
   createAcceptanceSession,
   parseAcceptanceEnvelope,
@@ -140,6 +141,66 @@ describe('acceptance controller/agent protocol', () => {
     expect(() => guard.assertHeartbeat()).toThrow(
       expect.objectContaining({ code: 'HEARTBEAT_LOST' }),
     );
+  });
+
+  test('accepts only fixed network fault profiles while a run is active', () => {
+    const guard = session();
+    guard.accept(
+      envelope('agent.register', 1, {
+        agentId: 'win-a',
+        platform: 'win32',
+        architecture: 'x64',
+      }),
+      token,
+    );
+    guard.accept(
+      envelope('capability.report', 2, {
+        screenSources: ['window'],
+        canInstallFirewall: true,
+        canVerifySignature: true,
+      }),
+      token,
+    );
+    guard.accept(
+      envelope('run.prepare', 3, {
+        packageSha256: 'a'.repeat(64),
+        source: 'window',
+        path: 'relay',
+      }),
+      token,
+    );
+    guard.accept(envelope('run.start', 4, { durationMs: 45_000 }), token);
+    guard.accept(
+      envelope('network.fault.apply', 5, { profile: 'udp-all' }),
+      token,
+    );
+    guard.accept(
+      envelope('network.fault.clear', 6, { profile: 'udp-all' }),
+      token,
+    );
+    expect(guard.getSnapshot()).toMatchObject({
+      state: 'running',
+      sequence: 6,
+    });
+    expect(ACCEPTANCE_NETWORK_FAULT_PROFILES).toEqual([
+      'udp-all',
+      'turn-3478',
+      'turn-tls-5349',
+      'turn-relay-range',
+    ]);
+    expect(() =>
+      parseAcceptanceEnvelope(
+        envelope('network.fault.apply', 1, { profile: 'all' }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_PAYLOAD' }));
+    expect(() =>
+      parseAcceptanceEnvelope(
+        envelope('network.fault.clear', 1, {
+          profile: 'udp-all',
+          force: true,
+        }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_PAYLOAD' }));
   });
 
   test.each([

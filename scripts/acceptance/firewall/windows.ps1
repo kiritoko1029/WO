@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory = $true)][ValidateSet('install', 'remove', 'status')][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet('install', 'remove', 'status', 'fault-apply', 'fault-clear')][string]$Action,
   [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')][string]$RunId,
   [Parameter(Mandatory = $true)][System.Net.IPAddress]$TurnAddress,
   [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$TurnUdpPort,
@@ -10,12 +10,28 @@ param(
   [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ControllerPort,
   [Parameter(Mandatory = $true)][string]$DesktopExecutable,
   [Parameter(Mandatory = $true)][string]$StateFile,
+  [ValidateSet('', 'udp-all', 'turn-3478', 'turn-tls-5349', 'turn-relay-range')][string]$FaultProfile = '',
   [ValidateRange(60, 3600)][int]$WatchdogSeconds = 900
 )
 
 $ErrorActionPreference = 'Stop'
 $prefix = "WO-Acceptance-$RunId"
 $ruleIds = @('dns-udp', 'dns-tcp', 'https', 'controller', 'turn-udp', 'turn-tcp', 'turn-tls', 'turn-relay')
+$faultRuleIds = @{
+  'udp-all' = @('dns-udp', 'turn-udp', 'turn-relay')
+  'turn-3478' = @('turn-udp', 'turn-tcp')
+  'turn-tls-5349' = @('turn-tls')
+}
+$faultAction = $Action -eq 'fault-apply' -or $Action -eq 'fault-clear'
+if ($faultAction -and $FaultProfile -eq 'turn-relay-range') {
+  throw 'NETWORK_FAULT_REQUIRES_SERVICE'
+}
+if ($faultAction -and -not $faultRuleIds.ContainsKey($FaultProfile)) {
+  throw 'INVALID_NETWORK_FAULT_PROFILE'
+}
+if (-not $faultAction -and $FaultProfile -ne '') {
+  throw 'INVALID_NETWORK_FAULT_PROFILE'
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -41,14 +57,18 @@ function Get-PolicySnapshot {
 }
 
 function Get-RuleStatus {
-  $installedRules = @(Get-NetFirewallRule -DisplayName "$prefix-*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName)
-  $installedRuleIds = @($installedRules | ForEach-Object { $_.Substring($prefix.Length + 1) })
+  $installedRules = @(Get-NetFirewallRule -DisplayName "$prefix-*" -ErrorAction SilentlyContinue)
+  $installedRuleIds = @($installedRules | ForEach-Object { $_.DisplayName.Substring($prefix.Length + 1) })
+  $enabledRuleIds = @($installedRules | Where-Object { [string]$_.Enabled -eq 'True' } | ForEach-Object { $_.DisplayName.Substring($prefix.Length + 1) })
+  $disabledRuleIds = @($installedRules | Where-Object { [string]$_.Enabled -ne 'True' } | ForEach-Object { $_.DisplayName.Substring($prefix.Length + 1) })
   $profiles = @(Get-NetFirewallProfile -Profile Domain,Private,Public)
   $blockedProfiles = @($profiles | Where-Object { [string]$_.DefaultOutboundAction -eq 'Block' })
   return @{
     runId = $RunId
     elevated = $true
     installedRuleIds = $installedRuleIds
+    enabledRuleIds = $enabledRuleIds
+    disabledRuleIds = $disabledRuleIds
     ruleCount = $installedRules.Count
     defaultBlockInstalled = ($profiles.Count -eq 3 -and $blockedProfiles.Count -eq 3)
   }
@@ -72,7 +92,7 @@ if ($Action -eq 'install') {
   $quotedWatchdogScriptPath = & $quote $watchdogScriptPath
   $watchdogCommand = "Start-Sleep -Seconds $WatchdogSeconds; if (Test-Path -LiteralPath '$(& $quote $StateFile)') { & '$quotedWatchdogScriptPath' -Action remove -RunId '$RunId' -TurnAddress '$($TurnAddress.IPAddressToString)' -TurnUdpPort $TurnUdpPort -TurnTlsPort $TurnTlsPort -TurnRelayMinPort $TurnRelayMinPort -TurnRelayMaxPort $TurnRelayMaxPort -ControllerAddress '$($ControllerAddress.IPAddressToString)' -ControllerPort $ControllerPort -DesktopExecutable '$(& $quote $DesktopExecutable)' -StateFile '$(& $quote $StateFile)' }"
   $encodedWatchdog = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchdogCommand))
-  $watchdog = Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedWatchdog) -WindowStyle Hidden -PassThru
+  $watchdog = Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-EncodedCommand', $encodedWatchdog) -WindowStyle Hidden -PassThru
   $state = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
   $state.watchdogArmed = $true
   $state.watchdogPid = $watchdog.Id
@@ -111,6 +131,21 @@ if ($Action -eq 'install') {
 if (-not (Test-Path -LiteralPath $StateFile)) { throw 'FIREWALL_STATE_MISSING' }
 $state = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
 if ($state.runId -ne $RunId) { throw 'FIREWALL_RUN_MISMATCH' }
+if ($faultAction) {
+  if ($Action -eq 'fault-apply') {
+    foreach ($ruleId in $faultRuleIds[$FaultProfile]) {
+      Get-NetFirewallRule -DisplayName "$prefix-$ruleId" -ErrorAction Stop |
+        Disable-NetFirewallRule | Out-Null
+    }
+  } else {
+    foreach ($ruleId in $ruleIds) {
+      Get-NetFirewallRule -DisplayName "$prefix-$ruleId" -ErrorAction Stop |
+        Enable-NetFirewallRule | Out-Null
+    }
+  }
+  Get-RuleStatus | ConvertTo-Json -Depth 4 -Compress
+  exit 0
+}
 if ($Action -eq 'remove') {
   if ($null -ne $state.watchdogPid -and [int]$state.watchdogPid -ne $PID) {
     Stop-Process -Id ([int]$state.watchdogPid) -Force -ErrorAction SilentlyContinue

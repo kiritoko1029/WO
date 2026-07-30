@@ -24,6 +24,11 @@ import {
   createAgentRuntime,
   parseAgentCli,
 } from '../../scripts/acceptance/agent.mjs';
+import {
+  FIREWALL_RULE_IDS,
+  firewallRuleEvidenceForNetworkFault,
+  firewallRuleIdsForNetworkFault,
+} from '../../scripts/acceptance/firewall-policy.mjs';
 
 const hash = 'a'.repeat(64);
 const otherHash = 'b'.repeat(64);
@@ -120,6 +125,19 @@ function agentConfiguration(directory, overrides = {}) {
   };
 }
 
+function networkFaultDependencyResult(profile, active) {
+  const ruleEvidence = firewallRuleEvidenceForNetworkFault(
+    active ? profile : null,
+  );
+  return {
+    profile,
+    scope: 'client-egress',
+    active,
+    enabledRuleIds: ruleEvidence.enabledRuleIds,
+    disabledRuleIds: ruleEvidence.disabledRuleIds,
+  };
+}
+
 function runtimeDependencies(overrides = {}) {
   const child = {
     pid: 123,
@@ -138,9 +156,47 @@ function runtimeDependencies(overrides = {}) {
     spawnTracked: vi.fn(() => ({ ...child, stop: vi.fn(child.stop) })),
     installFirewall: vi.fn(async () => ({ installed: true })),
     removeFirewall: vi.fn(async () => ({ pass: true })),
+    applyNetworkFault: vi.fn(async (_config, _run, profile) =>
+      networkFaultDependencyResult(profile, true),
+    ),
+    clearNetworkFault: vi.fn(async (_config, _run, profile) =>
+      networkFaultDependencyResult(profile, false),
+    ),
+    inspectNetworkFault: vi.fn(async (_config, _run, profile, active) =>
+      networkFaultDependencyResult(profile, active),
+    ),
     readEvidence: vi.fn(async () => ({ samples: [], bitrateEvents: [] })),
     ...overrides,
   };
+}
+
+async function startRunningRelayRuntime(dependencies) {
+  const directory = await temporaryDirectory();
+  const runtime = createAgentRuntime(
+    agentConfiguration(directory),
+    dependencies,
+  );
+  await runtime.register({
+    authorization: authorization(),
+    runId: 'run-1',
+  });
+  await runtime.command({
+    authorization: authorization(),
+    message: command('run.prepare', 1, {
+      packageSha256: hash,
+      source: 'monitor',
+      path: 'relay',
+    }),
+    context: {
+      role: 'publisher',
+      serverUrl: 'https://rtc.example.test',
+    },
+  });
+  await runtime.command({
+    authorization: authorization(),
+    message: command('run.start', 2, { durationMs: 45_000 }),
+  });
+  return runtime;
 }
 
 function deferred() {
@@ -151,7 +207,7 @@ function deferred() {
   return { promise, resolve: resolvePromise };
 }
 
-function mockAgentRequest(clock, calls) {
+function mockAgentRequest(clock, calls, commands = [], options = {}) {
   let eventSequence = 0;
   const event = (type, payload) => ({
     version: 1,
@@ -194,11 +250,42 @@ function mockAgentRequest(clock, calls) {
           };
         } else if (url.pathname === '/v1/command') {
           const commandBody = JSON.parse(requestBody);
+          commands.push(commandBody.message);
           if (commandBody.message.type === 'run.prepare') {
             body = {
               packageSha256: hash,
               signatureVerified: true,
               events: [event('run.prepare', commandBody.message.payload)],
+            };
+          } else if (
+            commandBody.message.type === 'network.fault.apply' ||
+            commandBody.message.type === 'network.fault.clear'
+          ) {
+            const active = commandBody.message.type === 'network.fault.apply';
+            const disabledRuleIds = active
+              ? firewallRuleIdsForNetworkFault(
+                  commandBody.message.payload.profile,
+                )
+              : [];
+            const networkFault = {
+              profile: commandBody.message.payload.profile,
+              scope: 'client-egress',
+              active,
+              changed: true,
+              enabledRuleIds: FIREWALL_RULE_IDS.filter(
+                (ruleId) => !disabledRuleIds.includes(ruleId),
+              ),
+              disabledRuleIds,
+            };
+            body = {
+              networkFault:
+                options.transformNetworkFault?.(
+                  networkFault,
+                  commandBody.message,
+                ) ?? networkFault,
+              events: [
+                event(commandBody.message.type, commandBody.message.payload),
+              ],
             };
           } else {
             body = {
@@ -503,6 +590,306 @@ describe('agent fail-closed lifecycle', () => {
     expect(dependencies.removeFirewall).toHaveBeenCalledTimes(1);
   });
 
+  test('applies and clears one running client-egress fault idempotently', async () => {
+    const directory = await temporaryDirectory();
+    const dependencies = runtimeDependencies();
+    const runtime = createAgentRuntime(
+      agentConfiguration(directory),
+      dependencies,
+    );
+    await runtime.register({
+      authorization: authorization(),
+      runId: 'run-1',
+    });
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.prepare', 1, {
+        packageSha256: hash,
+        source: 'monitor',
+        path: 'relay',
+      }),
+      context: {
+        role: 'publisher',
+        serverUrl: 'https://rtc.example.test',
+      },
+    });
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.start', 2, { durationMs: 45_000 }),
+    });
+
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('network.fault.apply', 3, {
+          profile: 'turn-3478',
+        }),
+      }),
+    ).resolves.toMatchObject({
+      networkFault: {
+        profile: 'turn-3478',
+        scope: 'client-egress',
+        active: true,
+        changed: true,
+        disabledRuleIds: ['turn-udp', 'turn-tcp'],
+      },
+    });
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('network.fault.apply', 4, {
+          profile: 'turn-3478',
+        }),
+      }),
+    ).resolves.toMatchObject({
+      networkFault: { active: true, changed: false },
+    });
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('network.fault.clear', 5, {
+          profile: 'turn-3478',
+        }),
+      }),
+    ).resolves.toMatchObject({
+      networkFault: {
+        active: false,
+        changed: true,
+        disabledRuleIds: [],
+      },
+    });
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('network.fault.clear', 6, {
+          profile: 'turn-3478',
+        }),
+      }),
+    ).resolves.toMatchObject({
+      networkFault: { active: false, changed: false },
+    });
+
+    expect(dependencies.applyNetworkFault).toHaveBeenCalledTimes(1);
+    expect(dependencies.clearNetworkFault).toHaveBeenCalledTimes(1);
+    expect(dependencies.inspectNetworkFault).toHaveBeenCalledTimes(2);
+    expect(
+      runtime
+        .poll({
+          authorization: authorization(),
+          runId: 'run-1',
+          after: 0,
+        })
+        .events.filter((event) => event.type.startsWith('network.fault.'))
+        .map((event) => event.type),
+    ).toEqual([
+      'network.fault.apply',
+      'network.fault.apply',
+      'network.fault.clear',
+      'network.fault.clear',
+    ]);
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.cancel', 7, { reason: 'test complete' }),
+    });
+  });
+
+  test('rejects profile-inconsistent dependency evidence for apply and clear', async () => {
+    const wrongRuleEvidence = {
+      enabledRuleIds: FIREWALL_RULE_IDS.filter(
+        (ruleId) => ruleId !== 'turn-tls',
+      ),
+      disabledRuleIds: ['turn-tls'],
+    };
+    const applyDependencies = runtimeDependencies({
+      applyNetworkFault: vi.fn(async (_config, _run, profile) => ({
+        ...networkFaultDependencyResult(profile, true),
+        ...wrongRuleEvidence,
+      })),
+    });
+    const applyRuntime = await startRunningRelayRuntime(applyDependencies);
+    await expect(
+      applyRuntime.command({
+        authorization: authorization(),
+        message: command('network.fault.apply', 3, {
+          profile: 'turn-3478',
+        }),
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'NETWORK_FAULT_APPLY_UNPROVEN' }),
+    );
+
+    const clearDependencies = runtimeDependencies({
+      clearNetworkFault: vi.fn(async (_config, _run, profile) => ({
+        ...networkFaultDependencyResult(profile, false),
+        enabledRuleIds: FIREWALL_RULE_IDS.slice(0, -1),
+      })),
+    });
+    const clearRuntime = await startRunningRelayRuntime(clearDependencies);
+    await clearRuntime.command({
+      authorization: authorization(),
+      message: command('network.fault.apply', 3, {
+        profile: 'turn-3478',
+      }),
+    });
+    await expect(
+      clearRuntime.command({
+        authorization: authorization(),
+        message: command('network.fault.clear', 4, {
+          profile: 'turn-3478',
+        }),
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'NETWORK_FAULT_CLEAR_UNPROVEN' }),
+    );
+  });
+
+  test('serializes concurrent network fault apply and clear commands', async () => {
+    const applyStarted = deferred();
+    const releaseApply = deferred();
+    const transitions = [];
+    const dependencies = runtimeDependencies({
+      applyNetworkFault: vi.fn(async (_config, _run, profile) => {
+        transitions.push('apply:start');
+        applyStarted.resolve();
+        await releaseApply.promise;
+        transitions.push('apply:end');
+        return networkFaultDependencyResult(profile, true);
+      }),
+      clearNetworkFault: vi.fn(async (_config, _run, profile) => {
+        transitions.push('clear');
+        return networkFaultDependencyResult(profile, false);
+      }),
+    });
+    const runtime = await startRunningRelayRuntime(dependencies);
+    const applying = runtime.command({
+      authorization: authorization(),
+      message: command('network.fault.apply', 3, {
+        profile: 'turn-3478',
+      }),
+    });
+    await applyStarted.promise;
+    const clearing = runtime.command({
+      authorization: authorization(),
+      message: command('network.fault.clear', 4, {
+        profile: 'turn-3478',
+      }),
+    });
+
+    await Promise.resolve();
+    expect(dependencies.clearNetworkFault).not.toHaveBeenCalled();
+    releaseApply.resolve();
+    await expect(Promise.all([applying, clearing])).resolves.toEqual([
+      expect.objectContaining({
+        networkFault: expect.objectContaining({ active: true, changed: true }),
+      }),
+      expect.objectContaining({
+        networkFault: expect.objectContaining({ active: false, changed: true }),
+      }),
+    ]);
+    expect(transitions).toEqual(['apply:start', 'apply:end', 'clear']);
+    expect(
+      runtime
+        .poll({
+          authorization: authorization(),
+          runId: 'run-1',
+          after: 0,
+        })
+        .events.filter((event) => event.type.startsWith('network.fault.'))
+        .map((event) => event.type),
+    ).toEqual(['network.fault.apply', 'network.fault.clear']);
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.cancel', 5, { reason: 'test complete' }),
+    });
+  });
+
+  test('waits for a network fault transition before stopping the run', async () => {
+    const applyStarted = deferred();
+    const releaseApply = deferred();
+    const dependencies = runtimeDependencies({
+      applyNetworkFault: vi.fn(async (_config, _run, profile) => {
+        applyStarted.resolve();
+        await releaseApply.promise;
+        return networkFaultDependencyResult(profile, true);
+      }),
+    });
+    const runtime = await startRunningRelayRuntime(dependencies);
+    const applying = runtime.command({
+      authorization: authorization(),
+      message: command('network.fault.apply', 3, {
+        profile: 'turn-3478',
+      }),
+    });
+    await applyStarted.promise;
+    const stopping = runtime.command({
+      authorization: authorization(),
+      message: command('run.stop', 4, {}),
+    });
+
+    await Promise.resolve();
+    expect(dependencies.removeFirewall).not.toHaveBeenCalled();
+    releaseApply.resolve();
+    await applying;
+    await expect(stopping).resolves.toMatchObject({
+      cleanup: { restoredFirewall: true, childrenStopped: true },
+    });
+    const eventTypes = runtime
+      .poll({
+        authorization: authorization(),
+        runId: 'run-1',
+        after: 0,
+      })
+      .events.map((event) => event.type);
+    expect(eventTypes.indexOf('network.fault.apply')).toBeLessThan(
+      eventTypes.indexOf('run.stop'),
+    );
+    expect(eventTypes.indexOf('run.stop')).toBeLessThan(
+      eventTypes.indexOf('cleanup.ack'),
+    );
+  });
+
+  test('fails closed when client agents are asked to block the relay range', async () => {
+    const directory = await temporaryDirectory();
+    const dependencies = runtimeDependencies();
+    const runtime = createAgentRuntime(
+      agentConfiguration(directory),
+      dependencies,
+    );
+    await runtime.register({
+      authorization: authorization(),
+      runId: 'run-1',
+    });
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.prepare', 1, {
+        packageSha256: hash,
+        source: 'monitor',
+        path: 'relay',
+      }),
+      context: {
+        role: 'publisher',
+        serverUrl: 'https://rtc.example.test',
+      },
+    });
+    await runtime.command({
+      authorization: authorization(),
+      message: command('run.start', 2, { durationMs: 45_000 }),
+    });
+
+    await expect(
+      runtime.command({
+        authorization: authorization(),
+        message: command('network.fault.apply', 3, {
+          profile: 'turn-relay-range',
+        }),
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'NETWORK_FAULT_REQUIRES_SERVICE' }),
+    );
+    expect(dependencies.applyNetworkFault).not.toHaveBeenCalled();
+    expect(dependencies.removeFirewall).toHaveBeenCalledTimes(1);
+  });
+
   test('keeps the single-run lock until manifest hashing and cleanup acknowledgement finish', async () => {
     const directory = await temporaryDirectory();
     const manifestHash = deferred();
@@ -757,6 +1144,136 @@ describe('agent fail-closed lifecycle', () => {
 });
 
 describe('controller coordination', () => {
+  test('issues strict apply and clear commands and validates OS evidence', async () => {
+    const clock = { value: 10_000 };
+    const requests = [];
+    const commands = [];
+    const client = createHttpsAgentClient({
+      baseUrl: new URL('https://publisher.example.test:9443'),
+      ca: 'test-ca',
+      token: 'short-lived-secret',
+      requestImpl: mockAgentRequest(clock, requests, commands),
+      now: () => clock.value,
+    });
+    await client.connect('run-1');
+    await client.prepare({
+      packageSha256: hash,
+      source: 'monitor',
+      path: 'relay',
+      role: 'publisher',
+      serverUrl: 'https://rtc.example.test/',
+    });
+    await client.start(45_000);
+
+    await expect(client.applyNetworkFault('turn-3478')).resolves.toMatchObject({
+      profile: 'turn-3478',
+      scope: 'client-egress',
+      active: true,
+      disabledRuleIds: ['turn-udp', 'turn-tcp'],
+    });
+    await expect(client.clearNetworkFault('turn-3478')).resolves.toMatchObject({
+      profile: 'turn-3478',
+      active: false,
+      disabledRuleIds: [],
+    });
+    expect(commands.map(({ type }) => type)).toEqual([
+      'run.prepare',
+      'run.start',
+      'network.fault.apply',
+      'network.fault.clear',
+    ]);
+    expect(commands.at(-2)?.payload).toEqual({ profile: 'turn-3478' });
+    expect(commands.at(-1)?.payload).toEqual({ profile: 'turn-3478' });
+  });
+
+  test('rejects valid-looking rule IDs that do not match the fault profile', async () => {
+    const clock = { value: 10_000 };
+    const requests = [];
+    const client = createHttpsAgentClient({
+      baseUrl: new URL('https://publisher.example.test:9443'),
+      ca: 'test-ca',
+      token: 'short-lived-secret',
+      requestImpl: mockAgentRequest(clock, requests, [], {
+        transformNetworkFault: (networkFault) => ({
+          ...networkFault,
+          enabledRuleIds: FIREWALL_RULE_IDS.filter(
+            (ruleId) => ruleId !== 'turn-tls',
+          ),
+          disabledRuleIds: ['turn-tls'],
+        }),
+      }),
+      now: () => clock.value,
+    });
+    await client.connect('run-1');
+    await client.prepare({
+      packageSha256: hash,
+      source: 'monitor',
+      path: 'relay',
+      role: 'publisher',
+      serverUrl: 'https://rtc.example.test/',
+    });
+    await client.start(45_000);
+
+    await expect(client.applyNetworkFault('turn-3478')).rejects.toEqual(
+      expect.objectContaining({ code: 'INVALID_AGENT_RESPONSE' }),
+    );
+  });
+
+  test('serializes concurrent controller commands before assigning sequences', async () => {
+    const clock = { value: 10_000 };
+    const requests = [];
+    const commands = [];
+    const releaseApply = deferred();
+    let commandRequests = 0;
+    const baseRequest = mockAgentRequest(clock, requests, commands);
+    const requestImpl = (url, options, callback) => {
+      const request = baseRequest(url, options, callback);
+      if (url.pathname === '/v1/command') {
+        commandRequests += 1;
+        if (commandRequests === 3) {
+          const end = request.end;
+          request.end = () => {
+            void releaseApply.promise.then(() => end());
+          };
+        }
+      }
+      return request;
+    };
+    const client = createHttpsAgentClient({
+      baseUrl: new URL('https://publisher.example.test:9443'),
+      ca: 'test-ca',
+      token: 'short-lived-secret',
+      requestImpl,
+      now: () => clock.value,
+    });
+    await client.connect('run-1');
+    await client.prepare({
+      packageSha256: hash,
+      source: 'monitor',
+      path: 'relay',
+      role: 'publisher',
+      serverUrl: 'https://rtc.example.test/',
+    });
+    await client.start(45_000);
+
+    const applying = client.applyNetworkFault('turn-3478');
+    const clearing = client.clearNetworkFault('turn-3478');
+    await vi.waitFor(() => expect(commandRequests).toBe(3));
+    expect(commands.map(({ type }) => type)).toEqual([
+      'run.prepare',
+      'run.start',
+    ]);
+    releaseApply.resolve();
+    await expect(Promise.all([applying, clearing])).resolves.toHaveLength(2);
+    expect(commands.map(({ type }) => type)).toEqual([
+      'run.prepare',
+      'run.start',
+      'network.fault.apply',
+      'network.fault.clear',
+    ]);
+    expect(commands.map(({ sequence }) => sequence)).toEqual([1, 2, 3, 4]);
+  });
+
   test('paces agent event polling to one request per second', async () => {
     const clock = { value: 10_000 };
     const requests = [];

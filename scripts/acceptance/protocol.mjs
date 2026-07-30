@@ -1,11 +1,19 @@
 import { timingSafeEqual } from 'node:crypto';
 
 export const ACCEPTANCE_PROTOCOL_VERSION = 1;
+export const ACCEPTANCE_NETWORK_FAULT_PROFILES = Object.freeze([
+  'udp-all',
+  'turn-3478',
+  'turn-tls-5349',
+  'turn-relay-range',
+]);
 export const ACCEPTANCE_MESSAGE_TYPES = Object.freeze([
   'agent.register',
   'capability.report',
   'run.prepare',
   'run.start',
+  'network.fault.apply',
+  'network.fault.clear',
   'run.sample',
   'run.stop',
   'artifact.manifest',
@@ -16,6 +24,7 @@ export const ACCEPTANCE_MESSAGE_TYPES = Object.freeze([
 ]);
 
 const TYPE_SET = new Set(ACCEPTANCE_MESSAGE_TYPES);
+const NETWORK_FAULT_PROFILE_SET = new Set(ACCEPTANCE_NETWORK_FAULT_PROFILES);
 const BASE_KEYS = Object.freeze([
   'version',
   'type',
@@ -34,6 +43,8 @@ const PAYLOAD_KEYS = Object.freeze({
   ],
   'run.prepare': ['packageSha256', 'source', 'path'],
   'run.start': ['durationMs'],
+  'network.fault.apply': ['profile'],
+  'network.fault.clear': ['profile'],
   'run.sample': ['metrics'],
   'run.stop': [],
   'artifact.manifest': ['files'],
@@ -126,6 +137,12 @@ function validatePayload(type, payload) {
         payload.durationMs < 1_000 ||
         payload.durationMs > 3_600_000
       ) {
+        throw new AcceptanceProtocolError('INVALID_PAYLOAD');
+      }
+      break;
+    case 'network.fault.apply':
+    case 'network.fault.clear':
+      if (!NETWORK_FAULT_PROFILE_SET.has(payload.profile)) {
         throw new AcceptanceProtocolError('INVALID_PAYLOAD');
       }
       break;
@@ -249,6 +266,8 @@ export function createAcceptanceSession(options) {
         break;
       case 'run.sample':
       case 'run.heartbeat':
+      case 'network.fault.apply':
+      case 'network.fault.clear':
         requireState(['running'], message.type);
         if (message.type === 'run.heartbeat') lastHeartbeatAtMs = now();
         break;

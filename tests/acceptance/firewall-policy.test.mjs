@@ -5,11 +5,15 @@ import { describe, expect, test } from 'vitest';
 import {
   buildFirewallInvocation,
   FIREWALL_RULE_IDS,
+  firewallRuleEvidenceForNetworkFault,
+  firewallRuleIdsForNetworkFault,
+  matchesFirewallNetworkFaultRuleEvidence,
   validateFirewallConfiguration,
   validateFirewallRequest,
   verifyFirewallCleanupEvidence,
   verifyFirewallEvidence,
   verifyFirewallInstallEvidence,
+  verifyFirewallNetworkFaultEvidence,
 } from '../../scripts/acceptance/firewall-policy.mjs';
 
 const root = resolve('.');
@@ -51,6 +55,71 @@ describe('acceptance firewall policy', () => {
       expect(JSON.stringify(invocation)).not.toContain('token');
     },
   );
+
+  test.each(['win32', 'darwin'])(
+    'builds shell-free selective fault invocations for %s',
+    (platform) => {
+      const apply = buildFirewallInvocation(
+        root,
+        request(platform),
+        'fault-apply',
+        'turn-3478',
+      );
+      const clear = buildFirewallInvocation(
+        root,
+        request(platform),
+        'fault-clear',
+        'turn-3478',
+      );
+      expect(apply.shell).toBe(false);
+      expect(clear.shell).toBe(false);
+      expect(apply.args).toContain('turn-3478');
+      expect(clear.args).toContain('turn-3478');
+    },
+  );
+
+  test('maps client-egress faults exactly and rejects service-side relay range', () => {
+    expect(firewallRuleIdsForNetworkFault('udp-all')).toEqual([
+      'dns-udp',
+      'turn-udp',
+      'turn-relay',
+    ]);
+    expect(firewallRuleIdsForNetworkFault('turn-3478')).toEqual([
+      'turn-udp',
+      'turn-tcp',
+    ]);
+    expect(firewallRuleIdsForNetworkFault('turn-tls-5349')).toEqual([
+      'turn-tls',
+    ]);
+    expect(() => firewallRuleIdsForNetworkFault('turn-relay-range')).toThrow(
+      expect.objectContaining({ code: 'NETWORK_FAULT_REQUIRES_SERVICE' }),
+    );
+    expect(() =>
+      buildFirewallInvocation(
+        root,
+        request(),
+        'fault-apply',
+        'turn-relay-range',
+      ),
+    ).toThrow(
+      expect.objectContaining({ code: 'NETWORK_FAULT_REQUIRES_SERVICE' }),
+    );
+    expect(firewallRuleEvidenceForNetworkFault('turn-3478')).toEqual({
+      enabledRuleIds: [
+        'dns-udp',
+        'dns-tcp',
+        'https',
+        'controller',
+        'turn-tls',
+        'turn-relay',
+      ],
+      disabledRuleIds: ['turn-udp', 'turn-tcp'],
+    });
+    expect(firewallRuleEvidenceForNetworkFault()).toEqual({
+      enabledRuleIds: FIREWALL_RULE_IDS,
+      disabledRuleIds: [],
+    });
+  });
 
   test.each([
     ['command injection', { runId: 'run; Remove-Item C:\\' }],
@@ -97,14 +166,14 @@ describe('acceptance firewall policy', () => {
       readFile(resolve('scripts/acceptance/firewall/windows.ps1'), 'utf8'),
     ]);
     const relayRule =
-      'pass out quick proto udp from any to $turn_address port $turn_relay_min_port:$turn_relay_max_port label "${label_prefix}turn-relay"';
+      'pass out quick proto udp from any to $turn_address port $turn_relay_min_port:$turn_relay_max_port label \\"${label_prefix}turn-relay\\"';
     expect(macos).toContain(
-      'pass out quick proto tcp from any to $turn_address port $turn_udp_port label "${label_prefix}turn-tcp"',
+      'pass out quick proto tcp from any to $turn_address port $turn_udp_port label \\"${label_prefix}turn-tcp\\"',
     );
     expect(macos).toContain(relayRule);
     expect(macos.indexOf(relayRule)).toBeLessThan(
       macos.indexOf(
-        'block drop out quick proto { tcp udp } from any to any label "${label_prefix}default-block"',
+        'block drop out quick proto { tcp udp } from any to any label \\"${label_prefix}default-block\\"',
       ),
     );
     expect(macos).not.toContain('pfctl -E >/dev/null 2>&1 || true');
@@ -118,9 +187,98 @@ describe('acceptance firewall policy', () => {
       "suffix = 'turn-tcp'; protocol = 'TCP'; port = $TurnUdpPort",
     );
     expect(windows).toContain("if ($Action -eq 'status')");
+    expect(macos).toContain('fault-apply|fault-clear)');
+    expect(macos).toContain('/sbin/pfctl -k "$turn_address"');
+    expect(windows).toContain(
+      "[ValidateSet('', 'udp-all', 'turn-3478', 'turn-tls-5349', 'turn-relay-range')]",
+    );
+    expect(windows).toContain('Disable-NetFirewallRule');
+    expect(windows).toContain('Enable-NetFirewallRule');
+    expect(windows).toContain(
+      '$watchdogScriptPath = [IO.Path]::GetFullPath($PSCommandPath)',
+    );
+    expect(windows).toContain(
+      "-ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-EncodedCommand', $encodedWatchdog)",
+    );
     expect(agent).toContain(
       "buildFirewallInvocation(REPOSITORY_ROOT, request, 'status')",
     );
+  });
+
+  test.each([
+    ['udp-all', ['dns-udp', 'turn-udp', 'turn-relay']],
+    ['turn-3478', ['turn-udp', 'turn-tcp']],
+    ['turn-tls-5349', ['turn-tls']],
+  ])('requires exact OS status evidence for %s', (profile, disabledRules) => {
+    const ruleEvidence = firewallRuleEvidenceForNetworkFault(profile);
+    expect(ruleEvidence.disabledRuleIds).toEqual(disabledRules);
+    expect(matchesFirewallNetworkFaultRuleEvidence(ruleEvidence, profile)).toBe(
+      true,
+    );
+    expect(
+      matchesFirewallNetworkFaultRuleEvidence(
+        {
+          enabledRuleIds: ruleEvidence.enabledRuleIds,
+          disabledRuleIds: [],
+        },
+        profile,
+      ),
+    ).toBe(false);
+    expect(
+      verifyFirewallNetworkFaultEvidence(
+        {
+          platform: 'win32',
+          elevated: true,
+          enabledRules: ruleEvidence.enabledRuleIds,
+          disabledRules: ruleEvidence.disabledRuleIds,
+          ruleCount: FIREWALL_RULE_IDS.length,
+          defaultBlockInstalled: true,
+        },
+        profile,
+      ),
+    ).toEqual({ pass: true, failures: [] });
+    expect(
+      verifyFirewallNetworkFaultEvidence(
+        {
+          platform: 'darwin',
+          elevated: true,
+          enabledRules: ruleEvidence.enabledRuleIds,
+          disabledRules: ruleEvidence.disabledRuleIds,
+          ruleCount: ruleEvidence.enabledRuleIds.length + 1,
+          defaultBlockInstalled: true,
+        },
+        profile,
+      ),
+    ).toEqual({ pass: true, failures: [] });
+    expect(
+      verifyFirewallNetworkFaultEvidence(
+        {
+          platform: 'win32',
+          elevated: true,
+          enabledRules: FIREWALL_RULE_IDS,
+          disabledRules: [],
+          ruleCount: FIREWALL_RULE_IDS.length,
+          defaultBlockInstalled: true,
+        },
+        profile,
+      ),
+    ).toMatchObject({
+      pass: false,
+      failures: expect.arrayContaining(['FAULT_RULE_STATUS_MISMATCH']),
+    });
+  });
+
+  test('requires the complete baseline after a network fault is cleared', () => {
+    expect(
+      verifyFirewallNetworkFaultEvidence({
+        platform: 'darwin',
+        elevated: true,
+        enabledRules: FIREWALL_RULE_IDS,
+        disabledRules: [],
+        ruleCount: FIREWALL_RULE_IDS.length + 1,
+        defaultBlockInstalled: true,
+      }),
+    ).toEqual({ pass: true, failures: [] });
   });
 
   test('requires install, watchdog, exact manifest, removal, and hash restoration', () => {

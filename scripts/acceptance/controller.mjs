@@ -5,6 +5,10 @@ import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
+import {
+  firewallRuleEvidenceForNetworkFault,
+  matchesFirewallNetworkFaultRuleEvidence,
+} from './firewall-policy.mjs';
 import { evaluateP2pGate } from './p2p-gate-policy.mjs';
 import {
   AcceptanceProtocolError,
@@ -401,6 +405,7 @@ export function createHttpsAgentClient(options) {
       ));
   let runId = null;
   let commandSequence = 0;
+  let commandFlight = Promise.resolve();
   let lastCommandMonotonicMs = -1;
   let acceptedSequence = 0;
   let session = null;
@@ -454,32 +459,83 @@ export function createHttpsAgentClient(options) {
     acceptEvents(validateEventResponse(response));
   };
 
-  const issueCommand = async (type, payload, context) => {
-    commandSequence += 1;
-    lastCommandMonotonicMs = Math.max(
-      monotonicNow(),
-      lastCommandMonotonicMs + 0.001,
-    );
-    const message = createCommandEnvelope(
-      runId,
-      type,
-      payload,
-      commandSequence,
-      now,
-      () => lastCommandMonotonicMs,
-    );
-    const response = await send({
-      method: 'POST',
-      path: '/v1/command',
-      body: {
-        message,
-        after: acceptedSequence,
-        ...(context === undefined ? {} : { context }),
-      },
-      timeoutMs: type === 'run.stop' || type === 'run.cancel' ? 60_000 : 30_000,
+  const issueCommand = (type, payload, context) => {
+    const flight = commandFlight.then(async () => {
+      commandSequence += 1;
+      lastCommandMonotonicMs = Math.max(
+        monotonicNow(),
+        lastCommandMonotonicMs + 0.001,
+      );
+      const message = createCommandEnvelope(
+        runId,
+        type,
+        payload,
+        commandSequence,
+        now,
+        () => lastCommandMonotonicMs,
+      );
+      const response = await send({
+        method: 'POST',
+        path: '/v1/command',
+        body: {
+          message,
+          after: acceptedSequence,
+          ...(context === undefined ? {} : { context }),
+        },
+        timeoutMs:
+          type === 'run.stop' || type === 'run.cancel' ? 60_000 : 30_000,
+      });
+      acceptEvents(validateEventResponse(response));
+      return response;
     });
-    acceptEvents(validateEventResponse(response));
-    return response;
+    commandFlight = flight.catch(() => undefined);
+    return flight;
+  };
+
+  const networkFaultResult = (response, profile, active) => {
+    const value = response?.networkFault;
+    exactKeys(
+      value,
+      [
+        'profile',
+        'scope',
+        'active',
+        'changed',
+        'enabledRuleIds',
+        'disabledRuleIds',
+      ],
+      'INVALID_AGENT_RESPONSE',
+    );
+    let ruleEvidence;
+    let rulesMatch;
+    try {
+      firewallRuleEvidenceForNetworkFault(profile);
+      const expectedProfile = active ? profile : null;
+      ruleEvidence = firewallRuleEvidenceForNetworkFault(expectedProfile);
+      rulesMatch = matchesFirewallNetworkFaultRuleEvidence(
+        value,
+        expectedProfile,
+      );
+    } catch {
+      throw new ControllerError('INVALID_AGENT_RESPONSE');
+    }
+    if (
+      value.profile !== profile ||
+      value.scope !== 'client-egress' ||
+      value.active !== active ||
+      typeof value.changed !== 'boolean' ||
+      !rulesMatch
+    ) {
+      throw new ControllerError('INVALID_AGENT_RESPONSE');
+    }
+    return Object.freeze({
+      profile: value.profile,
+      scope: value.scope,
+      active: value.active,
+      changed: value.changed,
+      enabledRuleIds: ruleEvidence.enabledRuleIds,
+      disabledRuleIds: ruleEvidence.disabledRuleIds,
+    });
   };
 
   return Object.freeze({
@@ -540,6 +596,14 @@ export function createHttpsAgentClient(options) {
     },
     async start(durationMs) {
       await issueCommand('run.start', { durationMs });
+    },
+    async applyNetworkFault(profile) {
+      const response = await issueCommand('network.fault.apply', { profile });
+      return networkFaultResult(response, profile, true);
+    },
+    async clearNetworkFault(profile) {
+      const response = await issueCommand('network.fault.clear', { profile });
+      return networkFaultResult(response, profile, false);
     },
     async collect({ durationMs, signal }) {
       const deadline = now() + durationMs;
