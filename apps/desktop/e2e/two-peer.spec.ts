@@ -834,6 +834,155 @@ async function startMotionShare(
   }
 }
 
+async function waitForActiveScreenAndSystemAudio(
+  pair: AcceptancePair,
+  input: {
+    readonly transport: 'initial' | 'same' | 'new';
+    readonly previous: Readonly<{
+      first: PeerDiagnostic;
+      second: PeerDiagnostic;
+    }> | null;
+    readonly expectedCaptureAttempts: number;
+  },
+) {
+  const remoteVideo = pair.second.page.locator(
+    'video[aria-label$="的共享屏幕"]',
+  );
+  await Promise.all([
+    expect(pair.first.page.getByLabel('屏幕共享状态')).toBeVisible({
+      timeout: 45_000,
+    }),
+    expect(remoteVideo).toBeVisible({ timeout: 45_000 }),
+  ]);
+
+  const matchesTransport = (
+    peer: PeerDiagnostic,
+    previous: PeerDiagnostic | undefined,
+  ): boolean => {
+    if (input.transport === 'initial') return true;
+    if (previous === undefined) return false;
+    if (input.transport === 'new') return peer.id !== previous.id;
+    return (
+      peer.id === previous.id &&
+      peer.offers + peer.answers === previous.offers + previous.answers
+    );
+  };
+  const firstFrames =
+    input.transport === 'same' && input.previous !== null
+      ? input.previous.first.framesSentVideo
+      : 5;
+  const secondFrames =
+    input.transport === 'same' && input.previous !== null
+      ? input.previous.second.framesReceivedVideo
+      : 5;
+  const firstSentAudio =
+    input.transport === 'same' && input.previous !== null
+      ? input.previous.first.packetsSentAudio
+      : 5;
+  const firstReceivedAudio =
+    input.transport === 'same' && input.previous !== null
+      ? input.previous.first.packetsReceivedAudio
+      : 5;
+  const secondSentAudio =
+    input.transport === 'same' && input.previous !== null
+      ? input.previous.second.packetsSentAudio
+      : 5;
+  const secondReceivedAudio =
+    input.transport === 'same' && input.previous !== null
+      ? input.previous.second.packetsReceivedAudio
+      : 5;
+
+  const [first, second] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer, snapshot) =>
+        matchesTransport(peer, input.previous?.first) &&
+        peer.connectionState === 'connected' &&
+        peer.liveRemoteAudioTracks === 1 &&
+        peer.packetsSentAudio > firstSentAudio &&
+        peer.packetsReceivedAudio > firstReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        peer.framesSentVideo > firstFrames &&
+        peer.bytesSentVideo > 0 &&
+        peer.screenWidth >= 1_920 &&
+        peer.screenHeight >= 1_080 &&
+        peer.screenFrameRate >= 55 &&
+        matchesIcePolicy(peer, 'relay') &&
+        snapshot.capture.attempts === input.expectedCaptureAttempts &&
+        snapshot.capture.successes === input.expectedCaptureAttempts &&
+        snapshot.capture.videoTracks === 1 &&
+        snapshot.capture.audioTracks === 1 &&
+        snapshot.resources.activePeerConnections === 1 &&
+        snapshot.resources.liveMicrophoneTracks === 1 &&
+        snapshot.resources.liveSystemAudioTracks === 1,
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer, snapshot) =>
+        matchesTransport(peer, input.previous?.second) &&
+        peer.connectionState === 'connected' &&
+        peer.liveRemoteAudioTracks === 2 &&
+        peer.liveRemoteVideoTracks === 1 &&
+        peer.packetsSentAudio > secondSentAudio &&
+        peer.packetsReceivedAudio > secondReceivedAudio &&
+        peer.inboundAudioEnergy > 0 &&
+        peer.framesReceivedVideo > secondFrames &&
+        peer.bytesReceivedVideo > 0 &&
+        matchesIcePolicy(peer, 'relay') &&
+        snapshot.capture.attempts === 0 &&
+        snapshot.resources.activePeerConnections === 1 &&
+        snapshot.resources.liveMicrophoneTracks === 1 &&
+        snapshot.resources.liveSystemAudioTracks === 0,
+      60_000,
+    ),
+  ]);
+  const [firstProgress, secondProgress] = await Promise.all([
+    waitForPeer(
+      pair.first.page,
+      (peer, snapshot) =>
+        peer.id === first.id &&
+        peer.connectionState === 'connected' &&
+        peer.packetsSentAudio > first.packetsSentAudio &&
+        peer.packetsReceivedAudio > first.packetsReceivedAudio &&
+        peer.framesSentVideo > first.framesSentVideo &&
+        peer.bytesSentVideo > first.bytesSentVideo &&
+        snapshot.capture.attempts === input.expectedCaptureAttempts &&
+        snapshot.capture.successes === input.expectedCaptureAttempts &&
+        snapshot.resources.activePeerConnections === 1 &&
+        snapshot.resources.liveMicrophoneTracks === 1 &&
+        snapshot.resources.liveSystemAudioTracks === 1,
+      60_000,
+    ),
+    waitForPeer(
+      pair.second.page,
+      (peer, snapshot) =>
+        peer.id === second.id &&
+        peer.connectionState === 'connected' &&
+        peer.packetsSentAudio > second.packetsSentAudio &&
+        peer.packetsReceivedAudio > second.packetsReceivedAudio &&
+        peer.framesReceivedVideo > second.framesReceivedVideo &&
+        peer.bytesReceivedVideo > second.bytesReceivedVideo &&
+        snapshot.capture.attempts === 0 &&
+        snapshot.resources.activePeerConnections === 1 &&
+        snapshot.resources.liveMicrophoneTracks === 1 &&
+        snapshot.resources.liveSystemAudioTracks === 0,
+      60_000,
+    ),
+  ]);
+  const [firstSnapshot, secondSnapshot] = await Promise.all([
+    requiredDiagnostics(pair.first.page),
+    requiredDiagnostics(pair.second.page),
+  ]);
+  return {
+    first: firstProgress,
+    second: secondProgress,
+    firstCapture: firstSnapshot.capture,
+    firstResources: firstSnapshot.resources,
+    secondResources: secondSnapshot.resources,
+  };
+}
+
 async function proveRemoteAudioTrackIsolation(pair: AcceptancePair) {
   const firstWithBoth = await waitForPeer(
     pair.first.page,
@@ -1150,7 +1299,9 @@ function expectSignalingUnchanged(
     expect(current).toBeDefined();
     expect(current?.opens).toBe(socket.opens);
     expect(current?.closes).toBe(socket.closes);
-    expect(current?.state).toBe(1);
+    expect(current?.state).toBe(socket.state);
+    expect(current?.lastCloseCode).toBe(socket.lastCloseCode);
+    expect(current?.lastCloseReason).toBe(socket.lastCloseReason);
   }
 }
 
@@ -2167,6 +2318,117 @@ test('V10 ICE failed/authoritative reset forced relay path', async ({
     contentType: 'application/json',
   });
   await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+});
+
+test('S12 active screen and system audio survive rejoin, WSS drop, and ICE reset', async ({
+  acceptance,
+}) => {
+  test.setTimeout(6 * 60_000);
+  const pair = await acceptance.launch('relay');
+  const run = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await registerPair(pair, 'relay', run);
+  await connectRoom(pair, false);
+  await proveBidirectionalAudio(pair);
+  const roomCodeLocator = pair.first.page.locator('.room-header code');
+  await expect(roomCodeLocator).toHaveText(/^\d{6}$/u);
+  const roomCode = await roomCodeLocator.innerText();
+
+  await startMotionShare(pair.first.page, pair.motionTitle, true);
+  const baseline = await waitForActiveScreenAndSystemAudio(pair, {
+    transport: 'initial',
+    previous: null,
+    expectedCaptureAttempts: 1,
+  });
+
+  const departure = await leaveJoinerExplicitly(pair, 'Bob-relay');
+  await expect(pair.first.page.getByLabel('屏幕共享状态')).toBeVisible();
+  let waitingSnapshot: AcceptanceSnapshot | null = null;
+  await expect
+    .poll(
+      async () => {
+        waitingSnapshot = await requiredDiagnostics(pair.first.page);
+        return {
+          activePeerConnections:
+            waitingSnapshot.resources.activePeerConnections,
+          captureAttempts: waitingSnapshot.capture.attempts,
+          captureSuccesses: waitingSnapshot.capture.successes,
+          liveMicrophoneTracks: waitingSnapshot.resources.liveMicrophoneTracks,
+          liveSystemAudioTracks:
+            waitingSnapshot.resources.liveSystemAudioTracks,
+        };
+      },
+      { timeout: 45_000 },
+    )
+    .toEqual({
+      activePeerConnections: 1,
+      captureAttempts: 1,
+      captureSuccesses: 1,
+      liveMicrophoneTracks: 1,
+      liveSystemAudioTracks: 1,
+    });
+  if (waitingSnapshot === null) {
+    throw new Error('S12 waiting resource snapshot is unavailable');
+  }
+
+  await pair.second.page.getByLabel('房间码').fill(roomCode);
+  await pair.second.page.getByRole('button', { name: '加入房间' }).click();
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+  const afterRejoin = await waitForActiveScreenAndSystemAudio(pair, {
+    transport: 'new',
+    previous: baseline,
+    expectedCaptureAttempts: 1,
+  });
+  expect(afterRejoin.first.id).toBe(departure.creatorWaiting.id);
+  expect(afterRejoin.second.id).not.toBe(departure.joinerBeforeLeave.id);
+
+  const firstBeforeDrop = await requiredDiagnostics(pair.first.page);
+  expect(await dropSignaling(pair.first.page)).toBe(1);
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+  await waitForSameTransportAudioRecovery(
+    pair,
+    'relay',
+    afterRejoin.first,
+    afterRejoin.second,
+  );
+  const afterWssDrop = await waitForActiveScreenAndSystemAudio(pair, {
+    transport: 'same',
+    previous: afterRejoin,
+    expectedCaptureAttempts: 1,
+  });
+  const firstAfterDrop = await requiredDiagnostics(pair.first.page);
+  expect(firstAfterDrop.signalingDrops).toBe(
+    firstBeforeDrop.signalingDrops + 1,
+  );
+
+  const iceReset = await proveRelayIceFailureReset(pair);
+  const afterIceReset = await waitForActiveScreenAndSystemAudio(pair, {
+    transport: 'new',
+    previous: afterWssDrop,
+    expectedCaptureAttempts: 1,
+  });
+  await expectConnectedParticipants(pair, 'relay', 'Alice-relay', 'Bob-relay');
+
+  await test.info().attach('s12-active-share-recovery-relay.json', {
+    body: JSON.stringify(
+      {
+        roomCodeLength: roomCode.length,
+        sameRoomCodeReused: true,
+        baseline,
+        departure,
+        waiting: {
+          capture: waitingSnapshot.capture,
+          resources: waitingSnapshot.resources,
+        },
+        afterRejoin,
+        afterWssDrop,
+        iceReset,
+        afterIceReset,
+      },
+      null,
+      2,
+    ),
+    contentType: 'application/json',
+  });
 });
 
 test('V11 account takeover closes the superseded desktop without auto-resume', async ({

@@ -1729,7 +1729,7 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
-  it('rebuilds transport after peer leave and offers again when the peer rejoins', async () => {
+  it('keeps peer-leave rebuild separate from a same-numbered server reset', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -1740,10 +1740,12 @@ describe('realtime room gateway', () => {
     const microphone = audioTrack();
     const firstPeer = peerConnectionFactory();
     const secondPeer = peerConnectionFactory();
+    const thirdPeer = peerConnectionFactory();
     const factory = vi
       .fn()
       .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
-      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(thirdPeer.pc as unknown as PeerConnectionLike);
     const call = createCallController({
       room,
       gateway,
@@ -1815,6 +1817,187 @@ describe('realtime room gateway', () => {
     expect(call.getSnapshot().error).toBeNull();
     expect(call.getSnapshot().status).toBe('connecting');
 
+    // The local peer-departure rebuild must not consume the server-owned
+    // reset generation. Both can legitimately use the numeric value 1.
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'server-reset-after-peer-rejoin' as never,
+      type: 'webrtc.negotiationReset',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'server-reset-after-peer-rejoin' as never,
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(3));
+    expect(secondPeer.pc.close).toHaveBeenCalledOnce();
+    expect(thirdPeer.transceivers[0]!.sender.track).toBe(microphone);
+
+    await call.cleanup();
+  });
+
+  it('does not let a rejected peer-leave rebuild overwrite a queued server reset', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const firstPeer = peerConnectionFactory();
+    const secondPeer = peerConnectionFactory();
+    const thirdPeer = peerConnectionFactory();
+    const departureBind = deferred<void>();
+    secondPeer.transceivers[0]!.sender.replaceTrack.mockImplementationOnce(
+      async () => departureBind.promise,
+    );
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(thirdPeer.pc as unknown as PeerConnectionLike);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+    });
+    await call.start();
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'peer-left-before-reset' as never,
+      type: 'peer.left',
+      payload: {
+        roomId: room.roomId as never,
+        userId: 'user-2' as never,
+        reason: 'left',
+      },
+    });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(
+        secondPeer.transceivers[0]!.sender.replaceTrack,
+      ).toHaveBeenCalledOnce(),
+    );
+    secondPeer.pc.connectionState = 'connected';
+    secondPeer.pc.iceConnectionState = 'connected';
+    secondPeer.pc.emit('connectionstatechange', {});
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'authoritative-reset-after-departure-failure' as never,
+      type: 'webrtc.negotiationReset',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'authoritative-reset-after-departure-failure' as never,
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+    departureBind.reject(new Error('departure sender bind failed'));
+
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(3));
+    expect(secondPeer.pc.close).toHaveBeenCalledOnce();
+    expect(call.getSnapshot().status).not.toBe('error');
+    expect(call.getSnapshot().error).toBeNull();
+    await call.cleanup();
+  });
+
+  it('rejects a changed negotiation id for an accepted reset generation', async () => {
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const firstPeer = peerConnectionFactory();
+    const secondPeer = peerConnectionFactory();
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(secondPeer.pc as unknown as PeerConnectionLike);
+    (
+      client.requestEnvelope as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({
+      version: PROTOCOL_VERSION,
+      requestId: 'accepted-reset-answer-applied',
+      type: 'webrtc.answerApplied.ack',
+      payload: { ok: true, data: {} },
+    });
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+    });
+    await call.start();
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'accepted-reset' as never,
+      type: 'webrtc.negotiationReset',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'accepted-reset' as never,
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'peer-ready-for-accepted-reset' as never,
+      type: 'peer.ready',
+      payload: {
+        roomId: room.roomId as never,
+        peer: { userId: 'user-2' as never, displayName: 'Peer', ready: true },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(secondPeer.pc.createOffer).toHaveBeenCalledOnce(),
+    );
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'answer-for-accepted-reset' as never,
+      type: 'webrtc.answer',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'accepted-reset' as never,
+        connectionEpoch: 20,
+        description: { type: 'answer', sdp: 'v=0\r\n' },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(secondPeer.pc.setRemoteDescription).toHaveBeenCalledOnce(),
+    );
+    secondPeer.pc.connectionState = 'connected';
+    secondPeer.pc.iceConnectionState = 'connected';
+    secondPeer.pc.emit('connectionstatechange', {});
+    await vi.waitFor(() => expect(call.getSnapshot().status).toBe('connected'));
+
+    client.emit({
+      version: PROTOCOL_VERSION,
+      eventId: 'conflicting-accepted-reset' as never,
+      type: 'webrtc.negotiationReset',
+      payload: {
+        roomId: room.roomId as never,
+        negotiationId: 'conflicting-accepted-reset' as never,
+        resetGeneration: 1,
+        reason: 'signaling_reset',
+      },
+    });
+    expect(call.getSnapshot().status).toBe('error');
+    expect(call.getSnapshot().error).toBe('语音连接失败，请重试');
+    expect(factory).toHaveBeenCalledTimes(2);
     await call.cleanup();
   });
 

@@ -838,7 +838,10 @@ export function createCallController(
     reason: 'peer_resumed' | 'signaling_reset';
   }> | null = null;
   let acceptedResetGeneration = 0;
+  let acceptedResetNegotiationId: string | null = null;
   let rebuiltResetGeneration = 0;
+  let peerDepartureGeneration = 0;
+  let rebuiltPeerDepartureGeneration = 0;
   let transportRebuildFlight: Promise<void> | null = null;
   let resetDeliveryChain = Promise.resolve();
   let negotiationEstablished = false;
@@ -870,6 +873,15 @@ export function createCallController(
     (participant) => !participant.isSelf && participant.online,
   );
   let remoteSignalingDisconnected = false;
+  const conflictsWithAcceptedReset = (
+    reset: Readonly<{
+      negotiationId: string;
+      resetGeneration: number;
+    }>,
+  ): boolean =>
+    reset.resetGeneration === acceptedResetGeneration &&
+    acceptedResetNegotiationId !== null &&
+    reset.negotiationId !== acceptedResetNegotiationId;
   const subscriptions: Array<() => void> = [];
   let cleanupCall: () => Promise<void> = async () => undefined;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
@@ -1328,17 +1340,22 @@ export function createCallController(
 
   const rebuildTransportForReset = async (
     resetGeneration: number,
+    scope: 'authoritative-reset' | 'peer-departure' = 'authoritative-reset',
   ): Promise<void> => {
     const lifecycle = currentLifecycle();
-    if (rebuiltResetGeneration >= resetGeneration) return;
+    const alreadyRebuilt = (): boolean =>
+      scope === 'authoritative-reset'
+        ? rebuiltResetGeneration >= resetGeneration
+        : rebuiltPeerDepartureGeneration >= resetGeneration;
+    if (alreadyRebuilt()) return;
     if (transportRebuildFlight !== null) {
       try {
         await transportRebuildFlight;
       } catch {
-        // A newer authoritative reset must not inherit an older rebuild error.
+        // A newer rebuild request must not inherit an older rebuild error.
       }
       assertCurrentLifecycle(lifecycle);
-      if (rebuiltResetGeneration >= resetGeneration) return;
+      if (alreadyRebuilt()) return;
     }
     let nextPeer: ReturnType<typeof createPeerConnectionController> | null =
       null;
@@ -1422,9 +1439,14 @@ export function createCallController(
         throw new Error('PeerConnection changed during transport rebuild');
       }
       localReady = true;
-      rebuiltResetGeneration = resetGeneration;
-      if (pendingReset?.resetGeneration === resetGeneration) {
-        acceptedResetGeneration = resetGeneration;
+      if (scope === 'authoritative-reset') {
+        rebuiltResetGeneration = resetGeneration;
+        if (pendingReset?.resetGeneration === resetGeneration) {
+          acceptedResetGeneration = resetGeneration;
+          acceptedResetNegotiationId = pendingReset.negotiationId;
+        }
+      } else {
+        rebuiltPeerDepartureGeneration = resetGeneration;
       }
       maybeOffer();
     })().catch(async (error: unknown) => {
@@ -1518,9 +1540,10 @@ export function createCallController(
         reason: result.reason,
       });
       if (
-        pendingReset !== null &&
-        pendingReset.resetGeneration === reset.resetGeneration &&
-        pendingReset.negotiationId !== reset.negotiationId
+        conflictsWithAcceptedReset(reset) ||
+        (pendingReset !== null &&
+          pendingReset.resetGeneration === reset.resetGeneration &&
+          pendingReset.negotiationId !== reset.negotiationId)
       ) {
         throw new Error('Negotiation reset does not match resume');
       }
@@ -1715,9 +1738,10 @@ export function createCallController(
         if (negotiation === null) throw new Error('Negotiation is unavailable');
         const reset = await negotiation.requestRecoveryReset(requestId);
         if (
-          pendingReset !== null &&
-          pendingReset.resetGeneration === reset.resetGeneration &&
-          pendingReset.negotiationId !== reset.negotiationId
+          conflictsWithAcceptedReset(reset) ||
+          (pendingReset !== null &&
+            pendingReset.resetGeneration === reset.resetGeneration &&
+            pendingReset.negotiationId !== reset.negotiationId)
         ) {
           throw new Error('Recovery reset acknowledgement does not match');
         }
@@ -1911,20 +1935,24 @@ export function createCallController(
             }
             break;
           case 'webrtc.negotiationReset': {
-            if (event.payload.resetGeneration < acceptedResetGeneration) {
-              break;
-            }
-            if (
-              event.payload.resetGeneration === acceptedResetGeneration &&
-              negotiationEstablished
-            ) {
-              break;
-            }
             const reset = Object.freeze({
               negotiationId: event.payload.negotiationId,
               resetGeneration: event.payload.resetGeneration,
               reason: event.payload.reason,
             });
+            if (reset.resetGeneration < acceptedResetGeneration) {
+              break;
+            }
+            if (conflictsWithAcceptedReset(reset)) {
+              fail(new Error('Negotiation reset identity changed'));
+              break;
+            }
+            if (
+              reset.resetGeneration === acceptedResetGeneration &&
+              negotiationEstablished
+            ) {
+              break;
+            }
             if (
               pendingReset !== null &&
               pendingReset.resetGeneration === reset.resetGeneration &&
@@ -2021,26 +2049,29 @@ export function createCallController(
             // call the old PC is failed/closed; offering on it (or leaving it
             // in place until peer.ready) is what produces "语音连接异常" on
             // rejoin with no self-recovery.
-            const departureGeneration =
-              Math.max(
-                acceptedResetGeneration,
-                rebuiltResetGeneration,
-                pendingReset?.resetGeneration ?? 0,
-              ) + 1;
-            void rebuildTransportForReset(departureGeneration).catch(
-              (error: unknown) => {
-                if (!closed && waitingForPeer) {
-                  // Stay waiting; a later peer.ready / negotiationReset will
-                  // rebuild again. Never surface ICE teardown noise.
-                  dispatchCall(
-                    { type: 'peer-left', wasConnected: false },
-                    { error: null },
-                  );
-                  return;
-                }
-                fail(error);
-              },
-            );
+            peerDepartureGeneration += 1;
+            const departureGeneration = peerDepartureGeneration;
+            const peerAtDeparture = peer;
+            const resetGenerationAtDeparture = rebuiltResetGeneration;
+            void rebuildTransportForReset(
+              departureGeneration,
+              'peer-departure',
+            ).catch((error: unknown) => {
+              if (
+                closed ||
+                peerDepartureGeneration !== departureGeneration ||
+                rebuiltPeerDepartureGeneration >= departureGeneration ||
+                rebuiltResetGeneration !== resetGenerationAtDeparture ||
+                pendingReset !== null ||
+                (peer !== null && peer !== peerAtDeparture)
+              ) {
+                return;
+              }
+              // The original peer.left already projected waiting. Do not let
+              // this late rejection overwrite a newer recovery state.
+              if (waitingForPeer) return;
+              fail(error);
+            });
             break;
           }
           case 'screen.ownerChanged': {
