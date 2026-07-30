@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { createDesktopApi } from './api.js';
+import { installCaptureDiagnosticLogger } from './capture-diagnostic.js';
 import { createCaptureStopSubscribe } from './capture-stop-subscription.js';
 import { createDesktopClipboardBridge } from './clipboard-api.js';
 import { createDesktopShellBridge } from './shell-config-api.js';
@@ -10,6 +11,7 @@ const iceTransportPolicy =
 const invoke = (channel: string, ...arguments_: readonly unknown[]) =>
   ipcRenderer.invoke(channel, ...arguments_);
 const subscribeCaptureStop = createCaptureStopSubscribe(ipcRenderer);
+installCaptureDiagnosticLogger(ipcRenderer);
 
 contextBridge.exposeInMainWorld(
   'desktop',

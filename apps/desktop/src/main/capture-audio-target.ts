@@ -38,11 +38,21 @@ if (-not [uint32]::TryParse(
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+
+public sealed class WoCaptureWindowProcessResult {
+  public int ExitCode { get; set; }
+  public uint ProcessId { get; set; }
+}
 
 public static class WoCaptureWindowProcess {
   private delegate bool EnumWindowProc(IntPtr window, IntPtr parameter);
+
+  private const uint ProcessQueryLimitedInformation = 0x1000;
+  private const uint Th32csSnapProcess = 0x00000002;
+  private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
   [DllImport("user32.dll", SetLastError = true)]
   private static extern uint GetWindowThreadProcessId(
@@ -57,150 +67,346 @@ public static class WoCaptureWindowProcess {
     IntPtr parameter
   );
 
-  public static uint GetProcessId(long windowHandle) {
-    uint processId;
-    return GetWindowThreadProcessId(new IntPtr(windowHandle), out processId) == 0
-      ? 0
-      : processId;
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern int GetClassName(
+    IntPtr window,
+    StringBuilder className,
+    int maximumCount
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr OpenProcess(
+    uint desiredAccess,
+    bool inheritHandle,
+    uint processId
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool QueryFullProcessImageName(
+    IntPtr process,
+    uint flags,
+    StringBuilder executableName,
+    ref uint size
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetProcessTimes(
+    IntPtr process,
+    out FileTime creationTime,
+    out FileTime exitTime,
+    out FileTime kernelTime,
+    out FileTime userTime
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool CloseHandle(IntPtr handle);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr CreateToolhelp32Snapshot(
+    uint flags,
+    uint processId
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool Process32First(
+    IntPtr snapshot,
+    ref ProcessEntry entry
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool Process32Next(
+    IntPtr snapshot,
+    ref ProcessEntry entry
+  );
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct ProcessEntry {
+    public uint Size;
+    public uint UsageCount;
+    public uint ProcessId;
+    public IntPtr DefaultHeapId;
+    public uint ModuleId;
+    public uint ThreadCount;
+    public uint ParentProcessId;
+    public int BasePriority;
+    public uint Flags;
+
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string ExecutableFile;
   }
 
-  public static uint[] GetChildProcessIds(long windowHandle) {
-    var processIds = new HashSet<uint>();
+  [StructLayout(LayoutKind.Sequential)]
+  private struct FileTime {
+    public uint Low;
+    public uint High;
+  }
+
+  private sealed class ProcessIdentity {
+    public string ExecutablePath { get; set; }
+    public long CreationTime { get; set; }
+  }
+
+  private static WoCaptureWindowProcessResult Failure(int exitCode) {
+    return new WoCaptureWindowProcessResult {
+      ExitCode = exitCode,
+      ProcessId = 0
+    };
+  }
+
+  private static WoCaptureWindowProcessResult Success(uint processId) {
+    return new WoCaptureWindowProcessResult {
+      ExitCode = 0,
+      ProcessId = processId
+    };
+  }
+
+  private static bool TrySnapshotProcesses(
+    out Dictionary<uint, uint> parentByProcessId
+  ) {
+    parentByProcessId = new Dictionary<uint, uint>();
+    IntPtr snapshot = CreateToolhelp32Snapshot(Th32csSnapProcess, 0);
+    if (snapshot == InvalidHandleValue) {
+      return false;
+    }
+    try {
+      var entry = new ProcessEntry();
+      entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+      if (!Process32First(snapshot, ref entry)) {
+        return false;
+      }
+      do {
+        if (entry.ProcessId != 0) {
+          parentByProcessId[entry.ProcessId] = entry.ParentProcessId;
+        }
+        entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+      } while (Process32Next(snapshot, ref entry));
+      return parentByProcessId.Count != 0;
+    } finally {
+      CloseHandle(snapshot);
+    }
+  }
+
+  private static ProcessIdentity GetProcessIdentity(uint processId) {
+    IntPtr process = OpenProcess(
+      ProcessQueryLimitedInformation,
+      false,
+      processId
+    );
+    if (process == IntPtr.Zero) {
+      return null;
+    }
+    try {
+      FileTime creationTime;
+      FileTime exitTime;
+      FileTime kernelTime;
+      FileTime userTime;
+      if (
+        !GetProcessTimes(
+          process,
+          out creationTime,
+          out exitTime,
+          out kernelTime,
+          out userTime
+        )
+      ) {
+        return null;
+      }
+      uint capacity = 260;
+      while (capacity <= 32768) {
+        var path = new StringBuilder((int)capacity);
+        uint length = capacity;
+        if (QueryFullProcessImageName(process, 0, path, ref length)) {
+          return new ProcessIdentity {
+            ExecutablePath = path.ToString(),
+            CreationTime =
+              ((long)creationTime.High << 32) | (long)creationTime.Low
+          };
+        }
+        if (Marshal.GetLastWin32Error() != 122) {
+          return null;
+        }
+        capacity *= 2;
+      }
+      return null;
+    } finally {
+      CloseHandle(process);
+    }
+  }
+
+  private static bool IsApplicationFrameHost(string executablePath) {
+    return string.Equals(
+      Path.GetDirectoryName(executablePath),
+      Environment.SystemDirectory,
+      StringComparison.OrdinalIgnoreCase
+    ) && string.Equals(
+      Path.GetFileName(executablePath),
+      "ApplicationFrameHost.exe",
+      StringComparison.OrdinalIgnoreCase
+    );
+  }
+
+  private static uint GetUwpApplicationProcessId(IntPtr window) {
+    uint applicationProcessId = 0;
     EnumChildWindows(
-      new IntPtr(windowHandle),
+      window,
       delegate(IntPtr child, IntPtr parameter) {
-        uint processId;
-        if (GetWindowThreadProcessId(child, out processId) != 0 && processId != 0) {
-          processIds.Add(processId);
+        var className = new StringBuilder(256);
+        if (
+          GetClassName(child, className, className.Capacity) > 0 &&
+          string.Equals(
+            className.ToString(),
+            "Windows.UI.Core.CoreWindow",
+            StringComparison.Ordinal
+          )
+        ) {
+          uint processId;
+          if (
+            GetWindowThreadProcessId(child, out processId) != 0 &&
+            processId != 0
+          ) {
+            applicationProcessId = processId;
+            return false;
+          }
         }
         return true;
       },
       IntPtr.Zero
     );
-    return processIds.ToArray();
+    return applicationProcessId;
+  }
+
+  private static HashSet<uint> BuildProcessTree(
+    uint rootProcessId,
+    Dictionary<uint, uint> parentByProcessId
+  ) {
+    var processIds = new HashSet<uint>();
+    processIds.Add(rootProcessId);
+    for (int depth = 0; depth <= parentByProcessId.Count; depth += 1) {
+      bool added = false;
+      foreach (KeyValuePair<uint, uint> process in parentByProcessId) {
+        if (
+          process.Key != 0 &&
+          processIds.Contains(process.Value) &&
+          processIds.Add(process.Key)
+        ) {
+          added = true;
+        }
+      }
+      if (!added) {
+        return processIds;
+      }
+    }
+    return null;
+  }
+
+  private static uint GetGenericApplicationRootProcessId(
+    uint processId,
+    ProcessIdentity processIdentity,
+    Dictionary<uint, uint> parentByProcessId
+  ) {
+    uint rootProcessId = processId;
+    var visited = new HashSet<uint>();
+    visited.Add(processId);
+    uint parentProcessId;
+    while (
+      parentByProcessId.TryGetValue(rootProcessId, out parentProcessId) &&
+      parentProcessId != 0 &&
+      visited.Add(parentProcessId)
+    ) {
+      ProcessIdentity parentIdentity = GetProcessIdentity(parentProcessId);
+      if (
+        parentIdentity == null ||
+        string.IsNullOrWhiteSpace(parentIdentity.ExecutablePath) ||
+        !string.Equals(
+          parentIdentity.ExecutablePath,
+          processIdentity.ExecutablePath,
+          StringComparison.OrdinalIgnoreCase
+        ) ||
+        parentIdentity.CreationTime > processIdentity.CreationTime
+      ) {
+        break;
+      }
+      rootProcessId = parentProcessId;
+      processIdentity = parentIdentity;
+    }
+    return rootProcessId;
+  }
+
+  public static WoCaptureWindowProcessResult Resolve(
+    long windowHandle,
+    uint currentProcessId
+  ) {
+    IntPtr window = new IntPtr(windowHandle);
+    uint windowProcessId;
+    if (
+      GetWindowThreadProcessId(window, out windowProcessId) == 0 ||
+      windowProcessId == 0
+    ) {
+      return Failure(11);
+    }
+
+    Dictionary<uint, uint> parentByProcessId;
+    if (
+      !TrySnapshotProcesses(out parentByProcessId) ||
+      !parentByProcessId.ContainsKey(currentProcessId)
+    ) {
+      return Failure(18);
+    }
+
+    HashSet<uint> ownProcessIds = BuildProcessTree(
+      currentProcessId,
+      parentByProcessId
+    );
+    if (ownProcessIds == null) {
+      return Failure(19);
+    }
+    if (ownProcessIds.Contains(windowProcessId)) {
+      return Failure(20);
+    }
+
+    ProcessIdentity processIdentity = GetProcessIdentity(windowProcessId);
+    if (
+      processIdentity == null ||
+      string.IsNullOrWhiteSpace(processIdentity.ExecutablePath)
+    ) {
+      return Failure(15);
+    }
+
+    uint rootProcessId;
+    if (IsApplicationFrameHost(processIdentity.ExecutablePath)) {
+      rootProcessId = GetUwpApplicationProcessId(window);
+      if (rootProcessId == 0) {
+        return Failure(13);
+      }
+    } else {
+      rootProcessId = GetGenericApplicationRootProcessId(
+        windowProcessId,
+        processIdentity,
+        parentByProcessId
+      );
+    }
+
+    if (rootProcessId == 0) {
+      return Failure(16);
+    }
+    if (ownProcessIds.Contains(rootProcessId)) {
+      return Failure(21);
+    }
+    return Success(rootProcessId);
   }
 }
 '@
 
-[uint32]$windowProcessId = [WoCaptureWindowProcess]::GetProcessId($windowHandle)
-if ($windowProcessId -eq 0) {
-  exit 11
+$result = [WoCaptureWindowProcess]::Resolve(
+  $windowHandle,
+  $currentProcessId
+)
+if ($result.ExitCode -ne 0) {
+  exit $result.ExitCode
 }
 
-$processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
-$processById = @{}
-foreach ($processRecord in $processes) {
-  $processById[[string][uint32]$processRecord.ProcessId] = $processRecord
-}
-
-if ($null -eq $processById[[string]$currentProcessId]) {
-  exit 18
-}
-
-$ownProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
-$null = $ownProcessIds.Add($currentProcessId)
-$ownProcessTreeComplete = $false
-for ($depth = 0; $depth -lt 64; $depth += 1) {
-  $added = $false
-  foreach ($processRecord in $processes) {
-    [uint32]$candidateProcessId = [uint32]$processRecord.ProcessId
-    [uint32]$candidateParentProcessId = [uint32]$processRecord.ParentProcessId
-    if (
-      $candidateProcessId -ne 0 -and
-      $ownProcessIds.Contains($candidateParentProcessId) -and
-      $ownProcessIds.Add($candidateProcessId)
-    ) {
-      $added = $true
-    }
-  }
-  if (-not $added) {
-    $ownProcessTreeComplete = $true
-    break
-  }
-}
-if (-not $ownProcessTreeComplete) {
-  exit 19
-}
-
-$target = $processById[[string]$windowProcessId]
-if ($null -eq $target) {
-  exit 12
-}
-
-if ([string]::Equals(
-  [string]$target.Name,
-  'ApplicationFrameHost.exe',
-  [System.StringComparison]::OrdinalIgnoreCase
-)) {
-  $candidates = @(
-    foreach ($childProcessId in [WoCaptureWindowProcess]::GetChildProcessIds($windowHandle)) {
-      if ($childProcessId -eq $windowProcessId) {
-        continue
-      }
-      $candidate = $processById[[string]$childProcessId]
-      if (
-        $null -ne $candidate -and
-        -not [string]::IsNullOrWhiteSpace([string]$candidate.ExecutablePath)
-      ) {
-        $candidate
-      }
-    }
-  )
-  if ($candidates.Count -eq 0) {
-    exit 13
-  }
-  $candidatePaths = @(
-    $candidates |
-      ForEach-Object { ([string]$_.ExecutablePath).ToUpperInvariant() } |
-      Select-Object -Unique
-  )
-  if ($candidatePaths.Count -ne 1) {
-    exit 14
-  }
-  $target = $candidates |
-    Sort-Object -Property CreationDate, ProcessId |
-    Select-Object -First 1
-}
-
-if ($ownProcessIds.Contains([uint32]$target.ProcessId)) {
-  exit 20
-}
-
-if ([string]::IsNullOrWhiteSpace([string]$target.ExecutablePath)) {
-  exit 15
-}
-
-$root = $target
-for ($depth = 0; $depth -lt 64; $depth += 1) {
-  [uint32]$parentProcessId = [uint32]$root.ParentProcessId
-  if ($parentProcessId -eq 0) {
-    break
-  }
-  $parent = $processById[[string]$parentProcessId]
-  if (
-    $null -eq $parent -or
-    [string]::IsNullOrWhiteSpace([string]$parent.ExecutablePath) -or
-    -not [string]::Equals(
-      [string]$parent.ExecutablePath,
-      [string]$root.ExecutablePath,
-      [System.StringComparison]::OrdinalIgnoreCase
-    ) -or
-    $parent.CreationDate -gt $root.CreationDate
-  ) {
-    break
-  }
-  $root = $parent
-}
-
-[uint32]$rootProcessId = [uint32]$root.ProcessId
-if ($rootProcessId -eq 0) {
-  exit 16
-}
-if ($ownProcessIds.Contains($rootProcessId)) {
-  exit 21
-}
-
-[pscustomobject]@{ pid = $rootProcessId } | ConvertTo-Json -Compress
+[pscustomobject]@{ pid = [uint32]$result.ProcessId } |
+  ConvertTo-Json -Compress
 `;
 
 const WINDOWS_WINDOW_PROCESS_ENCODED_COMMAND = Buffer.from(
@@ -236,11 +442,13 @@ export interface WindowsWindowProcessResolverOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly execFile?: CaptureAudioExecFile;
   readonly currentProcessId?: number;
+  readonly onFailure?: (code: CaptureAudioTargetFailureCode) => void;
 }
 
 export type WindowsWindowProcessResolver = (
   windowHandle: string,
   currentProcessId: number,
+  onFailure?: (code: CaptureAudioTargetFailureCode) => void,
 ) => Promise<number | null>;
 
 export interface CaptureAudioTargetRequest {
@@ -248,7 +456,20 @@ export interface CaptureAudioTargetRequest {
   readonly platform: NodeJS.Platform;
   readonly currentProcessId: number;
   readonly resolveWindowsWindowProcessId?: WindowsWindowProcessResolver;
+  readonly onFailure?: (code: CaptureAudioTargetFailureCode) => void;
 }
+
+export type CaptureAudioTargetFailureCode =
+  | 'CURRENT_PROCESS_INVALID'
+  | 'PLATFORM_UNSUPPORTED'
+  | 'PROBE_OUTPUT_INVALID'
+  | 'PROCESS_ID_INVALID'
+  | 'PROCESS_UNRESOLVED'
+  | 'SOURCE_ID_INVALID'
+  | 'SYSTEM_ROOT_INVALID'
+  | 'TARGET_IS_WO'
+  | 'WINDOW_HANDLE_INVALID'
+  | `PROBE_${string}`;
 
 interface ParsedCaptureSourceId {
   readonly kind: 'screen' | 'window';
@@ -380,6 +601,7 @@ export async function resolveWindowsWindowProcessId(
     windowHandle === '0' ||
     windowHandle === '-0'
   ) {
+    options.onFailure?.('WINDOW_HANDLE_INVALID');
     return null;
   }
   const environment = options.environment ?? process.env;
@@ -389,10 +611,14 @@ export async function resolveWindowsWindowProcessId(
     currentProcessId <= 0 ||
     currentProcessId > WINDOWS_PROCESS_ID_MAX
   ) {
+    options.onFailure?.('CURRENT_PROCESS_INVALID');
     return null;
   }
   const systemRoot = windowsSystemRoot(environment);
-  if (systemRoot === null) return null;
+  if (systemRoot === null) {
+    options.onFailure?.('SYSTEM_ROOT_INVALID');
+    return null;
+  }
   const executable = win32.join(
     systemRoot,
     'System32',
@@ -425,11 +651,18 @@ export async function resolveWindowsWindowProcessId(
         windowsHide: true,
       },
     );
-    return parseWindowsProcessProbeOutput(result.stdout, result.stderr);
-  } catch (error) {
-    console.warn(
-      `[capture-audio-target] Windows process probe failed: ${windowsProcessProbeFailureCode(error)}`,
+    const processId = parseWindowsProcessProbeOutput(
+      result.stdout,
+      result.stderr,
     );
+    if (processId === null) options.onFailure?.('PROBE_OUTPUT_INVALID');
+    return processId;
+  } catch (error) {
+    const code = windowsProcessProbeFailureCode(error);
+    console.warn(
+      `[capture-audio-target] Windows process probe failed: ${code}`,
+    );
+    options.onFailure?.(`PROBE_${code}`);
     return null;
   }
 }
@@ -437,43 +670,70 @@ export async function resolveWindowsWindowProcessId(
 export async function resolveCaptureAudioTarget(
   request: CaptureAudioTargetRequest,
 ): Promise<CaptureAudioDevice | null> {
+  let failureReported = false;
+  const reportFailure = (code: CaptureAudioTargetFailureCode): void => {
+    if (failureReported) return;
+    failureReported = true;
+    request.onFailure?.(code);
+  };
   const parsed = parseCaptureSourceId(request.source.id);
+  if (parsed === null) {
+    reportFailure('SOURCE_ID_INVALID');
+    return null;
+  }
   if (
-    parsed === null ||
     !Number.isSafeInteger(request.currentProcessId) ||
     request.currentProcessId <= 0 ||
     request.currentProcessId > WINDOWS_PROCESS_ID_MAX
   ) {
+    reportFailure('CURRENT_PROCESS_INVALID');
     return null;
   }
   if (parsed.kind === 'screen') {
-    return request.platform === 'win32' || request.platform === 'darwin'
-      ? Object.freeze({
-          id: 'loopbackWithoutChrome',
-          name: 'System audio without WO playback',
-        })
-      : null;
+    if (request.platform !== 'win32' && request.platform !== 'darwin') {
+      reportFailure('PLATFORM_UNSUPPORTED');
+      return null;
+    }
+    return Object.freeze({
+      id: 'loopbackWithoutChrome',
+      name: 'System audio without WO playback',
+    });
   }
-  if (request.platform !== 'win32') return null;
+  if (request.platform !== 'win32') {
+    reportFailure('PLATFORM_UNSUPPORTED');
+    return null;
+  }
 
   const windowHandle = parseWindowsCaptureWindowHandle(request.source.id);
-  if (windowHandle === null) return null;
+  if (windowHandle === null) {
+    reportFailure('WINDOW_HANDLE_INVALID');
+    return null;
+  }
   const processId =
     request.resolveWindowsWindowProcessId === undefined
       ? await resolveWindowsWindowProcessId(windowHandle, {
           currentProcessId: request.currentProcessId,
+          onFailure: reportFailure,
         })
       : await request.resolveWindowsWindowProcessId(
           windowHandle,
           request.currentProcessId,
+          reportFailure,
         );
+  if (processId === null) {
+    reportFailure('PROCESS_UNRESOLVED');
+    return null;
+  }
   if (
-    processId === null ||
     !Number.isSafeInteger(processId) ||
     processId <= 0 ||
-    processId > WINDOWS_PROCESS_ID_MAX ||
-    processId === request.currentProcessId
+    processId > WINDOWS_PROCESS_ID_MAX
   ) {
+    reportFailure('PROCESS_ID_INVALID');
+    return null;
+  }
+  if (processId === request.currentProcessId) {
+    reportFailure('TARGET_IS_WO');
     return null;
   }
   return Object.freeze({

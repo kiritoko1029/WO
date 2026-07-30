@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 
+import { DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL } from '../src/ipc-channels.js';
 import {
   captureSecurityOrigin,
   createCaptureSourceBroker,
@@ -405,10 +406,11 @@ describe('desktop capture source policy', () => {
         handler = next;
       }),
     };
+    const send = vi.fn();
     const resolveWindowsWindowProcessId = vi.fn(async () => 4_321);
     installDisplayMediaHandler({
       session,
-      webContents: { id: 12, mainFrame },
+      webContents: { id: 12, mainFrame, send },
       rendererEntry: mainFrame.url,
       broker,
       platform: 'win32',
@@ -435,10 +437,22 @@ describe('desktop capture source policy', () => {
         },
       }),
     );
-    expect(resolveWindowsWindowProcessId).toHaveBeenCalledWith('101', 99);
+    expect(callback).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
+    expect(resolveWindowsWindowProcessId).toHaveBeenCalledWith(
+      '101',
+      99,
+      expect.any(Function),
+    );
     // Second call: source already consumed, callback falls back gracefully.
     handler?.(request, callback);
     expect(callback).toHaveBeenLastCalledWith({});
+    expect(callback).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL, {
+      stage: 'DISPLAY_MEDIA_HANDLER',
+      code: 'SOURCE_SELECTION_REJECTED',
+    });
     expect(session.setDisplayMediaRequestHandler).toHaveBeenCalledWith(
       expect.any(Function),
       { useSystemPicker: false },
@@ -465,10 +479,11 @@ describe('desktop capture source policy', () => {
         handler = next;
       }),
     };
+    const send = vi.fn();
     const processId = deferred<number | null>();
     installDisplayMediaHandler({
       session,
-      webContents: { id: 12, mainFrame },
+      webContents: { id: 12, mainFrame, send },
       rendererEntry: mainFrame.url,
       broker,
       platform: 'win32',
@@ -500,6 +515,11 @@ describe('desktop capture source policy', () => {
 
     await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
     expect(callback).toHaveBeenLastCalledWith({});
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL, {
+      stage: 'DISPLAY_MEDIA_HANDLER',
+      code: 'AUDIO_TARGET_OR_SELECTION_REJECTED',
+    });
     expect(broker.peekSelected(12)).toBe(refreshedSource);
   });
 
@@ -523,10 +543,11 @@ describe('desktop capture source policy', () => {
         handler = next;
       }),
     };
+    const send = vi.fn();
     const processId = deferred<number | null>();
     installDisplayMediaHandler({
       session,
-      webContents: { id: 12, mainFrame },
+      webContents: { id: 12, mainFrame, send },
       rendererEntry: mainFrame.url,
       broker,
       platform: 'win32',
@@ -553,8 +574,129 @@ describe('desktop capture source policy', () => {
 
     await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
     expect(callback).toHaveBeenLastCalledWith({});
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL, {
+      stage: 'DISPLAY_MEDIA_HANDLER',
+      code: 'AUDIO_TARGET_OR_SELECTION_REJECTED',
+    });
     expect(broker.peekSelected(12)).toBe(sources[1]);
     expect(broker.consumeSelected(12)).toBe(sources[1]);
+  });
+
+  test('reports a Windows process probe rejection without exposing details', async () => {
+    const broker = createCaptureSourceBroker({
+      randomToken: () => '00000000-0000-4000-8000-000000000001',
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    const send = vi.fn();
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame, send },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      currentProcessId: 99,
+      resolveWindowsWindowProcessId: async (
+        _windowHandle,
+        _currentProcessId,
+        onFailure,
+      ) => {
+        onFailure?.('PROBE_EXIT_15');
+        return null;
+      },
+    });
+    const callback = vi.fn();
+
+    handler?.(
+      {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: true,
+        userGesture: true,
+      },
+      callback,
+    );
+
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
+    expect(callback).toHaveBeenCalledWith({});
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL, {
+      stage: 'WINDOW_AUDIO_TARGET',
+      code: 'PROBE_EXIT_15',
+    });
+    expect(Object.keys(send.mock.calls[0]![1] as object)).toEqual([
+      'stage',
+      'code',
+    ]);
+    expect(broker.peekSelected(12)).toBe(sources[0]);
+  });
+
+  test('completes a rejected Windows capture once when diagnostic delivery throws', async () => {
+    const broker = createCaptureSourceBroker({
+      randomToken: () => '00000000-0000-4000-8000-000000000001',
+    });
+    const [summary] = broker.replaceAvailable(12, [sources[0]]);
+    broker.select(12, summary!.token);
+    const mainFrame = { url: 'https://app.example.test/index.html' };
+    let handler:
+      | ((
+          request: Record<string, unknown>,
+          callback: (value: unknown) => void,
+        ) => void)
+      | undefined;
+    const session = {
+      setDisplayMediaRequestHandler: vi.fn((next) => {
+        handler = next;
+      }),
+    };
+    const send = vi.fn(() => {
+      throw new Error('renderer disappeared');
+    });
+    installDisplayMediaHandler({
+      session,
+      webContents: { id: 12, mainFrame, send },
+      rendererEntry: mainFrame.url,
+      broker,
+      platform: 'win32',
+      platformRelease: '10.0.26100',
+      currentProcessId: 99,
+      resolveWindowsWindowProcessId: async () => null,
+    });
+    const callback = vi.fn();
+
+    handler?.(
+      {
+        frame: mainFrame,
+        securityOrigin: 'https://app.example.test',
+        videoRequested: true,
+        audioRequested: true,
+        userGesture: true,
+      },
+      callback,
+    );
+
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
+    expect(callback).toHaveBeenCalledWith({});
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL, {
+      stage: 'WINDOW_AUDIO_TARGET',
+      code: 'PROCESS_UNRESOLVED',
+    });
   });
 
   test.each([
@@ -580,9 +722,10 @@ describe('desktop capture source policy', () => {
           handler = next;
         }),
       };
+      const send = vi.fn();
       installDisplayMediaHandler({
         session,
-        webContents: { id: 12, mainFrame },
+        webContents: { id: 12, mainFrame, send },
         rendererEntry: mainFrame.url,
         broker,
         platform,
@@ -609,6 +752,8 @@ describe('desktop capture source policy', () => {
           },
         }),
       );
+      expect(callback).toHaveBeenCalledOnce();
+      expect(send).not.toHaveBeenCalled();
     },
   );
 

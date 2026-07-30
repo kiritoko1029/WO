@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { createDesktopApi } from './api.js';
+import { installCaptureDiagnosticLogger } from './capture-diagnostic.js';
 import { createCaptureStopSubscribe } from './capture-stop-subscription.js';
 import { createDesktopClipboardBridge } from './clipboard-api.js';
 import { createDesktopLanBridge } from './lan-api.js';
@@ -14,6 +15,7 @@ const subscribeNotification = (channel: string, listener: () => void) => {
   return () => ipcRenderer.removeListener(channel, handler);
 };
 const subscribeCaptureStop = createCaptureStopSubscribe(ipcRenderer);
+installCaptureDiagnosticLogger(ipcRenderer);
 const subscribeValue = (
   channel: string,
   listener: (value: unknown) => void,

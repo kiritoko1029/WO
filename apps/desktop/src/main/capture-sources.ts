@@ -10,6 +10,7 @@ import {
 } from './capture-audio-target.js';
 import { isDisplayCaptureRequestAllowed } from './capture-policy.js';
 import { systemAudioModeForPlatform } from './permissions.js';
+import { DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL } from '../ipc-channels.js';
 
 export interface DesktopCaptureSource extends CaptureSource {
   readonly thumbnail: {
@@ -49,6 +50,7 @@ const MAX_THUMBNAIL_BYTES = 512 * 1_024;
 const MAX_TOTAL_THUMBNAIL_BYTES = 8 * 1_024 * 1_024;
 const MAX_THUMBNAIL_WIDTH = 400;
 const MAX_THUMBNAIL_HEIGHT = 224;
+const CAPTURE_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u;
 
 // 1×1 transparent PNG used as a placeholder for sources whose thumbnail
 // failed to render (minimized windows, off-screen windows, protected
@@ -220,7 +222,11 @@ export function installDisplayMediaHandler<
   Source extends CaptureSource,
 >(input: {
   readonly session: DisplayMediaSession;
-  readonly webContents: Readonly<{ id: number; mainFrame: unknown }>;
+  readonly webContents: Readonly<{
+    id: number;
+    mainFrame: unknown;
+    send?: (channel: string, value: unknown) => void;
+  }>;
   readonly rendererEntry: string;
   readonly broker: CaptureSourceBroker<Source>;
   readonly platform?: NodeJS.Platform;
@@ -237,6 +243,29 @@ export function installDisplayMediaHandler<
   input.session.setDisplayMediaRequestHandler(
     (request, callback) => {
       let completed = false;
+      let diagnosticReported = false;
+      const reportCaptureDiagnostic = (
+        stage:
+          'AUTHORIZATION' | 'DISPLAY_MEDIA_HANDLER' | 'WINDOW_AUDIO_TARGET',
+        code: string,
+      ): void => {
+        if (
+          diagnosticReported ||
+          input.webContents.send === undefined ||
+          !CAPTURE_DIAGNOSTIC_CODE.test(code)
+        ) {
+          return;
+        }
+        diagnosticReported = true;
+        try {
+          input.webContents.send(
+            DESKTOP_CAPTURE_DIAGNOSTIC_CHANNEL,
+            Object.freeze({ stage, code }),
+          );
+        } catch {
+          // The renderer can disappear while an asynchronous PID probe settles.
+        }
+      };
       const complete = (
         streams: Readonly<{
           video?: CaptureSource;
@@ -253,6 +282,7 @@ export function installDisplayMediaHandler<
           rendererEntry: input.rendererEntry,
         })
       ) {
+        reportCaptureDiagnostic('AUTHORIZATION', 'REQUEST_NOT_ALLOWED');
         complete({});
         return;
       }
@@ -260,10 +290,15 @@ export function installDisplayMediaHandler<
       // this handler is not expected to run. Fail closed if Electron falls
       // back to it instead of consuming a custom-picker broker token.
       if (systemAudioMode === 'native-picker') {
+        reportCaptureDiagnostic(
+          'AUTHORIZATION',
+          'NATIVE_PICKER_HANDLER_FALLBACK',
+        );
         complete({});
         return;
       }
       if (request.audioRequested && systemAudioMode !== 'loopback') {
+        reportCaptureDiagnostic('AUTHORIZATION', 'SYSTEM_AUDIO_UNSUPPORTED');
         complete({});
         return;
       }
@@ -280,9 +315,15 @@ export function installDisplayMediaHandler<
           platform,
           currentProcessId,
           resolveWindowsWindowProcessId: input.resolveWindowsWindowProcessId,
+          onFailure: (code) =>
+            reportCaptureDiagnostic('WINDOW_AUDIO_TARGET', code),
         })
           .then((audio) => {
             if (audio === null) {
+              reportCaptureDiagnostic(
+                'WINDOW_AUDIO_TARGET',
+                'AUDIO_TARGET_UNAVAILABLE',
+              );
               complete({});
               return;
             }
@@ -292,8 +333,18 @@ export function installDisplayMediaHandler<
             );
             grantCaptureAudioDevice(complete, committed, audio);
           })
-          .catch(() => complete({}));
+          .catch(() => {
+            reportCaptureDiagnostic(
+              'DISPLAY_MEDIA_HANDLER',
+              'AUDIO_TARGET_OR_SELECTION_REJECTED',
+            );
+            complete({});
+          });
       } catch {
+        reportCaptureDiagnostic(
+          'DISPLAY_MEDIA_HANDLER',
+          'SOURCE_SELECTION_REJECTED',
+        );
         complete({});
       }
     },
