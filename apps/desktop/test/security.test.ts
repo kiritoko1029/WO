@@ -253,6 +253,11 @@ describe('desktop window security', () => {
       isMainFrame: true,
     });
     expect(callback).toHaveBeenLastCalledWith(true);
+    requestHandler?.(trusted, 'fullscreen', callback, {
+      requestingUrl: entry,
+      isMainFrame: true,
+    });
+    expect(callback).toHaveBeenLastCalledWith(true);
     requestHandler?.(trusted, 'media', callback, {
       mediaTypes: [],
       requestingUrl: entry,
@@ -283,6 +288,17 @@ describe('desktop window security', () => {
         trusted,
         'display-capture',
         { requestingUrl: entry, isMainFrame: false },
+      ],
+      // Fullscreen must stay restricted to the trusted main frame.
+      [
+        trusted,
+        'fullscreen',
+        { requestingUrl: entry, isMainFrame: false },
+      ],
+      [
+        { getURL: () => 'https://attacker.invalid/' },
+        'fullscreen',
+        { requestingUrl: entry, isMainFrame: true },
       ],
       [
         trusted,
@@ -338,7 +354,20 @@ describe('desktop window security', () => {
       }),
     ).toBe(true);
     expect(
+      checkHandler?.(trusted, 'fullscreen', new URL(entry).origin, {
+        requestingUrl: entry,
+        isMainFrame: true,
+      }),
+    ).toBe(true);
+    expect(
       checkHandler?.(trusted, 'display-capture', new URL(entry).origin, {
+        requestingUrl: entry,
+        isMainFrame: false,
+      }),
+    ).toBe(false);
+    // Fullscreen is only granted to the trusted main frame, never subframes.
+    expect(
+      checkHandler?.(trusted, 'fullscreen', new URL(entry).origin, {
         requestingUrl: entry,
         isMainFrame: false,
       }),

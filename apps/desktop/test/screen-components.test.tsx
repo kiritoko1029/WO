@@ -436,7 +436,7 @@ describe('desktop share controls', () => {
     expect(video.style.transform).toBe('translate(0px, 0px) scale(1)');
   });
 
-  it('requests fullscreen on the video element when toggling fullscreen', () => {
+  it('requests fullscreen on the stage container when toggling fullscreen', () => {
     const track = { kind: 'video' } as MediaStreamTrack;
     render(
       <ScreenStage
@@ -448,10 +448,12 @@ describe('desktop share controls', () => {
       />,
     );
 
-    const video = screen.getByLabelText('林远的共享屏幕') as HTMLVideoElement;
+    // Fullscreen targets the stage <section> (not the bare <video>) so the
+    // immersive controls overlay lives inside the fullscreen layer.
+    const stage = screen.getByLabelText('共享屏幕') as HTMLElement;
     const requestFullscreen = vi.fn().mockResolvedValue(undefined);
-    video.requestFullscreen =
-      requestFullscreen as unknown as typeof video.requestFullscreen;
+    stage.requestFullscreen =
+      requestFullscreen as unknown as typeof stage.requestFullscreen;
 
     fireEvent.click(screen.getByRole('button', { name: '全屏展示' }));
     expect(requestFullscreen).toHaveBeenCalled();

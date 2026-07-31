@@ -73,6 +73,9 @@ export function createWindowOptions(
     title: 'WO',
     backgroundColor: '#f5f6f7',
     show: false,
+    // The app ships its own in-window UI; hide the native File/Edit/View menu
+    // bar that Electron shows by default on Windows.
+    autoHideMenuBar: true,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -140,7 +143,12 @@ export function installMediaPermissionPolicy(
           (audioOnly ||
             displayCaptureFallback ||
             permission === 'speaker-selection' ||
-            permission === 'display-capture'),
+            permission === 'display-capture' ||
+            // The immersive screen-share viewer fullscreens the stage container
+            // (a plain <section>), which Chromium routes through the fullscreen
+            // permission. Allow it for the trusted renderer so the Element
+            // Fullscreen API is not silently rejected.
+            permission === 'fullscreen'),
       );
     },
   );
@@ -156,6 +164,7 @@ export function installMediaPermissionPolicy(
       return (
         permission === 'speaker-selection' ||
         permission === 'display-capture' ||
+        permission === 'fullscreen' ||
         (permission === 'media' && details.mediaType === 'audio')
       );
     },

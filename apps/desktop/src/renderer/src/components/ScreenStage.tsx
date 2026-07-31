@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Expand, Monitor, MonitorUp, Shrink, ZoomOut } from 'lucide-react';
 
 import type { ScreenShareState } from '../media/screen-controller.js';
@@ -11,6 +11,9 @@ interface PanOffset {
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 1.15;
+// Immersive fullscreen: how long after the pointer stops moving before the
+// controls overlay and cursor fade out.
+const FULLSCREEN_IDLE_HIDE_MS = 3_000;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -45,6 +48,8 @@ export function ScreenStage({
   localState,
   remoteOwnerName,
   remoteBitrateBps,
+  bottomToolbar,
+  onControlsActiveChange,
   onPresentationVideo,
 }: {
   readonly localTrack: MediaStreamTrack | null;
@@ -52,6 +57,21 @@ export function ScreenStage({
   readonly localState: ScreenShareState;
   readonly remoteOwnerName: string | null;
   readonly remoteBitrateBps: number | null;
+  /**
+   * Optional toolbar rendered inside the immersive fullscreen overlay (e.g. the
+   * call controls). Only mounted while the stage is the active fullscreen
+   * element, so the caller can keep rendering its own toolbar outside the
+   * stage for the non-fullscreen layout without duplication.
+   */
+  readonly bottomToolbar?: ReactNode;
+  /**
+   * Fired whenever the immersive controls visibility flips while a live screen
+   * share is showing (including the non-fullscreen preview). The parent uses it
+   * to fade its own floating toolbars (call controls, share status) in sync so
+   * the whole UI goes quiet after the pointer is idle, not just the in-stage
+   * overlay.
+   */
+  readonly onControlsActiveChange?: (active: boolean) => void;
   readonly onPresentationVideo?: (video: HTMLVideoElement | null) => void;
 }) {
   const stageRef = useRef<HTMLElement>(null);
@@ -60,6 +80,11 @@ export function ScreenStage({
   const [pan, setPan] = useState<PanOffset>({ x: 0, y: 0 });
   const [fullscreen, setFullscreen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // Whether the immersive controls overlay is currently revealed. In
+  // fullscreen the overlay hides after the pointer is idle for a few seconds;
+  // `active` flips true on every mousemove and false when the idle timer fires.
+  const [overlayActive, setOverlayActive] = useState(false);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragOrigin = useRef<PanOffset | null>(null);
 
   const localSharing = localState === 'sharing';
@@ -174,10 +199,20 @@ export function ScreenStage({
   }, [dragging, zoom]);
 
   useEffect(() => {
-    const video = videoRef.current;
-    const doc = video?.ownerDocument ?? document;
+    const stage = stageRef.current;
+    const doc = stage?.ownerDocument ?? document;
     const syncFullscreen = (): void => {
-      setFullscreen(isFullscreenElement(videoRef.current, doc));
+      const isFullscreen = isFullscreenElement(stageRef.current, doc);
+      setFullscreen(isFullscreen);
+      // Reset the immersive overlay when leaving fullscreen so it does not
+      // linger in a hidden/active state on the embedded layout.
+      if (!isFullscreen) {
+        setOverlayActive(false);
+        if (idleTimer.current !== null) {
+          clearTimeout(idleTimer.current);
+          idleTimer.current = null;
+        }
+      }
     };
     doc.addEventListener('fullscreenchange', syncFullscreen);
     syncFullscreen();
@@ -202,6 +237,43 @@ export function ScreenStage({
     }
   }, [live, reset]);
 
+  // Immersive controls: reveal the controls while the pointer is moving and
+  // hide them after it stays still for a few seconds. Active whenever a live
+  // screen share is showing — both in the fullscreen overlay and in the
+  // embedded preview — so the whole UI goes quiet on idle. In fullscreen the
+  // cursor also hides; in the embedded preview it stays visible.
+  useEffect(() => {
+    if (!live) {
+      if (idleTimer.current !== null) {
+        clearTimeout(idleTimer.current);
+        idleTimer.current = null;
+      }
+      setOverlayActive(false);
+      onControlsActiveChange?.(true);
+      return;
+    }
+    const revealControls = (): void => {
+      setOverlayActive(true);
+      onControlsActiveChange?.(true);
+      if (idleTimer.current !== null) clearTimeout(idleTimer.current);
+      idleTimer.current = setTimeout(() => {
+        idleTimer.current = null;
+        setOverlayActive(false);
+        onControlsActiveChange?.(false);
+      }, FULLSCREEN_IDLE_HIDE_MS);
+    };
+    document.addEventListener('mousemove', revealControls);
+    // Start revealed so the user sees the controls right away.
+    revealControls();
+    return () => {
+      document.removeEventListener('mousemove', revealControls);
+      if (idleTimer.current !== null) {
+        clearTimeout(idleTimer.current);
+        idleTimer.current = null;
+      }
+    };
+  }, [live, fullscreen, onControlsActiveChange]);
+
   const onStagePointerDown = (event: React.MouseEvent): void => {
     if (zoom === 1) return;
     // Only react to clicks on the stage background / video, not on the
@@ -216,17 +288,26 @@ export function ScreenStage({
   };
 
   const toggleFullscreen = (): void => {
-    const video = videoRef.current;
-    if (video === null) return;
-    const doc = video.ownerDocument;
-    if (isFullscreenElement(video, doc)) {
+    const stage = stageRef.current;
+    if (stage === null) return;
+    const doc = stage.ownerDocument;
+    if (isFullscreenElement(stage, doc)) {
       void doc.exitFullscreen().catch(() => undefined);
       return;
     }
-    void video.requestFullscreen().catch(() => undefined);
+    // Fullscreen the stage container (not the bare <video>) so the immersive
+    // controls overlay and the bottom toolbar live inside the fullscreen layer.
+    void stage.requestFullscreen().catch(() => undefined);
   };
 
-  const cursor = zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'default';
+  // Cursor priority: dragging > zoom-pan grab > immersive-hide (none) > default.
+  const cursor = dragging
+    ? 'grabbing'
+    : zoom > 1
+      ? 'grab'
+      : fullscreen && !overlayActive
+        ? 'none'
+        : 'default';
 
   return (
     <section
@@ -234,6 +315,7 @@ export function ScreenStage({
       className={`screen-stage${live ? ' screen-stage--live' : ''}${fullscreen ? ' screen-stage--fullscreen' : ''}`}
       aria-label="共享屏幕"
       data-zoom={zoom.toFixed(2)}
+      data-overlay-active={live ? String(overlayActive) : undefined}
     >
       {presentationTrack !== null && (
         <video
@@ -272,7 +354,50 @@ export function ScreenStage({
           </h2>
         </div>
       )}
-      {viewerControls && (
+      {showRemoteTrack && remoteBitrateBps !== null && (
+        <span className="remote-bitrate-badge">
+          目标 {remoteBitrateBps / 1_000_000} Mbps
+        </span>
+      )}
+      {viewerControls && fullscreen && (
+        <div
+          className="fullscreen-controls-overlay"
+          data-active={String(overlayActive)}
+        >
+          <div
+            className="screen-view-controls"
+            role="toolbar"
+            aria-label="画面控制"
+          >
+            {zoom > 1 && (
+              <button
+                type="button"
+                title="还原"
+                aria-label="还原缩放"
+                onClick={reset}
+              >
+                <ZoomOut size={15} />
+                还原
+              </button>
+            )}
+            <button
+              type="button"
+              className={fullscreen ? 'selected' : ''}
+              aria-pressed={fullscreen}
+              title={fullscreen ? '退出全屏' : '全屏展示'}
+              aria-label={fullscreen ? '退出全屏' : '全屏展示'}
+              onClick={toggleFullscreen}
+            >
+              {fullscreen ? <Shrink size={15} /> : <Expand size={15} />}
+              {fullscreen ? '退出' : '全屏'}
+            </button>
+          </div>
+          {bottomToolbar !== null && bottomToolbar !== undefined && (
+            <div className="fullscreen-bottom-toolbar">{bottomToolbar}</div>
+          )}
+        </div>
+      )}
+      {viewerControls && !fullscreen && (
         <div
           className="screen-view-controls"
           role="toolbar"
@@ -301,11 +426,6 @@ export function ScreenStage({
             {fullscreen ? '退出' : '全屏'}
           </button>
         </div>
-      )}
-      {showRemoteTrack && remoteBitrateBps !== null && (
-        <span className="remote-bitrate-badge">
-          目标 {remoteBitrateBps / 1_000_000} Mbps
-        </span>
       )}
     </section>
   );
