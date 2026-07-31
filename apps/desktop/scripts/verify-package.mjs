@@ -842,24 +842,35 @@ async function extractWindowsArtifactPayload(artifactPath, environment) {
   const directory = await mkdtemp(join(tmpdir(), 'wo-win-artifact-'));
   try {
     const sevenZip = await resolveTrustedSevenZip();
-    // electron-builder NSIS/portable wraps the app as $PLUGINSDIR/app-64.7z.
-    // Extract that archive first, then pull WO.exe + app.asar from it.
-    await runNativeCommand(
-      sevenZip,
-      [
-        'x',
-        '-bd',
-        '-y',
-        `-o${directory}`,
-        artifactPath,
-        '$PLUGINSDIR/app-64.7z',
-      ],
-      environment,
-    );
-    const nestedArchive = join(directory, '$PLUGINSDIR', 'app-64.7z');
-    await requireRegularFile(nestedArchive, 'Windows artifact app-64.7z');
+    // electron-builder can lay the NSIS/portable payload out two ways:
+    //   1. Cross-host/macOS packaging wraps the app as $PLUGINSDIR/app-64.7z,
+    //      which itself contains WO.exe and resources/app.asar.
+    //   2. Native Windows packaging (electron-builder 26.x) stores WO.exe and
+    //      resources/app.asar flat at the archive root, with no nesting.
+    // Probe for the nested archive first; fall back to the flat layout so both
+    // host scenarios verify the same payload.
     const payloadDirectory = join(directory, 'payload');
     await mkdir(payloadDirectory, { recursive: true });
+    let nestedArchive;
+    try {
+      await runNativeCommand(
+        sevenZip,
+        [
+          'x',
+          '-bd',
+          '-y',
+          `-o${directory}`,
+          artifactPath,
+          '$PLUGINSDIR/app-64.7z',
+        ],
+        environment,
+      );
+      nestedArchive = join(directory, '$PLUGINSDIR', 'app-64.7z');
+      await requireRegularFile(nestedArchive, 'Windows artifact app-64.7z');
+    } catch {
+      nestedArchive = null;
+    }
+    const sourceArchive = nestedArchive ?? artifactPath;
     await runNativeCommand(
       sevenZip,
       [
@@ -867,7 +878,7 @@ async function extractWindowsArtifactPayload(artifactPath, environment) {
         '-bd',
         '-y',
         `-o${payloadDirectory}`,
-        nestedArchive,
+        sourceArchive,
         'WO.exe',
         'resources/app.asar',
       ],

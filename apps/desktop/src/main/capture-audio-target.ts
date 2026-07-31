@@ -11,6 +11,12 @@ const WINDOWS_CURRENT_PROCESS_ID_ENV = 'WO_CAPTURE_AUDIO_CURRENT_PROCESS_ID';
 
 const WINDOWS_WINDOW_PROCESS_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+# Suppress the "preparing for first-time use of module" progress record that
+# the PowerShell host serializes as CLIXML onto stderr while the probe runs.
+# Any bytes on stderr cause the Node-side output parser to fail closed, so the
+# probe must keep stderr empty even on a cold module-analysis cache.
+$ProgressPreference = 'SilentlyContinue'
+$VerbosePreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $rawHandle = [Environment]::GetEnvironmentVariable('WO_CAPTURE_AUDIO_WINDOW_HANDLE')
@@ -546,14 +552,38 @@ const defaultExecFile: CaptureAudioExecFile = (
     );
   });
 
+// PowerShell serializes host-stream records (progress, verbose, debug,
+// warning) as CLIXML onto stderr when output is redirected or the session is
+// non-interactive. The probe sets $ProgressPreference='SilentlyContinue', but
+// keep a defense-in-depth filter so a host-level module-prep record such as
+// "正在准备首次使用模块" cannot cause the output parser to fail closed. Only
+// genuinely textual error output on stderr is treated as a probe failure.
+const POWERSHELL_CLIXML_PREFIX = '#< CLIXML';
+
+function isHarmlessPowerShellStderr(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return true;
+  // Accept a single CLIXML document covering the whole stream as host-stream
+  // noise (progress/verbose records serialized by the non-interactive host).
+  // If anything else trails the document, treat stderr as a real probe error.
+  if (
+    trimmed.startsWith(POWERSHELL_CLIXML_PREFIX) &&
+    trimmed.endsWith('</Objs>') &&
+    trimmed.includes('http://schemas.microsoft.com/powershell/2004/04')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function parseWindowsProcessProbeOutput(
   stdout: string,
   stderr: string,
 ): number | null {
   if (
     stdout.length > 128 ||
-    stderr.trim().length !== 0 ||
-    stdout.trim().length === 0
+    stdout.trim().length === 0 ||
+    !isHarmlessPowerShellStderr(stderr)
   ) {
     return null;
   }

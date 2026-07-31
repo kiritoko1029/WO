@@ -118,6 +118,65 @@ describe('desktop capture audio targets', () => {
     },
   );
 
+  // Regression: Windows PowerShell writes a host-stream "preparing for
+  // first-time use of module" progress record, serialized as CLIXML onto
+  // stderr, whenever the probe reaches Add-Type on a cold module-analysis
+  // cache. The probe must tolerate that harmless stderr noise and still
+  // resolve the PID — otherwise window audio capture fails closed with
+  // PROBE_OUTPUT_INVALID on every real window while fullscreen audio works.
+  test('tolerates a harmless PowerShell CLIXML progress record on stderr', async () => {
+    const clixmlProgress =
+      '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>正在准备首次使用模块。</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>';
+    const execFile = vi.fn<CaptureAudioExecFile>(async () => ({
+      stdout: '{"pid":4321}\r\n',
+      stderr: clixmlProgress,
+    }));
+    const onFailure = vi.fn();
+
+    await expect(
+      resolveWindowsWindowProcessId('101', {
+        environment: { SystemRoot: 'C:\\Windows' },
+        execFile,
+        onFailure,
+      }),
+    ).resolves.toBe(4_321);
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    '#< CLIXML\n<Objs xmlns="http://schemas.microsoft.com/powershell/2004/04"></Objs>',
+    '   ',
+    '',
+  ])('accepts empty or CLIXML-only stderr %j', async (stderr) => {
+    const execFile = vi.fn<CaptureAudioExecFile>(async () => ({
+      stdout: '{"pid":123}',
+      stderr,
+    }));
+    await expect(
+      resolveWindowsWindowProcessId('101', {
+        environment: { SystemRoot: 'C:\\Windows' },
+        execFile,
+      }),
+    ).resolves.toBe(123);
+  });
+
+  test('fails closed when stderr carries a real error after CLIXML noise', async () => {
+    const execFile = vi.fn<CaptureAudioExecFile>(async () => ({
+      stdout: '{"pid":123}',
+      stderr:
+        '#< CLIXML\n<Objs xmlns="http://schemas.microsoft.com/powershell/2004/04"></Objs>\nAdd-Type : cannot compile',
+    }));
+    const onFailure = vi.fn();
+    await expect(
+      resolveWindowsWindowProcessId('101', {
+        environment: { SystemRoot: 'C:\\Windows' },
+        execFile,
+        onFailure,
+      }),
+    ).resolves.toBeNull();
+    expect(onFailure).toHaveBeenCalledWith('PROBE_OUTPUT_INVALID');
+  });
+
   test('fails closed before execution for invalid system or window identity', async () => {
     const execFile = vi.fn<CaptureAudioExecFile>();
     const onFailure = vi.fn();
