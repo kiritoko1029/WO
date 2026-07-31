@@ -175,6 +175,9 @@ function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow(
     createWindowOptions(join(directory, '../preload/index.js')),
   );
+  // Keep the native menu bar hidden on Windows even after the window regains
+  // focus (autoHideMenuBar alone can re-show it on first activation).
+  window.setMenuBarVisibility(false);
   let windowClosing = false;
   guardCaptureShutdown(window);
   // Dev mode runs against the Vite dev server, which injects an inline HMR

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Mic,
   MicOff,
@@ -15,6 +15,7 @@ import {
   type NoiseIntensity,
 } from '../media/noise-suppressor.js';
 import type { ScreenShareState } from '../media/screen-controller.js';
+import { useClickOutside } from '../hooks/use-click-outside.js';
 
 export function CallToolbar({
   busy,
@@ -72,6 +73,8 @@ export function CallToolbar({
   readonly onScreenShare: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useClickOutside(wrapRef, () => setSettingsOpen(false), settingsOpen);
 
   // Re-enumerate devices whenever the settings panel opens so hot-plugged
   // microphones / speakers appear without restarting the call.
@@ -99,7 +102,7 @@ export function CallToolbar({
       : '共享屏幕';
 
   return (
-    <div className="toolbar-wrap">
+    <div className="toolbar-wrap" ref={wrapRef}>
       {settingsOpen && (
         <div className="settings-popover" role="dialog" aria-label="通话设置">
           <strong>通话设置</strong>

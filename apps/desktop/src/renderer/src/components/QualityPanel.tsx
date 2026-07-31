@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Activity, X } from 'lucide-react';
 
+import { useClickOutside } from '../hooks/use-click-outside.js';
 import type { QualityDiagnosticSample } from '../media/stats-buffer.js';
 
 function number(value: number | null, digits = 0): string {
@@ -29,26 +30,43 @@ function pathLine(sample: QualityDiagnosticSample | null): string {
   return `${route} · ${sample.path.protocol.toUpperCase()}`;
 }
 
+function outboundRtt(sample: QualityDiagnosticSample): number | null {
+  return sample.outbound?.rttMs ?? sample.inbound?.rttMs ?? null;
+}
+
+// Compact one-line summary shown on the collapsed toggle: latency + send
+// bitrate, the two metrics users glance at most. "--" when not yet sampled.
+function summaryLine(sample: QualityDiagnosticSample | null): string {
+  if (sample === null) return '-- ms';
+  const rtt = outboundRtt(sample);
+  const sendBitrate = sample.outbound?.bitrateBps ?? null;
+  const rttText = rtt === null ? '-- ms' : `${number(rtt)} ms`;
+  return `${rttText} · ${bitrate(sendBitrate)}`;
+}
+
 export function QualityPanel({
   sample,
 }: {
   readonly sample: QualityDiagnosticSample | null;
 }) {
   const [open, setOpen] = useState(false);
+  const controlRef = useRef<HTMLDivElement>(null);
   const outbound = sample?.outbound ?? null;
   const inbound = sample?.inbound ?? null;
+  useClickOutside(controlRef, () => setOpen(false), open);
 
   return (
-    <div className="quality-control">
+    <div className="quality-control" ref={controlRef}>
       <button
         type="button"
         className="quality-toggle"
         aria-label="连接质量"
         aria-expanded={open}
-        title="连接质量"
+        title={open ? '收起连接质量详情' : '查看连接质量详情'}
         onClick={() => setOpen((current) => !current)}
       >
-        <Activity size={16} />
+        <Activity size={15} />
+        <span className="quality-summary">{summaryLine(sample)}</span>
       </button>
       {open && (
         <section className="quality-panel" aria-label="连接质量详情">

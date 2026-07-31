@@ -1193,7 +1193,7 @@ button:disabled {
 
 .room-shell {
   position: relative;
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-rows: 46px minmax(0, 1fr);
   color: var(--wo-stage-text);
   background: var(--wo-stage-bg);
 }
@@ -1209,10 +1209,11 @@ button:disabled {
 
 .room-header {
   color: var(--wo-stage-text);
-  background: color-mix(in oklab, var(--wo-stage-bg) 70%, transparent);
+  background: color-mix(in oklab, var(--wo-stage-bg) 62%, transparent);
   border-bottom: 1px solid
     color-mix(in oklab, var(--wo-stage-border) 50%, transparent);
-  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
 }
 
 .room-identity {
@@ -1276,6 +1277,33 @@ button:disabled {
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.12em;
+}
+
+/* Click-to-copy room code affordance: an inline-flex button wrapping the
+   <code> chip and a copy/check icon, with a subtle hover lift. */
+.room-code-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  color: var(--wo-stage-text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: color var(--wo-dur) var(--wo-ease);
+}
+
+.room-code-button:hover {
+  color: var(--wo-brand-500);
+}
+
+.room-code-button:focus-visible {
+  outline: none;
+  border-radius: 6px;
+}
+
+.room-code-button code {
+  cursor: pointer;
 }
 
 .room-identity .lan-room-endpoint {
@@ -1364,8 +1392,23 @@ button:disabled {
 }
 
 .quality-toggle {
-  width: 30px;
-  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quality-toggle:focus-visible {
+  outline: none;
+}
+
+.quality-summary {
+  color: var(--wo-text-muted);
+  letter-spacing: 0.01em;
 }
 
 .quality-toggle:hover,
@@ -1592,6 +1635,15 @@ button:disabled {
   width: 100%;
   height: 100%;
   background: #000;
+  border: 0;
+  border-radius: 0;
+}
+
+/* Hide the cursor over the whole fullscreen stage (including the letterbox
+   area) once the pointer has been idle, for a distraction-free view. The
+   <video> mirrors this via its inline cursor style. */
+.screen-stage--fullscreen[data-overlay-active='false'] {
+  cursor: none;
 }
 
 .screen-empty {
@@ -1648,10 +1700,64 @@ button:disabled {
   transition: opacity var(--wo-dur) var(--wo-ease);
 }
 
+/* Live preview: the in-stage view controls follow the idle-reveal timer
+   (driven by data-overlay-active on the stage), not raw hover. Keep hover as a
+   fallback only for non-live states (empty / waiting) which never set the
+   attribute. */
+.screen-stage[data-overlay-active='true'] .screen-view-controls,
 .screen-stage:hover .screen-view-controls,
-.screen-stage:focus-within .screen-view-controls,
-.screen-stage--fullscreen .screen-view-controls {
+.screen-stage:focus-within .screen-view-controls {
   opacity: 1;
+}
+
+/*
+ * Immersive fullscreen controls overlay. Covers the stage so the view controls
+ * (zoom / exit fullscreen) and the bottom call toolbar float over the video.
+ * The container never eats pointer events itself (mousemove must reach the
+ * stage to drive the idle-reveal timer); only the inner controls opt back in.
+ * Visibility is driven by `data-active`, which flips with pointer movement and
+ * fades out after the pointer goes idle.
+ */
+.fullscreen-controls-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--wo-dur) var(--wo-ease);
+}
+
+.fullscreen-controls-overlay[data-active='true'] {
+  opacity: 1;
+}
+
+/* Inside the overlay the view controls sit at the bottom-right corner and the
+   call toolbar sits centered; both re-enable interaction. */
+.fullscreen-controls-overlay .screen-view-controls {
+  position: absolute;
+  right: 18px;
+  bottom: 24px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.fullscreen-bottom-toolbar {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+/* The call toolbar's own wrapper is positioned for the embedded layout; inside
+   the immersive overlay it is already placed by .fullscreen-bottom-toolbar, so
+   neutralize its absolute positioning to avoid a double offset. */
+.fullscreen-bottom-toolbar > .toolbar-wrap {
+  position: static;
+  transform: none;
 }
 
 .screen-view-controls button {
@@ -1675,6 +1781,14 @@ button:disabled {
 .screen-view-controls button:hover {
   color: #fff;
   background: rgb(255 255 255 / 0.08);
+}
+
+/* Override the global :focus-visible outline so the small floating control
+   buttons don't show a clunky square focus ring; reuse the hover tint instead. */
+.screen-view-controls button:focus-visible {
+  outline: none;
+  color: #fff;
+  background: rgb(255 255 255 / 0.12);
 }
 
 .screen-view-controls button.selected {
@@ -1842,7 +1956,7 @@ button:disabled {
 
 .source-picker-backdrop {
   position: absolute;
-  inset: 58px 0 0;
+  inset: 46px 0 0;
   z-index: 10;
   display: grid;
   padding: 24px;
@@ -2169,6 +2283,16 @@ button:disabled {
   left: 50%;
   z-index: 3;
   transform: translateX(-50%);
+  transition: opacity var(--wo-dur) var(--wo-ease);
+}
+
+/* While a live screen share is showing, the floating toolbars fade out when
+   the pointer has been idle (driven by data-screen-controls-active on the
+   shell), keeping the preview distraction-free. Header stays visible. */
+.room-shell[data-screen-controls-active='false'] .toolbar-wrap,
+.room-shell[data-screen-controls-active='false'] .screen-share-controls {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .call-toolbar {

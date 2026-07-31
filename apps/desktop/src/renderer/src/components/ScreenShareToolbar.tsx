@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Activity, Gauge } from 'lucide-react';
 
+import { useClickOutside } from '../hooks/use-click-outside.js';
 import {
   SCREEN_BITRATE_PRESETS,
   type ScreenBitrateTarget,
@@ -75,6 +76,8 @@ export function ScreenShareToolbar({
   readonly onTargetChange: (target: ScreenBitrateTarget) => void;
 }) {
   const [statsOpen, setStatsOpen] = useState(false);
+  const statsRef = useRef<HTMLDivElement>(null);
+  useClickOutside(statsRef, () => setStatsOpen(false), statsOpen);
   const selected = selectedPresetValue(target);
 
   return (
@@ -104,7 +107,7 @@ export function ScreenShareToolbar({
         </select>
       </div>
       <span className="screen-control-separator" aria-hidden="true" />
-      <div className="transmission-stats-control">
+      <div className="transmission-stats-control" ref={statsRef}>
         <button
           type="button"
           className="transmission-stats-toggle"

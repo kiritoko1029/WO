@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { AudioLines, Copy, ExternalLink, Settings, Share2 } from 'lucide-react';
+import { AudioLines, Check, Copy, ExternalLink, Settings, Share2 } from 'lucide-react';
 import {
   createJoinProtocolUrl,
   createServerShareUrl,
@@ -15,6 +15,7 @@ import { QualityPanel } from '../components/QualityPanel.js';
 import { ScreenShareToolbar } from '../components/ScreenShareToolbar.js';
 import { ScreenStage } from '../components/ScreenStage.js';
 import { SourcePicker } from '../components/SourcePicker.js';
+import { useClickOutside } from '../hooks/use-click-outside.js';
 import { useCall } from '../state/call-store.js';
 import { useRoom } from '../state/room-store.js';
 
@@ -33,7 +34,14 @@ export function RoomRoute({
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState<'client' | 'web' | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [roomCodeCopied, setRoomCodeCopied] = useState(false);
+  // Whether the floating toolbars are revealed while a screen share is showing.
+  // Driven by ScreenStage's idle-reveal timer so the call toolbar and share
+  // status fade out in sync with the in-stage overlay.
+  const [screenControlsActive, setScreenControlsActive] = useState(true);
   const hangingUpRef = useRef(false);
+  const shareRef = useRef<HTMLDivElement>(null);
+  useClickOutside(shareRef, () => setShareOpen(false), shareOpen);
   if (room === null) return null;
   const parsedShareIntent = serverJoinIntentSchema.safeParse({
     version: 1,
@@ -100,11 +108,9 @@ export function RoomRoute({
       setHangingUp(false);
     }
   };
-  const copyShareUrl = async (
-    kind: 'client' | 'web',
-    value: string,
-  ): Promise<void> => {
-    setCopyError(null);
+  // Three-tier clipboard write (WO bridge → navigator.clipboard → execCommand
+  // fallback). Shared by the room-code copy affordance and the share menu.
+  const writeClipboard = async (value: string): Promise<boolean> => {
     let succeeded = false;
     try {
       if (window.woClipboard !== undefined) {
@@ -138,6 +144,15 @@ export function RoomRoute({
         textarea.remove();
       }
     }
+    return succeeded;
+  };
+
+  const copyShareUrl = async (
+    kind: 'client' | 'web',
+    value: string,
+  ): Promise<void> => {
+    setCopyError(null);
+    const succeeded = await writeClipboard(value);
     if (succeeded) {
       setCopied(kind);
       return;
@@ -146,10 +161,71 @@ export function RoomRoute({
     setCopyError('复制失败，请允许剪贴板权限后重试');
   };
 
+  const copyRoomCode = async (): Promise<void> => {
+    const succeeded = await writeClipboard(room.roomCode);
+    if (succeeded) {
+      setRoomCodeCopied(true);
+      setTimeout(() => setRoomCodeCopied(false), 1500);
+    }
+  };
+
+  // The call toolbar is rendered in two places: anchored at the bottom of the
+  // room shell for the normal layout, and again inside the immersive fullscreen
+  // overlay (passed to ScreenStage). The fullscreen element is lifted above
+  // everything by the Fullscreen API, so only one instance is visible at a time;
+  // each instance keeps its own ephemeral UI state (e.g. the settings popover).
+  const callToolbar = (
+    <CallToolbar
+      busy={busy || hangingUp}
+      muted={call.snapshot.muted}
+      outputMuted={call.snapshot.outputMuted}
+      inputs={call.snapshot.inputs}
+      outputs={call.snapshot.outputs}
+      selectedInputId={call.snapshot.selectedInputId}
+      selectedOutputId={call.snapshot.selectedOutputId}
+      supportsOutputSelection={call.snapshot.supportsOutputSelection}
+      onMutedChange={call.controller.setMuted}
+      onInputChange={(deviceId) =>
+        void call.controller.switchMicrophone(deviceId).catch(() => undefined)
+      }
+      onOutputChange={(deviceId) =>
+        void call.controller.selectOutput(deviceId).catch(() => undefined)
+      }
+      onOutputMutedChange={call.controller.setOutputMuted}
+      onRemoteVolumeChange={call.controller.setRemoteVolume}
+      onMicrophoneVolumeChange={call.controller.setMicrophoneVolume}
+      onNoiseIntensityChange={(intensity) =>
+        void call.controller
+          .setNoiseIntensity(intensity)
+          .catch(() => undefined)
+      }
+      onRefreshDevices={() =>
+        void call.controller.refreshDevices().catch(() => undefined)
+      }
+      retryAvailable={call.snapshot.microphoneRetryAvailable}
+      noiseIntensity={call.snapshot.noiseIntensity}
+      remoteVolume={call.snapshot.remoteVolume}
+      microphoneVolume={call.snapshot.microphoneVolume}
+      screenState={screenState}
+      screenDisabled={remoteOwnsScreen}
+      screenOwnerName={remoteOwnerName}
+      onScreenShare={() => {
+        if (screenActive) {
+          void call.controller.stopScreenShare().catch(() => undefined);
+        } else {
+          void call.controller.prepareScreenShare().catch(() => undefined);
+        }
+      }}
+      onRetry={() => void call.controller.start().catch(() => undefined)}
+      onHangup={() => void hangup()}
+    />
+  );
+
   return (
     <div
       className="room-shell"
       data-rnnoise-active={call.snapshot.rnnoiseActive}
+      data-screen-controls-active={screenPresentationLive ? String(screenControlsActive) : undefined}
     >
       <header className="room-header">
         <div className="product-lockup compact">
@@ -162,7 +238,20 @@ export function RoomRoute({
           <ConnectionStatus status={call.snapshot.status} />
           <QualityPanel sample={call.snapshot.quality} />
           <span className="room-code-label">房间码</span>
-          <code>{room.roomCode}</code>
+          <button
+            type="button"
+            className="room-code-button"
+            title={roomCodeCopied ? '已复制' : '点击复制房间号'}
+            aria-label={roomCodeCopied ? '已复制房间号' : '复制房间号'}
+            onClick={() => void copyRoomCode()}
+          >
+            <code>{room.roomCode}</code>
+            {roomCodeCopied ? (
+              <Check size={13} />
+            ) : (
+              <Copy size={13} />
+            )}
+          </button>
           {lanEndpoint !== null && (
             <>
               <span className="room-code-label">可信局域网</span>
@@ -172,7 +261,7 @@ export function RoomRoute({
             </>
           )}
           {shareIntent !== null && (
-            <div className="room-share">
+            <div className="room-share" ref={shareRef}>
               <button
                 type="button"
                 className="icon-button"
@@ -256,6 +345,8 @@ export function RoomRoute({
           localState={screenState}
           remoteOwnerName={remoteOwnerName}
           remoteBitrateBps={call.snapshot.remoteScreenBitrateBps}
+          bottomToolbar={callToolbar}
+          onControlsActiveChange={setScreenControlsActive}
           onPresentationVideo={call.controller.attachPresentationVideo}
         />
         {screenState === 'sharing' && (
@@ -301,50 +392,7 @@ export function RoomRoute({
           }
         />
       )}
-      <CallToolbar
-        busy={busy || hangingUp}
-        muted={call.snapshot.muted}
-        outputMuted={call.snapshot.outputMuted}
-        inputs={call.snapshot.inputs}
-        outputs={call.snapshot.outputs}
-        selectedInputId={call.snapshot.selectedInputId}
-        selectedOutputId={call.snapshot.selectedOutputId}
-        supportsOutputSelection={call.snapshot.supportsOutputSelection}
-        onMutedChange={call.controller.setMuted}
-        onInputChange={(deviceId) =>
-          void call.controller.switchMicrophone(deviceId).catch(() => undefined)
-        }
-        onOutputChange={(deviceId) =>
-          void call.controller.selectOutput(deviceId).catch(() => undefined)
-        }
-        onOutputMutedChange={call.controller.setOutputMuted}
-        onRemoteVolumeChange={call.controller.setRemoteVolume}
-        onMicrophoneVolumeChange={call.controller.setMicrophoneVolume}
-        onNoiseIntensityChange={(intensity) =>
-          void call.controller
-            .setNoiseIntensity(intensity)
-            .catch(() => undefined)
-        }
-        onRefreshDevices={() =>
-          void call.controller.refreshDevices().catch(() => undefined)
-        }
-        retryAvailable={call.snapshot.microphoneRetryAvailable}
-        noiseIntensity={call.snapshot.noiseIntensity}
-        remoteVolume={call.snapshot.remoteVolume}
-        microphoneVolume={call.snapshot.microphoneVolume}
-        screenState={screenState}
-        screenDisabled={remoteOwnsScreen}
-        screenOwnerName={remoteOwnerName}
-        onScreenShare={() => {
-          if (screenActive) {
-            void call.controller.stopScreenShare().catch(() => undefined);
-          } else {
-            void call.controller.prepareScreenShare().catch(() => undefined);
-          }
-        }}
-        onRetry={() => void call.controller.start().catch(() => undefined)}
-        onHangup={() => void hangup()}
-      />
+      {callToolbar}
     </div>
   );
 }
