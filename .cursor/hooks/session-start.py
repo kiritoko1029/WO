@@ -68,8 +68,14 @@ def _normalize_windows_shell_path(path_str: str) -> str:
 
 
 FIRST_REPLY_NOTICE = """<first-reply-notice>
-First visible reply: say once in Chinese that Trellis SessionStart context is loaded, then answer directly.
-This notice is one-shot: do not repeat it after the first assistant reply in the same session.
+On the first visible assistant reply in this session, briefly acknowledge that Trellis SessionStart context loaded.
+Choose the acknowledgment language in this order:
+1. Use the language of the user's current request (the user message that triggered this reply).
+2. If that request has no clear natural language, use an explicitly established project communication language.
+3. If neither provides a language, output the language-neutral fallback exactly: `Trellis SessionStart ✓`.
+Continue directly with the user's request after the acknowledgment.
+The acknowledgment must not alter the language used for the remainder of the response.
+This notice is one-shot: do not repeat it after the first visible assistant reply in this session.
 </first-reply-notice>"""
 
 # Force UTF-8 on stdin/stdout/stderr on Windows. Default codepage there is
@@ -138,6 +144,7 @@ def should_skip_injection() -> bool:
         "KIRO_NON_INTERACTIVE",
         "COPILOT_NON_INTERACTIVE",
         "TRAE_NON_INTERACTIVE",
+        "ZCODE_NON_INTERACTIVE",
     ]
     return any(os.environ.get(var) == "1" for var in non_interactive_vars)
 
@@ -188,6 +195,9 @@ def _detect_platform(input_data: dict) -> str | None:
     if isinstance(input_data.get("cursor_version"), str):
         return "cursor"
     env_map = {
+        # ZCode may set both ZCODE_PROJECT_DIR and CLAUDE_PROJECT_DIR; check
+        # ZCODE first so ZCode sessions aren't misdetected as claude.
+        "ZCODE_PROJECT_DIR": "zcode",
         "CLAUDE_PROJECT_DIR": "claude",
         "CURSOR_PROJECT_DIR": "cursor",
         "CODEBUDDY_PROJECT_DIR": "codebuddy",
@@ -220,6 +230,8 @@ def _detect_platform(input_data: dict) -> str | None:
         return "kiro"
     if ".trae" in script_parts:
         return "trae"
+    if ".zcode" in script_parts:
+        return "zcode"
     return None
 
 
@@ -341,7 +353,7 @@ def _get_task_status(trellis_dir: Path, input_data: dict) -> str:
     if active.stale or not task_dir.is_dir():
         return (
             f"Status: STALE POINTER\nTask: {task_ref}\n"
-            f"Next-Action: Run `python3 ./.trellis/scripts/task.py finish` to clear the stale pointer, "
+            f"Next-Action: Run `python ./.trellis/scripts/task.py finish` to clear the stale pointer, "
             "then ask the user what to work on next."
         )
 
@@ -639,7 +651,7 @@ def _build_compact_current_state(
         try:
             task_count = sum(1 for _ in iter_active_tasks(get_tasks_dir(repo_root)))
             lines.append(
-                f"Active tasks: {task_count} total. Use `python3 ./.trellis/scripts/task.py list --mine` only if needed."
+                f"Active tasks: {task_count} total. Use `python ./.trellis/scripts/task.py list --mine` only if needed."
             )
         except Exception:
             pass  # Optional task summary; keep compact state available.
@@ -711,7 +723,7 @@ def _build_workflow_overview(workflow_path: Path) -> str:
 
     out_lines = [
         "# Development Workflow - Session Summary",
-        "Full guide: .trellis/workflow.md. Step detail: `python3 ./.trellis/scripts/get_context.py --mode phase --step <X.Y>`.",
+        "Full guide: .trellis/workflow.md. Step detail: `python ./.trellis/scripts/get_context.py --mode phase --step <X.Y>`.",
         "",
     ]
 
@@ -744,6 +756,7 @@ def main():
         "KIRO_PROJECT_DIR",
         "COPILOT_PROJECT_DIR",
         "TRAE_PROJECT_DIR",
+        "ZCODE_PROJECT_DIR",
     ]
     project_dir = None
     for var in project_dir_env_vars:
@@ -805,7 +818,7 @@ Trellis compact SessionStart context. Use it to orient the session; load details
 
     output.write(
         "Discover more via: "
-        "`python3 ./.trellis/scripts/get_context.py --mode packages`\n"
+        "`python ./.trellis/scripts/get_context.py --mode packages`\n"
     )
     output.write("</guidelines>\n\n")
 
@@ -826,15 +839,22 @@ Context loaded. Follow <task-status>. Load workflow/spec/task details only when 
         print(context_text, flush=True)
         return
 
-    result = {
-        # Claude Code / Qoder / CodeBuddy / Droid / Gemini / Copilot format
+    platform = _detect_platform(hook_input)
+    result: dict[str, object] = {
+        # Claude Code / Qoder / CodeBuddy / Droid / Gemini / Copilot / Trae /
+        # ZCode format.
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": context_text,
         },
-        # Cursor sessionStart format (top-level snake_case per Cursor docs)
-        "additional_context": context_text,
     }
+    # Cursor sessionStart format (top-level snake_case per Cursor docs).
+    # ZCode reads BOTH `hookSpecificOutput.additionalContext` and top-level
+    # `additional_context` without deduplication, so emitting both keys would
+    # duplicate the context in the conversation. Keep the previous shared output
+    # shape for every other platform.
+    if platform != "zcode":
+        result["additional_context"] = context_text
 
     # Output JSON - stdout is already configured for UTF-8
     print(json.dumps(result, ensure_ascii=False), flush=True)
