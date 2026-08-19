@@ -1,31 +1,36 @@
 # WO
 
-WO 是一个可自托管的双人语音与桌面共享应用。中心模式由自己的
-Docker Compose 提供账号、房间信令、Web、PostgreSQL 和 TURN；媒体优先在两端
-直接传输。桌面端还提供仅面向可信局域网的轻量房间模式。
+**English** | [简体中文](README.zh-CN.md)
 
-> 当前能力有自动化测试，但 Windows/macOS 正式安装包、真实双机局域网和
-> 1080p60 仍未完成发布认证。准确状态见
-> [支持矩阵](docs/support-matrix.md)。
+WO is a self-hostable two-person voice and desktop-sharing application. In
+server mode, your own Docker Compose stack provides accounts, room signaling,
+the web client, PostgreSQL, and TURN, while media flows directly between the
+two peers whenever the network allows. The desktop app additionally offers a
+lightweight room mode restricted to trusted local networks.
 
-## 仓库组成
+> Current capabilities are covered by automated tests, but official
+> Windows/macOS installers, real two-device LAN validation, and 1080p60 have
+> not yet completed release certification. For the exact status see the
+> [support matrix](docs/support-matrix.md).
 
-| 路径                    | 作用                                              |
-| ----------------------- | ------------------------------------------------- |
-| `apps/desktop`          | Electron 桌面客户端                               |
-| `apps/web`              | 复用桌面 React/WebRTC 层的浏览器客户端            |
-| `apps/server`           | 中心 API、房间信令，以及可嵌入的局域网轻量服务    |
-| `packages/protocol`     | REST、信令、邀请和 WebRTC 的共享运行时协议        |
-| `packages/database`     | PostgreSQL schema 与迁移                          |
-| `packages/config`       | 中心服务配置                                      |
-| `packages/media-policy` | 媒体参数与策略                                    |
-| `deploy`                | Caddy、server、PostgreSQL、coturn 的 Compose 部署 |
-| `apps/media-lab-*`      | 媒体能力实验工具，不属于生产入口                  |
+## Repository layout
 
-## 中心模式快速开始
+| Path                    | Purpose                                                     |
+| ----------------------- | ----------------------------------------------------------- |
+| `apps/desktop`          | Electron desktop client                                     |
+| `apps/web`              | Browser client reusing the desktop React/WebRTC layers      |
+| `apps/server`           | Central API, room signaling, and the embeddable LAN service |
+| `packages/protocol`     | Shared runtime protocol for REST, signaling, invites, WebRTC |
+| `packages/database`     | PostgreSQL schema and migrations                            |
+| `packages/config`       | Central service configuration                               |
+| `packages/media-policy` | Media parameters and policies                               |
+| `deploy`                | Compose deployment for Caddy, server, PostgreSQL, and coturn |
+| `apps/media-lab-*`      | Media capability experiments, not part of the product entry |
 
-要求 Node.js 24、pnpm 10.32.1、Linux x86_64、Docker Engine 26+ 和
-Docker Compose 2.24.4+。
+## Server-mode quick start
+
+Requires Node.js 24, pnpm 10.32.1, Linux x86_64, Docker Engine 26+, and
+Docker Compose 2.24.4+.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -33,7 +38,8 @@ cp deploy/.env.example deploy/.env
 node deploy/scripts/init-secrets.mjs
 ```
 
-编辑 `deploy/.env`，为应用和 TURN 配置真实域名、证书及公网 IPv4，然后运行：
+Edit `deploy/.env` to set real domains, certificates, and a public IPv4 for
+the app and TURN, then run:
 
 ```bash
 node deploy/scripts/preflight.mjs --env-file=deploy/.env
@@ -41,87 +47,108 @@ node deploy/scripts/compose.mjs --env-file=deploy/.env up -d --build --wait
 node deploy/scripts/smoke.mjs --env-file=deploy/.env
 ```
 
-打开 `https://<APP_DOMAIN>` 即可使用 Web 客户端。Caddy 在同一 HTTPS origin
-提供 SPA，并把 `/v1/*` 和实时 WebSocket 代理到 server；不需要单独配置 Web
-域名或 CORS。完整的证书、防火墙、备份与升级要求见
-[部署文档](docs/deployment.md)。
+Open `https://<APP_DOMAIN>` to use the web client. Caddy serves the SPA and
+proxies `/v1/*` and the realtime WebSocket on a single HTTPS origin, so no
+separate web domain or CORS setup is needed. Full requirements for
+certificates, firewalling, backups, and upgrades are in the
+[deployment guide](docs/deployment.md).
 
-## 桌面端连接自建服务
+## Connecting the desktop app to your server
 
-桌面客户端在登录页和登录后的首页都显示“服务器”。填写的值必须是规范的
-HTTPS origin：
+The desktop client shows a "Server" field on both the login page and the home
+screen. The value must be a canonical HTTPS origin:
 
 ```text
 https://wo.example.com
 ```
 
-不能包含路径、查询参数、片段、用户名或密码。保存后客户端会重启，使 REST、
-WSS、CSP 和会话都切换到同一个 origin。
+No path, query, fragment, username, or password is allowed. After saving, the
+client restarts so that REST, WSS, CSP, and sessions all switch to the same
+origin.
 
-后端地址优先级为：
+Backend resolution order:
 
 ```text
-WO_API_ORIGIN > 桌面用户配置 > https://localhost
+WO_API_ORIGIN > desktop user configuration > https://localhost
 ```
 
-例如运维可固定地址：
+For example, an operator can pin the address:
 
 ```bash
 WO_API_ORIGIN=https://wo.example.com pnpm --filter @wo/desktop dev
 ```
 
-设置 `WO_API_ORIGIN` 后界面只读。refresh token 与 origin 绑定，切换服务不会把
-旧服务凭据发送到新服务。自签证书只用于隔离测试；应把公开 CA 证书正确加入
-系统信任库，不要关闭 TLS 校验。
+When `WO_API_ORIGIN` is set, the field becomes read-only. Refresh tokens are
+bound to the origin, so switching servers never sends old credentials to the
+new server. Self-signed certificates are only for isolated testing; import the
+public CA certificate into the system trust store properly instead of
+disabling TLS verification.
 
-## 加入和分享房间
+## Joining and sharing rooms
 
-中心房间可分享 6 位房间码，或直接复制两种链接：
+Server rooms can be shared as a 6-digit room code, or as either of two link
+forms:
 
 ```text
 https://wo.example.com/join/123456
 wo://join?v=1&mode=server&origin=https%3A%2F%2Fwo.example.com&room=123456
 ```
 
-HTTPS 链接可继续使用同源 Web 客户端，也可通过页面上的“在 WO 客户端打开”
-唤起已安装客户端。邀请指向另一个中心服务时，桌面客户端会显示目标域名并要求
-确认；确认后重启并在目标服务重新登录，不会静默切换或沿用原登录态。
+The HTTPS link keeps using the same-origin web client, or can wake the
+installed desktop client via the "Open in WO client" button on the page. When
+an invite points at a different server, the desktop client shows the target
+domain and asks for confirmation; after confirming it restarts and signs in
+again on the target server — it never switches silently or reuses the previous
+session.
 
-不要手工拼接 `wo://` 链接。客户端会严格校验协议版本、服务 origin、房间码和
-局域网邀请字段。
+Do not hand-assemble `wo://` links. The client strictly validates the protocol
+version, server origin, room code, and LAN invite fields.
 
-## 可信局域网轻量模式
+## Trusted-LAN lite mode
 
-轻量模式仅用于两台桌面设备处于同一可信 RFC1918 局域网的场景：
+Lite mode is only for two desktop devices on the same trusted RFC1918
+network:
 
-1. 房主在登录页或首页选择“可信局域网”，输入显示名称并创建房间。
-2. 房主在房间内复制“客户端邀请链接”，私下发送给另一台设备。
-3. 加入方打开链接；也可选择“可信局域网”与“加入房间”，输入显示名称并粘贴
-   完整 `wo://` 邀请。
+1. The host selects "Trusted LAN" on the login or home screen, enters a
+   display name, and creates a room.
+2. The host copies the "client invite link" from the room and sends it to the
+   other device privately.
+3. The joiner opens the link; alternatively they can select "Trusted LAN" →
+   "Join room", enter a display name, and paste the full `wo://` invite.
 
-- 创建房间的一方在桌面进程内启动临时双人服务；
-- 不需要中心服务、账号、PostgreSQL 或 TURN；
-- 房主退出、设备休眠或服务关闭时房间结束；绑定地址消失或网卡身份变化由默认 5 秒轮询检测后关闭；
-- 6 位房间码只用于人工核对，不能单独发现房主，也不是认证凭据；
-- 完整邀请还包含房主私网地址、随机端口和 256 位随机密钥；
-- 信令帧使用 HMAC-SHA-256 认证并拒绝重放，但 `ws://`/`http://` 传输本身不
-  加密。
+- The room creator runs a temporary two-person service inside the desktop
+  process.
+- No central server, accounts, PostgreSQL, or TURN required.
+- The room ends when the host quits, the device sleeps, or the service stops;
+  a vanished bound address or changed network identity is detected by the
+  default 5-second polling and shuts the room down.
+- The 6-digit code is only for human verification: it cannot discover the host
+  on its own and is not an authentication credential.
+- The full invite additionally carries the host's private address, a random
+  port, and a 256-bit random key.
+- Signaling frames are HMAC-SHA-256 authenticated with replay rejection, but
+  the `ws://`/`http://` transport itself is not encrypted.
 
-因此不要在访客 Wi-Fi、公共网络或不受信任的企业网段使用轻量模式。知道房间码
-的人仍无法只靠房间码找到或加入房间；必须获得创建者分享的完整邀请。
-完整邀请等同临时访问凭据，不要发送到公共频道或日志。
+Therefore do not use lite mode on guest Wi-Fi, public networks, or untrusted
+corporate segments. Knowing the room code alone still does not let anyone find
+or join the room; the full invite shared by the creator is required. The full
+invite is equivalent to a temporary access credential — never post it to
+public channels or logs.
 
-该模式已有协议、服务和自动化集成证据，但尚未经过两台真实 Windows/macOS
-设备的语音、屏幕共享和防火墙认证，状态为 `IMPLEMENTED, NOT CERTIFIED`。
+This mode has protocol, service, and automated integration evidence, but has
+not yet passed voice, screen-share, and firewall certification on two real
+Windows/macOS devices; its status is `IMPLEMENTED, NOT CERTIFIED`.
 
-## Web 支持边界
+## Web support boundary
 
-Web 首版支持当前桌面 Chrome 和 Edge，并固定使用页面自己的同源后端。refresh
-token 只保存在当前标签页的 `sessionStorage`，关闭标签页后需要重新登录。
-屏幕共享使用浏览器原生选择器；浏览器没有 `getDisplayMedia()` 时降级为仅语音。
-Safari、Firefox 和移动浏览器不在当前屏幕共享承诺范围内。
+The first web release targets current desktop Chrome and Edge and always uses
+the page's own same-origin backend. The refresh token is kept only in the
+tab's `sessionStorage`, so closing the tab requires signing in again. Screen
+sharing uses the browser's native picker; when `getDisplayMedia()` is
+unavailable it degrades to voice-only. Safari, Firefox, and mobile browsers
+are outside the current screen-sharing commitment.
 
-## 开发检查
+## Development checks
 
 ```bash
 pnpm typecheck
@@ -132,9 +159,14 @@ pnpm test:contract
 pnpm test:e2e:web
 ```
 
-Web E2E 会使用 `deploy/.env.integration` 启动并清理隔离的四服务 Compose
-栈，以两个 Chromium 会话验证创建、加入和双向语音。
+Web E2E boots and tears down an isolated four-service Compose stack using
+`deploy/.env.integration`, verifying create, join, and bidirectional voice
+with two Chromium sessions.
 
-桌面/Web 的开发与打包命令分别位于
-[`apps/desktop/package.json`](apps/desktop/package.json) 和
-[`apps/web/package.json`](apps/web/package.json)。
+Development and packaging commands for desktop/web live in
+[`apps/desktop/package.json`](apps/desktop/package.json) and
+[`apps/web/package.json`](apps/web/package.json).
+
+## License
+
+Released under the [MIT License](LICENSE).
