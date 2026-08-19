@@ -1,6 +1,7 @@
 import {
   createJoinProtocolUrl,
   serverJoinIntentSchema,
+  SOURCE_REPOSITORY_URL,
   type JoinIntent,
 } from '@wo/protocol';
 import {
@@ -18,6 +19,7 @@ export const SHELL_CONFIG_IPC_CHANNELS = Object.freeze([
   'desktop:shell:backend-target:save',
   'desktop:shell:join-intent:consume',
   'desktop:shell:join-intent:switch-server',
+  'desktop:shell:open-external',
 ] as const);
 export const SHELL_JOIN_INTENT_NOTIFICATION_CHANNEL =
   'desktop:shell:join-intent:available';
@@ -36,6 +38,10 @@ export interface ShellConfigApp {
   quit(): void;
 }
 
+export interface ShellConfigShell {
+  openExternal(url: string): Promise<void>;
+}
+
 export interface ShellConfigIpcDependencies {
   readonly app: ShellConfigApp;
   readonly backendTarget: BackendTargetStore;
@@ -43,12 +49,33 @@ export interface ShellConfigIpcDependencies {
   readonly relaunchArguments: readonly string[];
   readonly rendererEntry: string;
   readonly scheduleRestart?: (restart: () => void) => void;
+  readonly shell?: ShellConfigShell;
 }
 
 function invalidArguments(): Error & { readonly code: 'INVALID_ARGUMENTS' } {
   return Object.assign(new Error('Invalid arguments'), {
     code: 'INVALID_ARGUMENTS' as const,
   });
+}
+
+/**
+ * The renderer may only ask the OS to open the public source repository (or a
+ * path inside it). Everything else — other hosts, schemes, credentials — is
+ * rejected before reaching `shell.openExternal`.
+ */
+export function isAllowedExternalUrl(candidate: string): boolean {
+  try {
+    const url = new URL(candidate);
+    return (
+      url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      (url.href === SOURCE_REPOSITORY_URL ||
+        url.href.startsWith(`${SOURCE_REPOSITORY_URL}/`))
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function registerShellConfigIpc(
@@ -131,6 +158,27 @@ export function registerShellConfigIpc(
           ...dependencies.relaunchArguments,
           createJoinProtocolUrl(intent.data),
         ]);
+        return createDesktopIpcSuccess(null);
+      } catch (error) {
+        return createDesktopIpcFailure(error);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'desktop:shell:open-external',
+    async (event, ...arguments_): Promise<DesktopIpcEnvelope<null>> => {
+      try {
+        assertTrustedSender(event, dependencies.rendererEntry);
+        if (
+          arguments_.length !== 1 ||
+          typeof arguments_[0] !== 'string' ||
+          !isAllowedExternalUrl(arguments_[0])
+        ) {
+          throw invalidArguments();
+        }
+        const shell = dependencies.shell;
+        if (shell !== undefined) await shell.openExternal(arguments_[0]);
         return createDesktopIpcSuccess(null);
       } catch (error) {
         return createDesktopIpcFailure(error);

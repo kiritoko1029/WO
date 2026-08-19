@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { AudioLines, LogOut, Plus, Users } from 'lucide-react';
 
 import { AccountSecurityPanel } from '../components/AccountSecurityPanel.js';
+import { AppFooter } from '../components/AppFooter.js';
 import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
 import { DownloadClient } from '../components/DownloadClient.js';
 import { useAuth } from '../state/auth-store.js';
@@ -121,6 +122,7 @@ export function HomeRoute({
           {validationError ?? room.error ?? auth.error}
         </div>
       </main>
+      <AppFooter />
     </div>
   );
 }

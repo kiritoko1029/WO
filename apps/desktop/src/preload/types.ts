@@ -133,6 +133,7 @@ export interface DesktopShellApi {
     switchServer(intent: ServerJoinIntent): Promise<void>;
     subscribe(listener: () => void): () => void;
   };
+  openExternal(url: string): Promise<void>;
 }
 
 export interface DesktopShellBridge {
@@ -145,4 +146,5 @@ export interface DesktopShellBridge {
     switchServer(intent: ServerJoinIntent): Promise<DesktopIpcEnvelope<null>>;
     subscribe(listener: () => void): () => void;
   };
+  openExternal(url: string): Promise<DesktopIpcEnvelope<null>>;
 }

@@ -119,5 +119,7 @@ export function createDesktopShellBridge(
     subscribe: (listener: () => void) =>
       subscribe('desktop:shell:join-intent:available', listener),
   });
-  return Object.freeze({ backendTarget, joinIntent });
+  const openExternal = (url: string) =>
+    invokeShell(invoke, 'desktop:shell:open-external', [url], parseNull);
+  return Object.freeze({ backendTarget, joinIntent, openExternal });
 }

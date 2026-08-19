@@ -163,6 +163,7 @@ function createShellBridge(
       switchServer: vi.fn().mockResolvedValue({ ok: true, value: null }),
       subscribe: vi.fn(() => () => undefined),
     },
+    openExternal: vi.fn().mockResolvedValue({ ok: true, value: null }),
   };
 }
 
@@ -289,6 +290,7 @@ describe('desktop account and room workflow', () => {
         switchServer: vi.fn().mockResolvedValue({ ok: true, value: null }),
         subscribe: vi.fn(() => () => undefined),
       },
+      openExternal: vi.fn().mockResolvedValue({ ok: true, value: null }),
     } satisfies DesktopShellBridge;
     Object.defineProperty(window, 'woShell', {
       configurable: true,

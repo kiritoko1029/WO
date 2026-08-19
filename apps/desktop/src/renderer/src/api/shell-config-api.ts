@@ -75,5 +75,13 @@ export function createRendererShellConfigApi(
       ).then(() => undefined),
     subscribe: (listener: () => void) => bridge.joinIntent.subscribe(listener),
   });
-  return Object.freeze({ backendTarget, joinIntent });
+  const openExternal = (url: string) =>
+    unwrapBridge<null>(
+      () => bridge.openExternal(url),
+      (value) => {
+        if (value !== null) throw new TypeError('Expected null');
+        return null;
+      },
+    ).then(() => undefined);
+  return Object.freeze({ backendTarget, joinIntent, openExternal });
 }

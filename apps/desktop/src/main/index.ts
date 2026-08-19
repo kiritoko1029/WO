@@ -280,6 +280,7 @@ if (ownsSingleInstance) {
     joinIntents,
     relaunchArguments: withoutJoinIntentArguments(process.argv.slice(1)),
     rendererEntry: runtime.rendererEntry,
+    shell,
   });
 
   const appReady = app.whenReady();

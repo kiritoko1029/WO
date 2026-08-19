@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  APP_VERSION,
   P2P_MEDIA_PLAN,
   PROTOCOL_VERSION,
+  SOURCE_REPOSITORY_URL,
   ackEnvelopeSchema,
   authLoginBodySchema,
   authLoginResponseSchema,
@@ -2125,5 +2127,26 @@ describe('active P2P envelope unions', () => {
         rawSocket: true,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('release identity', () => {
+  test('APP_VERSION stays in sync with the package version', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const pkg = JSON.parse(
+      await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version?: unknown };
+    expect(APP_VERSION).toBe(pkg.version);
+    expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+$/u);
+  });
+
+  test('SOURCE_REPOSITORY_URL is the canonical public repository', () => {
+    const url = new URL(SOURCE_REPOSITORY_URL);
+    expect(url.protocol).toBe('https:');
+    expect(url.origin + url.pathname).toBe(
+      'https://github.com/kiritoko1029/WO',
+    );
+    expect(url.search).toBe('');
+    expect(url.hash).toBe('');
   });
 });

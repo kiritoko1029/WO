@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { AudioLines } from 'lucide-react';
 
+import { AppFooter } from '../components/AppFooter.js';
 import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
 import { useAuth } from '../state/auth-store.js';
 
@@ -209,6 +210,7 @@ export function AuthRoute({
         </form>
         <BackendTargetSettings />
       </section>
+      <AppFooter />
     </main>
   );
 }

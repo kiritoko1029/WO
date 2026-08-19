@@ -2826,3 +2826,51 @@ button:disabled {
   background: var(--wo-surface-3);
   border-color: var(--wo-border-strong);
 }
+
+/* Release identity footer (auth + home screens, desktop and web). The
+   home/auth shells gain a trailing auto row so the footer pins to the
+   bottom without affecting the existing centered content. */
+.home-shell {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.auth-shell {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 8px 16px 14px;
+  color: var(--wo-text-muted);
+  font-size: 12px;
+}
+
+.app-footer-version {
+  letter-spacing: 0.02em;
+}
+
+.app-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  color: var(--wo-text-muted);
+  background: none;
+  border: none;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.app-footer-link:hover {
+  color: var(--wo-text);
+  text-decoration: underline;
+}
+
+.app-footer-link:focus-visible {
+  outline: 2px solid var(--wo-brand-500);
+  outline-offset: 2px;
+}

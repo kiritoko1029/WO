@@ -38,6 +38,7 @@ function createHarness() {
     }),
   };
   let restart: (() => void) | null = null;
+  const shell = { openExternal: vi.fn(async () => undefined) };
   registerShellConfigIpc(ipcMain, {
     app,
     backendTarget,
@@ -47,6 +48,7 @@ function createHarness() {
     scheduleRestart: (operation) => {
       restart = operation;
     },
+    shell,
   });
   const mainFrame = { url: rendererEntry };
   const event = { senderFrame: mainFrame, sender: { mainFrame } };
@@ -57,6 +59,7 @@ function createHarness() {
     handlers,
     joinIntents,
     restart: () => restart?.(),
+    shell,
   };
 }
 
@@ -159,5 +162,66 @@ describe('shell config IPC boundary', () => {
       error: { code: 'INVALID_ARGUMENTS' },
     });
     expect(harness.backendTarget.save).not.toHaveBeenCalled();
+  });
+
+  it('opens only the source repository externally and rejects every other URL', async () => {
+    const harness = createHarness();
+
+    await expect(
+      harness.handlers.get('desktop:shell:open-external')?.(
+        harness.event,
+        'https://github.com/kiritoko1029/WO',
+      ),
+    ).resolves.toEqual({ ok: true, value: null });
+    await expect(
+      harness.handlers.get('desktop:shell:open-external')?.(
+        harness.event,
+        'https://github.com/kiritoko1029/WO/releases',
+      ),
+    ).resolves.toEqual({ ok: true, value: null });
+    expect(harness.shell.openExternal).toHaveBeenCalledTimes(2);
+    expect(harness.shell.openExternal).toHaveBeenNthCalledWith(
+      1,
+      'https://github.com/kiritoko1029/WO',
+    );
+    expect(harness.shell.openExternal).toHaveBeenNthCalledWith(
+      2,
+      'https://github.com/kiritoko1029/WO/releases',
+    );
+
+    for (const candidate of [
+      'https://evil.example.com',
+      'https://github.com/kiritoko1029/WO.evil.com',
+      'http://github.com/kiritoko1029/WO',
+      'file:///C:/Windows/System32/calc.exe',
+      'https://user:pass@github.com/kiritoko1029/WO',
+      'not a url',
+    ]) {
+      await expect(
+        harness.handlers.get('desktop:shell:open-external')?.(
+          harness.event,
+          candidate,
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'INVALID_ARGUMENTS' },
+      });
+    }
+    await expect(
+      harness.handlers.get('desktop:shell:open-external')?.(harness.event),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_ARGUMENTS' },
+    });
+    await expect(
+      harness.handlers.get('desktop:shell:open-external')?.(
+        { senderFrame: null, sender: { mainFrame: null } },
+        'https://github.com/kiritoko1029/WO',
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'IPC_FORBIDDEN' },
+    });
+    expect(harness.shell.openExternal).toHaveBeenCalledTimes(2);
   });
 });

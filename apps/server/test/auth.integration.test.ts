@@ -1,8 +1,10 @@
 import {
+  APP_VERSION,
   authLoginResponseSchema,
   authLogoutResponseSchema,
   authRefreshResponseSchema,
   authRegisterResponseSchema,
+  SOURCE_REPOSITORY_URL,
 } from '@wo/protocol';
 import {
   createDatabaseClient,
@@ -119,9 +121,17 @@ describe('HTTP email/password authentication', () => {
     const ready = await app!.inject({ method: 'GET', url: '/v1/health/ready' });
 
     expect(live.statusCode).toBe(200);
-    expect(live.json()).toEqual({ status: 'ok' });
+    expect(live.json()).toEqual({
+      status: 'ok',
+      version: APP_VERSION,
+      source: SOURCE_REPOSITORY_URL,
+    });
     expect(ready.statusCode).toBe(200);
-    expect(ready.json()).toEqual({ status: 'ready' });
+    expect(ready.json()).toEqual({
+      status: 'ready',
+      version: APP_VERSION,
+      source: SOURCE_REPOSITORY_URL,
+    });
 
     const unavailable = await createApp({
       authService: {} as never,

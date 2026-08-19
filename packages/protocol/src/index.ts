@@ -88,6 +88,7 @@ export * from './join-intent.js';
 export * from './media.js';
 export * from './room.js';
 export * from './signaling.js';
+export * from './version.js';
 export * from './webrtc.js';
 
 export const inboundEnvelopeSchema = z.discriminatedUnion('type', [
