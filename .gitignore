@@ -39,6 +39,9 @@ node_modules/
 /docs/poc/results/*
 !/docs/poc/results/.gitkeep
 
+# Local Trellis workspace state (contains ops/deployment research notes)
+.trellis/
+
 # Logs and operating-system metadata
 *.log
 .DS_Store
