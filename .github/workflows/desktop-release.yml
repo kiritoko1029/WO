@@ -55,7 +55,7 @@ jobs:
     name: Build Windows artifacts
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: pnpm/action-setup@v4
 
@@ -97,7 +97,7 @@ jobs:
     name: Build macOS artifacts
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: pnpm/action-setup@v4
 
@@ -144,10 +144,10 @@ jobs:
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: release-artifacts
           merge-multiple: true
@@ -168,10 +168,13 @@ jobs:
           if [ "$DRAFT" = "true" ]; then
             draft_args+=(--draft)
           fi
-          echo "Creating release $tag with $(find release-artifacts -type f | wc -l) files"
+          # The downloaded artifacts keep their platform/artifact-class
+          # subdirectories; flatten to plain files before handing them to gh.
+          mapfile -d '' files < <(find release-artifacts -type f -print0)
+          echo "Creating release $tag with ${#files[@]} files"
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" release-artifacts/* --clobber
+            gh release upload "$tag" "${files[@]}" --clobber
           else
-            gh release create "$tag" release-artifacts/* \
+            gh release create "$tag" "${files[@]}" \
               --title "WO ${tag#v}" --generate-notes "${draft_args[@]}"
           fi
