@@ -141,6 +141,13 @@ Web E2E 会使用 `deploy/.env.integration` 启动并清理隔离的四服务 Co
 [`apps/desktop/package.json`](apps/desktop/package.json) 和
 [`apps/web/package.json`](apps/web/package.json)。
 
+## 桌面发版构建
+
+在 Actions 页面运行 **Desktop release** 工作流，即可自动打包 Windows
+（x64 安装版 + 便携版）与 macOS（x64 + arm64 DMG/ZIP）客户端，并把产物
+挂到 GitHub Release。默认两平台均为 unsigned-development 构建（打包门禁会
+标记为不可分发）；签名（及公证）所需的仓库密钥见工作流文件内的说明。
+
 ## 许可证
 
 以 [MIT License](LICENSE) 发布。

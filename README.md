@@ -15,17 +15,17 @@ lightweight room mode restricted to trusted local networks.
 
 ## Repository layout
 
-| Path                    | Purpose                                                     |
-| ----------------------- | ----------------------------------------------------------- |
-| `apps/desktop`          | Electron desktop client                                     |
-| `apps/web`              | Browser client reusing the desktop React/WebRTC layers      |
-| `apps/server`           | Central API, room signaling, and the embeddable LAN service |
+| Path                    | Purpose                                                      |
+| ----------------------- | ------------------------------------------------------------ |
+| `apps/desktop`          | Electron desktop client                                      |
+| `apps/web`              | Browser client reusing the desktop React/WebRTC layers       |
+| `apps/server`           | Central API, room signaling, and the embeddable LAN service  |
 | `packages/protocol`     | Shared runtime protocol for REST, signaling, invites, WebRTC |
-| `packages/database`     | PostgreSQL schema and migrations                            |
-| `packages/config`       | Central service configuration                               |
-| `packages/media-policy` | Media parameters and policies                               |
+| `packages/database`     | PostgreSQL schema and migrations                             |
+| `packages/config`       | Central service configuration                                |
+| `packages/media-policy` | Media parameters and policies                                |
 | `deploy`                | Compose deployment for Caddy, server, PostgreSQL, and coturn |
-| `apps/media-lab-*`      | Media capability experiments, not part of the product entry |
+| `apps/media-lab-*`      | Media capability experiments, not part of the product entry  |
 
 ## Server-mode quick start
 
@@ -166,6 +166,15 @@ with two Chromium sessions.
 Development and packaging commands for desktop/web live in
 [`apps/desktop/package.json`](apps/desktop/package.json) and
 [`apps/web/package.json`](apps/web/package.json).
+
+## Desktop release builds
+
+Run the **Desktop release** workflow from the Actions tab to package the
+Electron client for Windows (x64 setup + portable) and macOS (x64 + arm64
+DMG/ZIP) and attach the artifacts to a GitHub release. By default both
+platforms produce unsigned-development builds, which the packaging gates mark
+as not distributable; the workflow file documents the repository secrets
+required for signed (and notarized) artifacts.
 
 ## License
 

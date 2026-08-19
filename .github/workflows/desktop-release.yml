@@ -1,0 +1,177 @@
+# Manual desktop release builds.
+#
+# Trigger from the Actions tab ("Desktop release" → Run workflow). The workflow
+# packages the Electron client for Windows (x64 NSIS + portable) and macOS
+# (x64 + arm64 DMG/ZIP), then attaches the artifacts to a GitHub release.
+#
+# By default both platforms build the unsigned-development class, which the
+# packaging gates mark as not distributable. Opt into signed builds with the
+# workflow inputs; they require these repository secrets:
+#
+#   Windows (sign_windows):
+#     WIN_CSC_LINK                       base64-encoded PFX signing certificate
+#     WIN_CSC_KEY_PASSWORD               PFX password
+#     WO_WINDOWS_PUBLISHER_SUBJECT       publisher subject for the verify gate
+#     WO_WINDOWS_CERTIFICATE_THUMBPRINT  certificate SHA-1 thumbprint
+#
+#   macOS (sign_macos):
+#     MAC_CSC_LINK                       base64-encoded P12 Developer ID Application certificate
+#     MAC_CSC_KEY_PASSWORD               P12 password
+#     WO_MAC_TEAM_ID                     10-character Apple Team ID
+#     APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
+#                                        notarization credentials (App-specific password path)
+
+name: Desktop release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (defaults to v<workspace version>)'
+        type: string
+        default: ''
+      sign_windows:
+        description: 'Sign Windows artifacts (requires repo secrets)'
+        type: boolean
+        default: false
+      sign_macos:
+        description: 'Sign and notarize macOS artifacts (requires repo secrets)'
+        type: boolean
+        default: false
+      draft:
+        description: 'Create the release as a draft'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Build Windows artifacts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: pnpm --filter @wo/desktop... run build
+
+      - name: Package (signed)
+        if: ${{ inputs.sign_windows }}
+        run: pnpm --filter @wo/desktop run package:win
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WO_WINDOWS_PUBLISHER_SUBJECT: ${{ secrets.WO_WINDOWS_PUBLISHER_SUBJECT }}
+          WO_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WO_WINDOWS_CERTIFICATE_THUMBPRINT }}
+
+      - name: Package (unsigned development)
+        if: ${{ !inputs.sign_windows }}
+        run: pnpm --filter @wo/desktop run package:win:unsigned-development
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-artifacts
+          path: |
+            apps/desktop/dist/signed/win/*.exe
+            apps/desktop/dist/unsigned-development/win/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Build macOS artifacts
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: pnpm --filter @wo/desktop... run build
+
+      - name: Package (signed and notarized)
+        if: ${{ inputs.sign_macos }}
+        run: pnpm --filter @wo/desktop run package:mac
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          WO_MAC_TEAM_ID: ${{ secrets.WO_MAC_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Package (unsigned development)
+        if: ${{ !inputs.sign_macos }}
+        run: pnpm --filter @wo/desktop run package:mac:unsigned-development
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-desktop-artifacts
+          path: |
+            apps/desktop/dist/signed/mac/*.dmg
+            apps/desktop/dist/signed/mac/*.zip
+            apps/desktop/dist/unsigned-development/mac/*.dmg
+            apps/desktop/dist/unsigned-development/mac/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create GitHub release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create or update the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG}"
+          if [ -z "$tag" ]; then
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          draft_args=()
+          if [ "$DRAFT" = "true" ]; then
+            draft_args+=(--draft)
+          fi
+          echo "Creating release $tag with $(find release-artifacts -type f | wc -l) files"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" release-artifacts/* --clobber
+          else
+            gh release create "$tag" release-artifacts/* \
+              --title "WO ${tag#v}" --generate-notes "${draft_args[@]}"
+          fi
