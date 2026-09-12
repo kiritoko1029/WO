@@ -43,6 +43,7 @@ export const releaseSourceFiles = Object.freeze([
   'deploy/scripts/smoke.mjs',
   'deploy/scripts/upgrade.mjs',
   'deploy/scripts/validate-build-metadata.sh',
+  'deploy/scripts/install-debian-packages.sh',
   'deploy/systemd/mail.env.example',
   'deploy/systemd/monitor.env.example',
   'deploy/systemd/wo-monitor.service',

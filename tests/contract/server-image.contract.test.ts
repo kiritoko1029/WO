@@ -22,20 +22,19 @@ describe('production server image contract', () => {
     );
     expect(dockerfile).toContain('pnpm@10.32.1');
     expect(dockerfile).toContain('pnpm install --frozen-lockfile');
+    expect(dockerfile.match(/ARG WO_APT_SOURCE=mirrors/gu)).toHaveLength(2);
     expect(
-      dockerfile.match(
-        /apt-get -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false update/gu,
-      ),
+      dockerfile.match(/sh \/tmp\/install-debian-packages.sh /gu),
     ).toHaveLength(2);
-    expect(
-      dockerfile.match(
-        /apt-get -o Acquire::Retries=3 install -y --no-install-recommends/gu,
-      ),
-    ).toHaveLength(2);
-    expect(dockerfile.match(/snapshot\.debian\.org/gu)).toHaveLength(4);
-    expect(
-      dockerfile.match(/\/\^URIs: http:\\\/\\\/deb\.debian\.org\\\/\//gu),
-    ).toHaveLength(2);
+    const installer = read('deploy/scripts/install-debian-packages.sh');
+    expect(installer).toContain('APT::Update::Error-Mode=any');
+    expect(installer).toContain('Acquire::http::Timeout=20');
+    expect(installer).toContain(
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg',
+    );
+    expect(installer).not.toMatch(
+      /trusted=yes|AllowUnauthenticated|Verify-Peer=false/u,
+    );
     expect(dockerfile).toMatch(
       /pnpm --filter @wo\/server --prod deploy \/opt\/wo-server --legacy/u,
     );

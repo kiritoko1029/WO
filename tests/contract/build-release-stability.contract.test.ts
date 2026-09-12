@@ -1204,6 +1204,11 @@ describe('release build isolation', () => {
             command === 'docker' && arguments_[0] === 'buildx',
         ),
       ).toHaveLength(2);
+      for (const call of calls.filter(
+        ({ arguments_ }) => arguments_[0] === 'buildx',
+      )) {
+        expect(call.arguments_).toContain('WO_APT_SOURCE=snapshot');
+      }
       expect(
         calls.filter(
           ({ arguments_, command }) =>

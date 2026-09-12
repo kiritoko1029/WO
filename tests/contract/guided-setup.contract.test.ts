@@ -297,6 +297,97 @@ describe('guided deployment setup', () => {
     ).rejects.toThrow('revision differs');
   });
 
+  it('refreshes only an unfinished production build and preserves identity, credentials and interrupted refresh recovery', async () => {
+    const root = await workspace();
+    const original = {
+      BUILD_CREATED: '2026-09-12T00:00:00Z',
+      BUILD_REVISION: 'a'.repeat(40),
+      BUILD_VERSION: `2026.09.12-${'a'.repeat(12)}`,
+      SOURCE_DATE_EPOCH: '1789171200',
+    };
+    const updated = {
+      ...original,
+      BUILD_REVISION: 'b'.repeat(40),
+      BUILD_VERSION: `2026.09.12-${'b'.repeat(12)}`,
+    };
+    const options = {
+      action: 'configure',
+      'non-interactive': true,
+      project: 'wo-refresh',
+      domain: 'rtc.example.com',
+      email: 'owner@example.com',
+      'admin-email': 'admin@example.com',
+      'public-ip': '8.8.8.8',
+    };
+    const first = await configureSetup(options, {
+      root,
+      platform: 'linux',
+      provenanceProvider: () => original,
+    });
+    const protectedFiles = [
+      'first-login.txt',
+      'secrets/bootstrap_admin_password',
+      'secrets/jwt_access_secret',
+      'secrets/postgres_password',
+      'secrets/turn_shared_secret',
+    ];
+    const before = await Promise.all(
+      protectedFiles.map((file) =>
+        readFile(join(first.stateDirectory, file), 'utf8'),
+      ),
+    );
+    const oldEnvironment = await readFile(first.envFile, 'utf8');
+    const refreshOptions = { ...options, action: 'up', 'refresh-build': true };
+    const dependencies = {
+      root,
+      platform: 'linux',
+      provenanceProvider: () => updated,
+    };
+    const refreshed = await configureSetup(refreshOptions, dependencies);
+    expect(refreshed.provenance).toEqual(updated);
+    expect(refreshed.environment.WO_DEPLOYMENT_ID).toBe(
+      first.environment.WO_DEPLOYMENT_ID,
+    );
+    expect(
+      parseDotEnv(await readFile(first.envFile, 'utf8')).BUILD_REVISION,
+    ).toBe(updated.BUILD_REVISION);
+    expect(
+      await Promise.all(
+        protectedFiles.map((file) =>
+          readFile(join(first.stateDirectory, file), 'utf8'),
+        ),
+      ),
+    ).toEqual(before);
+    // Simulate interruption after saving the new manifest but before its env file.
+    await writeFile(first.envFile, oldEnvironment);
+    await configureSetup(refreshOptions, dependencies);
+    expect(
+      parseDotEnv(await readFile(first.envFile, 'utf8')).BUILD_REVISION,
+    ).toBe(updated.BUILD_REVISION);
+    await expect(
+      configureSetup(
+        { ...refreshOptions, domain: 'other.example.com' },
+        dependencies,
+      ),
+    ).rejects.toThrow('Configuration differs');
+    await writeFile(
+      first.envFile,
+      (await readFile(first.envFile, 'utf8')).replace(
+        'rtc.example.com',
+        'injected.example.com',
+      ),
+    );
+    await expect(configureSetup(refreshOptions, dependencies)).rejects.toThrow(
+      'Build refresh cannot change',
+    );
+    await writeFile(first.envFile, oldEnvironment);
+    await configureSetup(refreshOptions, dependencies);
+    await writeFile(join(first.stateDirectory, 'started.json'), '{}');
+    await expect(configureSetup(refreshOptions, dependencies)).rejects.toThrow(
+      'unfinished production',
+    );
+  });
+
   it('keeps Docker Desktop runtime discovery while excluding ambient app and Compose overrides', async () => {
     const root = await workspace();
     const setup = await configureSetup(

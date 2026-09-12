@@ -1,12 +1,9 @@
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS probe-build
 
-RUN sed -i \
-      -e 's|^# http://snapshot.debian.org/|URIs: http://snapshot.debian.org/|' \
-      -e '/^URIs: http:\/\/deb.debian.org\//d' \
-      /etc/apt/sources.list.d/debian.sources \
-  && apt-get -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false update \
-  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends build-essential libssl-dev \
-  && rm -rf /var/lib/apt/lists/*
+ARG WO_APT_SOURCE=mirrors
+COPY deploy/scripts/install-debian-packages.sh /tmp/install-debian-packages.sh
+RUN sh /tmp/install-debian-packages.sh build-essential libssl-dev \
+  && rm -f /tmp/install-debian-packages.sh
 COPY deploy/coturn/health-probe.c /tmp/health-probe.c
 COPY deploy/coturn/drop-privileges.c /tmp/drop-privileges.c
 RUN cc -O2 -Wall -Wextra -static /tmp/health-probe.c \

@@ -55,6 +55,7 @@ deploy/managed/certificates/*
 !deploy/scripts/
 deploy/scripts/*
 !deploy/scripts/validate-build-metadata.sh
+!deploy/scripts/install-debian-packages.sh
 
 **/test/
 **/coverage/

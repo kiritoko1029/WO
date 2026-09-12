@@ -52,6 +52,10 @@ PostgreSQL 和 server 没有宿主机映射端口。
 
 ## 生产启动
 
+普通 Compose 构建通过共享 APT 安装脚本优先访问国内 Debian 镜像，并在失败时切换至备用镜像，严格拒绝残缺索引。需要可复现归档的 `build-release.mjs` 会显式传入 `WO_APT_SOURCE=snapshot`，保留基础镜像中的固定快照日期，且不会静默切换到滚动镜像。直接 Docker 构建也可通过 `--build-arg WO_APT_SOURCE=snapshot` 选择该模式。
+
+镜像地址参考[中科大 Debian 镜像](https://mirrors.ustc.edu.cn/help/debian.html)、[清华 Debian 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/debian/)。
+
 从仓库根目录执行：
 
 ```bash

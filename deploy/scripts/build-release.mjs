@@ -70,6 +70,10 @@ function buildxArguments(service, archive, provenance, sourceRoot) {
     '--tag',
     releaseImageReference(service, provenance.BUILD_VERSION),
     ...releaseBuildArguments(provenance),
+    // Release archives retain immutable package snapshots; normal deployment
+    // builds prefer reachable mirrors and current Bookworm security updates.
+    '--build-arg',
+    'WO_APT_SOURCE=snapshot',
     '--output',
     `type=docker,dest=${archive},rewrite-timestamp=true`,
     sourceRoot,

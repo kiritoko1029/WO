@@ -4,15 +4,12 @@ ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 WORKDIR /workspace
 
-RUN sed -i \
-      -e 's|^# http://snapshot.debian.org/|URIs: http://snapshot.debian.org/|' \
-      -e '/^URIs: http:\/\/deb.debian.org\//d' \
-      /etc/apt/sources.list.d/debian.sources \
-  && corepack enable \
+ARG WO_APT_SOURCE=mirrors
+COPY deploy/scripts/install-debian-packages.sh /tmp/install-debian-packages.sh
+RUN corepack enable \
   && corepack prepare pnpm@10.32.1 --activate \
-  && apt-get -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false update \
-  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends build-essential ca-certificates python3 \
-  && rm -rf /var/lib/apt/lists/*
+  && sh /tmp/install-debian-packages.sh build-essential ca-certificates python3 \
+  && rm -f /tmp/install-debian-packages.sh
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/server/package.json apps/server/package.json
@@ -53,6 +50,7 @@ ARG BUILD_CREATED
 ARG BUILD_REVISION
 ARG BUILD_VERSION
 ARG SOURCE_DATE_EPOCH
+ARG WO_APT_SOURCE=mirrors
 
 COPY --chmod=0755 deploy/scripts/validate-build-metadata.sh /tmp/validate-build-metadata
 RUN /tmp/validate-build-metadata \
@@ -71,13 +69,9 @@ ENV NODE_ENV=production
 ENV DOWNLOADS_ROOT=/app/downloads
 WORKDIR /app
 
-RUN sed -i \
-      -e 's|^# http://snapshot.debian.org/|URIs: http://snapshot.debian.org/|' \
-      -e '/^URIs: http:\/\/deb.debian.org\//d' \
-      /etc/apt/sources.list.d/debian.sources \
-  && apt-get -o Acquire::Retries=3 -o Acquire::Check-Valid-Until=false update \
-  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
-  && rm -rf /var/lib/apt/lists/* \
+COPY deploy/scripts/install-debian-packages.sh /tmp/install-debian-packages.sh
+RUN sh /tmp/install-debian-packages.sh ca-certificates \
+  && rm -f /tmp/install-debian-packages.sh \
   && rm -rf /var/log/apt/* \
   && rm -f /var/cache/ldconfig/aux-cache /var/log/alternatives.log /var/log/dpkg.log \
   && mkdir -p /app/downloads
