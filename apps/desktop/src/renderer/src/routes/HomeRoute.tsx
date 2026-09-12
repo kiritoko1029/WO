@@ -20,6 +20,7 @@ export function HomeRoute({
 
   const join = async (event: FormEvent) => {
     event.preventDefault();
+    if (room.busy || auth.busy) return;
     if (!/^\d{6}$/u.test(roomCode)) {
       setValidationError('请输入 6 位房间码');
       return;
@@ -47,7 +48,7 @@ export function HomeRoute({
             type="button"
             title="退出登录"
             aria-label="退出登录"
-            disabled={auth.busy}
+            disabled={auth.busy || room.busy}
             onClick={() => void auth.logout()}
           >
             <LogOut size={16} />
@@ -58,8 +59,19 @@ export function HomeRoute({
         <div className="home-heading">
           <p>语音与屏幕共享</p>
           <h1>开始通话</h1>
+          <span className="home-subtitle">
+            为两个人，留一个专注交流的空间。
+          </span>
         </div>
-        {modeSelector}
+        {modeSelector != null && (
+          <fieldset
+            className="connection-mode-fieldset"
+            disabled={auth.busy || room.busy}
+          >
+            <legend className="sr-only">连接方式</legend>
+            {modeSelector}
+          </fieldset>
+        )}
         <BackendTargetSettings />
         <div className="room-actions">
           <section className="room-action" aria-labelledby="create-room-title">
@@ -68,15 +80,18 @@ export function HomeRoute({
             </span>
             <div>
               <h2 id="create-room-title">新房间</h2>
-              <p>创建临时房间码</p>
+              <p>创建专属的双人房间，把房间码发给对方。</p>
             </div>
             <button
               className="primary-button"
               type="button"
-              disabled={room.busy}
-              onClick={() => void room.createRoom()}
+              disabled={room.busy || auth.busy}
+              onClick={() => {
+                setValidationError(null);
+                void room.createRoom();
+              }}
             >
-              {room.busy ? '正在创建' : '创建房间'}
+              {room.pendingOperation === 'create' ? '正在创建' : '创建房间'}
             </button>
           </section>
           <section
@@ -88,9 +103,9 @@ export function HomeRoute({
             </span>
             <div>
               <h2 id="join-room-title">加入房间</h2>
-              <p>输入对方发来的房间码</p>
+              <p>输入对方发来的 6 位房间码，即刻相聚。</p>
             </div>
-            <form onSubmit={join}>
+            <form onSubmit={join} aria-busy={room.pendingOperation === 'join'}>
               <label className="sr-only" htmlFor="room-code">
                 房间码
               </label>
@@ -101,6 +116,7 @@ export function HomeRoute({
                 autoComplete="one-time-code"
                 placeholder="000000"
                 value={roomCode}
+                disabled={room.busy || auth.busy}
                 onChange={(event) =>
                   setRoomCode(
                     event.target.value.replace(/\D/gu, '').slice(0, 6),
@@ -110,9 +126,9 @@ export function HomeRoute({
               <button
                 className="secondary-button"
                 type="submit"
-                disabled={room.busy}
+                disabled={room.busy || auth.busy}
               >
-                加入房间
+                {room.pendingOperation === 'join' ? '正在加入' : '加入房间'}
               </button>
             </form>
           </section>

@@ -21,6 +21,7 @@ import {
   type ConnectionMode,
 } from './components/ConnectionModeSelector.js';
 import { ThemeFab } from './components/ThemeFab.js';
+import { useDialogFocus } from './hooks/use-dialog-focus.js';
 import { createLanIpcWebSocket } from './media/lan-signaling-socket.js';
 import { createSignalingClient } from './media/signaling-client.js';
 import { AuthRoute } from './routes/AuthRoute.js';
@@ -274,6 +275,75 @@ function AuthRouter({
   );
 }
 
+function ServerSwitchDialog({
+  intent,
+  activeServerOrigin,
+  switching,
+  canSwitch,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  readonly intent: ServerJoinIntent;
+  readonly activeServerOrigin: string;
+  readonly switching: boolean;
+  readonly canSwitch: boolean;
+  readonly error: string | null;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => Promise<void>;
+}) {
+  const dialogRef = useDialogFocus({
+    open: true,
+    onDismiss: onCancel,
+    dismissible: !switching,
+  });
+  return (
+    <div className="join-intent-backdrop">
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="join-intent-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-busy={switching}
+        aria-labelledby="join-intent-title"
+      >
+        <header>
+          <h2 id="join-intent-title">切换服务后加入房间？</h2>
+          <p>
+            链接指向 <strong>{new URL(intent.serverOrigin).host}</strong>
+          </p>
+        </header>
+        <p>
+          当前服务为 {new URL(activeServerOrigin).host}
+          。切换后需要在目标服务重新登录。
+        </p>
+        <div className="join-intent-error" role="alert">
+          {error}
+        </div>
+        <footer>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={switching}
+            onClick={onCancel}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={switching || !canSwitch}
+            onClick={() => void onConfirm()}
+          >
+            {switching ? '正在切换' : '切换并重启'}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export function App({
   desktop,
   lanApi,
@@ -516,50 +586,18 @@ export function App({
         needsServerSwitch &&
         serverJoinIntent !== null &&
         activeServerOrigin !== null && (
-          <div className="join-intent-backdrop">
-            <section
-              className="join-intent-dialog"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="join-intent-title"
-            >
-              <header>
-                <h2 id="join-intent-title">切换服务后加入房间？</h2>
-                <p>
-                  链接指向{' '}
-                  <strong>{new URL(serverJoinIntent.serverOrigin).host}</strong>
-                </p>
-              </header>
-              <p>
-                当前服务为 {new URL(activeServerOrigin).host}
-                。切换后需要在目标服务重新登录。
-              </p>
-              <div className="join-intent-error" role="alert">
-                {switchServerError}
-              </div>
-              <footer>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={switchingServer}
-                  onClick={() => {
-                    setPendingJoinIntent(null);
-                    setSwitchServerError(null);
-                  }}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={switchingServer || shellApi === null}
-                  onClick={() => void confirmServerSwitch()}
-                >
-                  {switchingServer ? '正在切换' : '切换并重启'}
-                </button>
-              </footer>
-            </section>
-          </div>
+          <ServerSwitchDialog
+            intent={serverJoinIntent}
+            activeServerOrigin={activeServerOrigin}
+            switching={switchingServer}
+            canSwitch={shellApi !== null}
+            error={switchServerError}
+            onCancel={() => {
+              setPendingJoinIntent(null);
+              setSwitchServerError(null);
+            }}
+            onConfirm={confirmServerSwitch}
+          />
         )}
       <ThemeFab />
     </>

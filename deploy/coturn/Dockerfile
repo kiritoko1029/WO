@@ -46,6 +46,7 @@ RUN cp -p /usr/bin/turnserver /tmp/turnserver \
 COPY --from=probe-build /tmp/turn-healthcheck /usr/local/bin/turn-healthcheck
 COPY --from=probe-build /tmp/wo-drop-privileges /usr/local/bin/wo-drop-privileges
 COPY --chmod=0755 deploy/coturn/entrypoint.sh /opt/wo/turn-entrypoint.sh
+COPY --chmod=0755 deploy/coturn/certificate-watcher.sh /opt/wo/turn-certificate-watcher.sh
 COPY deploy/coturn/turnserver.conf /etc/coturn/turnserver.wo.conf
 
 ENTRYPOINT ["/bin/sh", "/opt/wo/turn-entrypoint.sh"]

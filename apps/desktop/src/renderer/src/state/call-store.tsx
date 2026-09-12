@@ -813,6 +813,12 @@ export function createCallController(
   let startPromise: Promise<void> | null = null;
   let voice: VoiceController | null = null;
   let peer: ReturnType<typeof createPeerConnectionController> | null = null;
+  type TransportStatsOwner = {
+    readonly peer: ReturnType<typeof createPeerConnectionController>;
+    pending: Promise<RTCStatsReport> | null;
+    audioPending: boolean;
+  };
+  let transportStatsOwner: TransportStatsOwner | null = null;
   let negotiation: ReturnType<typeof createNegotiationController> | null = null;
   let reconnect: ReconnectController | null = null;
   let screenController: ScreenController | null = null;
@@ -1314,6 +1320,11 @@ export function createCallController(
       },
     });
     peer = createdPeer;
+    transportStatsOwner = {
+      peer: createdPeer,
+      pending: null,
+      audioPending: false,
+    };
     ensureScreenController();
     const createdNegotiation = createNegotiationController({
       peer: createdPeer,
@@ -1377,6 +1388,8 @@ export function createCallController(
       preservedScreenState === 'capturing';
     const operation = (async () => {
       statsMonitor?.resetBaselines();
+      transportStatsOwner = null;
+      update({ localAudioLevel: 0, remoteAudioLevel: 0 });
       // If screen sharing is active, preserve the controller (tracks + lease)
       // across the transport rebuild. We temporarily null screenController so
       // createTransport → ensureScreenController won't see it, then swap it
@@ -1459,6 +1472,10 @@ export function createCallController(
       }
       maybeOffer();
     })().catch(async (error: unknown) => {
+      if (nextPeer !== null && transportStatsOwner?.peer === nextPeer) {
+        transportStatsOwner = null;
+        update({ localAudioLevel: 0, remoteAudioLevel: 0 });
+      }
       // If the rebuild failed and we preserved the screen controller, we
       // must release its tracks and lease now since there's no new peer.
       if (screenWasActive) {
@@ -1583,11 +1600,26 @@ export function createCallController(
     return result;
   };
 
+  const readTransportStats = (
+    owner: TransportStatsOwner,
+  ): Promise<RTCStatsReport> => {
+    if (owner.pending !== null) return owner.pending;
+    // Quality send/receive and audio polling can share one pending native
+    // report. Settled reports are never cached, so the next tick stays fresh.
+    const operation = owner.peer.getStats().finally(() => {
+      if (owner.pending === operation) owner.pending = null;
+    });
+    owner.pending = operation;
+    return operation;
+  };
+
   const pollAudioLevels = async (): Promise<void> => {
-    if (closed || peer === null) return;
+    const owner = transportStatsOwner;
+    if (closed || owner === null || owner.audioPending) return;
+    owner.audioPending = true;
     try {
-      const report = await peer.getStats();
-      if (closed || peer === null) return;
+      const report = await readTransportStats(owner);
+      if (closed || transportStatsOwner !== owner) return;
       let localLevel = 0;
       let remoteLevel = 0;
       for (const stats of report.values()) {
@@ -1601,9 +1633,16 @@ export function createCallController(
           remoteLevel = Math.max(remoteLevel, level);
         }
       }
-      update({ localAudioLevel: localLevel, remoteAudioLevel: remoteLevel });
+      if (
+        !Object.is(localLevel, snapshot.localAudioLevel) ||
+        !Object.is(remoteLevel, snapshot.remoteAudioLevel)
+      ) {
+        update({ localAudioLevel: localLevel, remoteAudioLevel: remoteLevel });
+      }
     } catch {
       // Stats polling can transiently fail during renegotiation; ignore.
+    } finally {
+      owner.audioPending = false;
     }
   };
 
@@ -1644,19 +1683,19 @@ export function createCallController(
       buffer: statsBuffer,
       getNegotiationGeneration: () => negotiationGeneration,
       getOutboundStats: async () => {
-        const active = peer;
-        if (active === null) return new Map() as RTCStatsReport;
-        const report = await active.getStats();
-        if (closed || peer !== active) {
+        const owner = transportStatsOwner;
+        if (owner === null) return new Map() as RTCStatsReport;
+        const report = await readTransportStats(owner);
+        if (closed || transportStatsOwner !== owner) {
           throw new Error('PeerConnection changed during stats collection');
         }
         return directionalStats(report, 'outbound');
       },
       getInboundStats: async () => {
-        const active = peer;
-        if (active === null) return new Map() as RTCStatsReport;
-        const report = await active.getStats();
-        if (closed || peer !== active) {
+        const owner = transportStatsOwner;
+        if (owner === null) return new Map() as RTCStatsReport;
+        const report = await readTransportStats(owner);
+        if (closed || transportStatsOwner !== owner) {
           throw new Error('PeerConnection changed during stats collection');
         }
         return directionalStats(report, 'inbound');
@@ -2166,6 +2205,7 @@ export function createCallController(
     () => {
       dispatchCall({ type: 'close' });
       closed = true;
+      transportStatsOwner = null;
       lifecycleGeneration += 1;
       invalidateRecoveryQueue();
       reconnect?.stop();

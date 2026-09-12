@@ -21,6 +21,11 @@ export type P2pServerConfig = Readonly<{
   publicUrl: string;
   database: Readonly<{ url: string }>;
   auth: Readonly<{ jwtAccessSecret: string }>;
+  bootstrapAdmin?: Readonly<{ email: string; password: string }>;
+  deployment?: Readonly<{
+    statusDir: string;
+    certificateMode: 'acme' | 'local';
+  }>;
   email: Readonly<{
     domainAllowlist: readonly string[];
     verificationRequired: boolean;
@@ -495,10 +500,75 @@ const parseSmtpConfig = (
   });
 };
 
+function parseBootstrapAdmin(
+  env: Record<string, string | undefined>,
+  superAdminEmails: readonly string[],
+  issues: ConfigIssue[],
+): P2pServerConfig['bootstrapAdmin'] {
+  const email = env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+  const password = env.BOOTSTRAP_ADMIN_PASSWORD;
+  if (email === undefined && password === undefined) return undefined;
+  if (email === undefined || !z.email().max(254).safeParse(email).success) {
+    addIssue(
+      issues,
+      'BOOTSTRAP_ADMIN_EMAIL',
+      'must be a valid administrator email',
+    );
+  } else if (!superAdminEmails.includes(email)) {
+    addIssue(
+      issues,
+      'BOOTSTRAP_ADMIN_EMAIL',
+      'must be included in SUPER_ADMIN_EMAILS',
+    );
+  }
+  if (password === undefined || password.length < 10 || password.length > 128) {
+    addIssue(
+      issues,
+      'BOOTSTRAP_ADMIN_PASSWORD',
+      'must contain 10 to 128 characters',
+    );
+  }
+  return email === undefined || password === undefined
+    ? undefined
+    : { email, password };
+}
+
+function parseDeploymentConfig(
+  env: Record<string, string | undefined>,
+  issues: ConfigIssue[],
+): P2pServerConfig['deployment'] {
+  const statusDir = env.DEPLOYMENT_STATUS_DIR;
+  const certificateMode = env.DEPLOYMENT_CERT_MODE;
+  if (statusDir === undefined && certificateMode === undefined)
+    return undefined;
+  if (
+    statusDir === undefined ||
+    statusDir.length === 0 ||
+    statusDir.length > 4096 ||
+    statusDir !== statusDir.trim() ||
+    hasControlCharacter(statusDir)
+  ) {
+    addIssue(
+      issues,
+      'DEPLOYMENT_STATUS_DIR',
+      'must be a non-empty bounded directory path',
+    );
+  }
+  if (certificateMode !== 'acme' && certificateMode !== 'local') {
+    addIssue(issues, 'DEPLOYMENT_CERT_MODE', 'must be acme or local');
+  }
+  return statusDir !== undefined &&
+    (certificateMode === 'acme' || certificateMode === 'local')
+    ? { statusDir, certificateMode }
+    : undefined;
+}
+
 const freezeConfig = (config: P2pServerConfig): P2pServerConfig => {
   Object.freeze(config.server);
   Object.freeze(config.database);
   Object.freeze(config.auth);
+  if (config.bootstrapAdmin !== undefined) Object.freeze(config.bootstrapAdmin);
+  if (config.deployment !== undefined) Object.freeze(config.deployment);
   Object.freeze(config.email.domainAllowlist);
   Object.freeze(config.email.superAdminEmails);
   if (config.email.smtp !== null) Object.freeze(config.email.smtp);
@@ -614,6 +684,8 @@ export const parseP2pServerConfig = (
     env.SUPER_ADMIN_EMAILS,
     issues,
   );
+  const bootstrapAdmin = parseBootstrapAdmin(env, superAdminEmails, issues);
+  const deployment = parseDeploymentConfig(env, issues);
   const verificationRequired = parseOptionalBoolean(
     'EMAIL_VERIFICATION_REQUIRED',
     env.EMAIL_VERIFICATION_REQUIRED,
@@ -703,6 +775,8 @@ export const parseP2pServerConfig = (
     publicUrl,
     database: { url: databaseUrl },
     auth: { jwtAccessSecret: raw.JWT_ACCESS_SECRET },
+    ...(bootstrapAdmin === undefined ? {} : { bootstrapAdmin }),
+    ...(deployment === undefined ? {} : { deployment }),
     email: {
       domainAllowlist,
       verificationRequired,

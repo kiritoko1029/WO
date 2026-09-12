@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -49,6 +50,7 @@ export interface RoomGateway {
 interface RoomState {
   readonly room: RoomSnapshot | null;
   readonly busy: boolean;
+  readonly pendingOperation: 'create' | 'join' | 'close' | null;
   readonly error: string | null;
   createRoom(): Promise<boolean>;
   joinRoom(roomCode: string): Promise<boolean>;
@@ -98,7 +100,9 @@ export function RoomProvider({
   readonly children: ReactNode;
 }) {
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [pendingOperation, setPendingOperation] =
+    useState<RoomState['pendingOperation']>(null);
+  const operationInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(
@@ -126,8 +130,10 @@ export function RoomProvider({
   );
 
   const runRoom = useCallback(
-    async (operation: () => Promise<RoomSnapshot>) => {
-      setBusy(true);
+    async (kind: 'create' | 'join', operation: () => Promise<RoomSnapshot>) => {
+      if (operationInFlight.current) return false;
+      operationInFlight.current = true;
+      setPendingOperation(kind);
       setError(null);
       try {
         setRoom(await operation());
@@ -136,7 +142,8 @@ export function RoomProvider({
         setError(roomErrorMessage(operationError));
         return false;
       } finally {
-        setBusy(false);
+        operationInFlight.current = false;
+        setPendingOperation(null);
       }
     },
     [],
@@ -145,14 +152,18 @@ export function RoomProvider({
   const value = useMemo<RoomState>(
     () => ({
       room,
-      busy,
+      busy: pendingOperation !== null,
+      pendingOperation,
       error,
-      createRoom: () => runRoom(() => gateway.createRoom(accessToken)),
+      createRoom: () =>
+        runRoom('create', () => gateway.createRoom(accessToken)),
       joinRoom: (roomCode) =>
-        runRoom(() => gateway.joinRoom(accessToken, roomCode)),
+        runRoom('join', () => gateway.joinRoom(accessToken, roomCode)),
       closeRoom: async () => {
+        if (operationInFlight.current) return false;
         if (room === null) return true;
-        setBusy(true);
+        operationInFlight.current = true;
+        setPendingOperation('close');
         setError(null);
         try {
           if (room.role === 'creator') {
@@ -166,12 +177,13 @@ export function RoomProvider({
           setError(roomErrorMessage(operationError));
           return false;
         } finally {
-          setBusy(false);
+          operationInFlight.current = false;
+          setPendingOperation(null);
         }
       },
       clearError: () => setError(null),
     }),
-    [accessToken, busy, error, gateway, room, runRoom],
+    [accessToken, pendingOperation, error, gateway, room, runRoom],
   );
 
   return <RoomContext.Provider value={value}>{children}</RoomContext.Provider>;

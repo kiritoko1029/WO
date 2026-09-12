@@ -1,0 +1,15 @@
+{
+	admin 127.0.0.1:2019
+	auto_https off
+}
+
+:80 {
+	handle /.well-known/acme-challenge/* {
+		root * /var/www/acme
+		file_server
+	}
+	handle {
+		header Retry-After 30
+		respond "WO is preparing its HTTPS certificate. Please retry shortly." 503
+	}
+}

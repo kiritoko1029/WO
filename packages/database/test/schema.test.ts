@@ -24,8 +24,9 @@ function columnNames(table: Parameters<typeof getTableConfig>[0]): string[] {
 }
 
 describe('identity schema', () => {
-  test('contains exactly the identity, refresh, and verification tables', () => {
+  test('contains the identity, refresh, verification and bootstrap tables', () => {
     expect(Object.values(databaseSchema).map(getTableName).sort()).toEqual([
+      'admin_bootstrap',
       'auth_identities',
       'email_verification_challenges',
       'password_credentials',

@@ -96,6 +96,8 @@ describe('release source file contract', () => {
       'deploy/scripts/export-local-ca.mjs',
       'deploy/scripts/init-integration-cert.mjs',
       'deploy/scripts/init-secrets.mjs',
+      // Guided source-checkout setup is separate from immutable release bundles.
+      'deploy/scripts/setup.mjs',
     ]);
     const manifestFiles = new Set(releaseSourceFiles);
     const unclassified = readdirSync(

@@ -14,6 +14,7 @@ import type {
   SystemAudioMode,
 } from '../../../preload/types.js';
 import type { ScreenShareState } from '../media/screen-controller.js';
+import { useDialogFocus } from '../hooks/use-dialog-focus.js';
 
 export function SourcePicker({
   sources,
@@ -42,6 +43,9 @@ export function SourcePicker({
   const starting = state === 'capturing';
   const picking = state === 'picking';
   const nativePicker = systemAudioMode === 'native-picker';
+  // Cancellation remains available throughout acquisition/capture, matching
+  // the existing cancel buttons and the controller's cancellation lifecycle.
+  const dialogRef = useDialogFocus({ open: true, onDismiss: onCancel });
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
 
@@ -65,6 +69,8 @@ export function SourcePicker({
   return (
     <div className="source-picker-backdrop">
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className="source-picker"
         role="dialog"
         aria-modal="true"

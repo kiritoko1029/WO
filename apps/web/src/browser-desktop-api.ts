@@ -269,40 +269,44 @@ export function createBrowserDesktopApi(
     return publicSession(response, now());
   };
 
+  // Called only while holding the mutation queue, including account requests
+  // that need a refresh without recursively queuing behind themselves.
+  const refreshWithinMutation = async (): Promise<PublicAuthSession> => {
+    const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
+    if (refreshToken === null) {
+      throw new BrowserApiError(
+        null,
+        'AUTH_REQUIRED',
+        'Authentication is required',
+      );
+    }
+    let body: unknown;
+    try {
+      body = authRefreshBodySchema.parse({ refreshToken });
+    } catch (error) {
+      storage.removeItem(REFRESH_TOKEN_KEY);
+      throw new BrowserApiError(
+        null,
+        'AUTH_REQUIRED',
+        'Authentication is required',
+        { cause: error },
+      );
+    }
+    try {
+      return persistResponse(
+        await post('/v1/auth/refresh', authRefreshResponseSchema, body),
+      );
+    } catch (error) {
+      if (error instanceof BrowserApiError && error.status === 401) {
+        storage.removeItem(REFRESH_TOKEN_KEY);
+      }
+      throw error;
+    }
+  };
+
   const refresh = (): Promise<PublicAuthSession> => {
     if (refreshInFlight !== null) return refreshInFlight;
-    const operation = exclusive(async () => {
-      const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
-      if (refreshToken === null) {
-        throw new BrowserApiError(
-          null,
-          'AUTH_REQUIRED',
-          'Authentication is required',
-        );
-      }
-      let body: unknown;
-      try {
-        body = authRefreshBodySchema.parse({ refreshToken });
-      } catch (error) {
-        storage.removeItem(REFRESH_TOKEN_KEY);
-        throw new BrowserApiError(
-          null,
-          'AUTH_REQUIRED',
-          'Authentication is required',
-          { cause: error },
-        );
-      }
-      try {
-        return persistResponse(
-          await post('/v1/auth/refresh', authRefreshResponseSchema, body),
-        );
-      } catch (error) {
-        if (error instanceof BrowserApiError && error.status === 401) {
-          storage.removeItem(REFRESH_TOKEN_KEY);
-        }
-        throw error;
-      }
-    });
+    const operation = exclusive(refreshWithinMutation);
     refreshInFlight = operation;
     void operation.then(
       () => {
@@ -320,7 +324,7 @@ export function createBrowserDesktopApi(
     schema: RuntimeSchema<Value>,
     body: unknown,
   ): Promise<Value> => {
-    const session = await refresh();
+    const session = await refreshWithinMutation();
     return post(path, schema, body, session.accessToken);
   };
 

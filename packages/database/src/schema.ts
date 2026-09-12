@@ -1,5 +1,9 @@
+import { sql } from 'drizzle-orm';
 import {
+  boolean,
+  check,
   index,
+  pgSchema,
   pgTable,
   text,
   timestamp,
@@ -108,10 +112,32 @@ export const emailVerificationChallenges = pgTable(
   ],
 );
 
+export const adminBootstrap = pgSchema('wo_meta').table(
+  'admin_bootstrap',
+  {
+    singleton: boolean('singleton').primaryKey().default(true),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    identityId: uuid('identity_id')
+      .notNull()
+      .references(() => authIdentities.id, { onDelete: 'restrict' }),
+    emailNormalized: text('email_normalized').notNull(),
+    createdAt: timestamp('created_at', {
+      mode: 'date',
+      withTimezone: true,
+    }).notNull(),
+  },
+  (table) => [
+    check('admin_bootstrap_singleton_check', sql`${table.singleton}`),
+  ],
+);
+
 export const databaseSchema = {
   users,
   authIdentities,
   passwordCredentials,
   refreshSessions,
   emailVerificationChallenges,
+  adminBootstrap,
 } as const;

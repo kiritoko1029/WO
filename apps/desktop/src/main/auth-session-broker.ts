@@ -124,6 +124,21 @@ export function createAuthSessionBroker(
     throw error;
   };
 
+  // The caller must already own the mutation queue. Enqueuing public refresh
+  // from an account mutation would wait behind the caller itself.
+  const refreshWithinMutation = async (): Promise<PublicAuthSession> => {
+    const refreshToken = await options.sessionStore.read();
+    if (refreshToken === null) throw new AuthSessionBrokerError();
+    const response = await options.http
+      .post({
+        path: '/v1/auth/refresh',
+        body: { refreshToken },
+        responseSchema: authRefreshResponseSchema,
+      })
+      .catch(rejectFailedRefresh);
+    return persistResponse(response);
+  };
+
   const authorizedPost = async <Body, Response>(
     path: string,
     body: Body,
@@ -131,7 +146,7 @@ export function createAuthSessionBroker(
       parse(input: unknown): Response;
     },
   ): Promise<Response> => {
-    const session = await broker.refresh();
+    const session = await refreshWithinMutation();
     return options.http.post({
       path,
       body,
@@ -224,18 +239,7 @@ export function createAuthSessionBroker(
       }),
     refresh: () => {
       if (refreshInFlight !== null) return refreshInFlight;
-      const operation = exclusive(async () => {
-        const refreshToken = await options.sessionStore.read();
-        if (refreshToken === null) throw new AuthSessionBrokerError();
-        const response = await options.http
-          .post({
-            path: '/v1/auth/refresh',
-            body: { refreshToken },
-            responseSchema: authRefreshResponseSchema,
-          })
-          .catch(rejectFailedRefresh);
-        return persistResponse(response);
-      });
+      const operation = exclusive(refreshWithinMutation);
       refreshInFlight = operation;
       void operation.then(
         () => {

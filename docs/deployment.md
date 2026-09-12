@@ -1,6 +1,8 @@
 # Docker 部署
 
-本部署只运行四个长期服务：Caddy、应用 server、PostgreSQL 和 coturn。Caddy
+首次部署建议使用[交互式向导](quick-deploy.md)：自动生成配置、管理员和 HTTPS/TURN 证书，并自动续期。向导增加独立的 certificates 服务，运行五个长期容器。
+
+以下是高级手工部署和既有发布运维流程。此配置运行四个长期服务：Caddy、应用 server、PostgreSQL 和 coturn。Caddy
 镜像在构建阶段同时生成 Web SPA，因此 Web 不增加第五个运行服务。语音与桌面
 视频优先走两端 P2P，无法直连时只回落到本机部署的 coturn，不依赖第三方实时
 音视频、公共 STUN、SFU 或录制服务。
@@ -95,7 +97,7 @@ node deploy/scripts/compose.mjs --env-file=deploy/.env ps
 node deploy/scripts/smoke.mjs --env-file=deploy/.env
 ```
 
-冒烟流程创建三个随机临时账号，验证两人房间、第三人拒绝、offer/answer/candidate 转发、屏幕租约、房间结束和会话注销。脚本不会输出 token、SDP 或凭据。
+生产冒烟流程登录 `DEPLOY_SMOKE_EMAILS` 配置的三个已有、已验证账号，使用 `DEPLOY_SMOKE_PASSWORD`，不会自动注册生产账号。它验证两人房间、第三人拒绝、offer/answer/candidate 转发、屏幕租约、房间结束和会话注销。仅隔离的 `--integration` 模式创建随机测试账号。脚本不会输出 token、SDP 或凭据。
 
 部署完成后访问 `https://${APP_DOMAIN}`。房间页可复制
 `https://${APP_DOMAIN}/join/<6位房间码>` 或 `wo://` 客户端邀请；HTTPS 邀请

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Expand, Monitor, MonitorUp, Shrink, ZoomOut } from 'lucide-react';
 
 import type { ScreenShareState } from '../media/screen-controller.js';
@@ -352,6 +358,13 @@ export function ScreenStage({
                 ? `正在接收${remoteOwnerName}的屏幕`
                 : '等待屏幕共享'}
           </h2>
+          <p>
+            {localSharing
+              ? '共享已开始，画面准备好后会显示在这里。'
+              : waitingForRemoteTrack
+                ? '语音通话保持连接，画面即将出现。'
+                : '点击下方的屏幕共享，一起看看你的窗口或整个屏幕。'}
+          </p>
         </div>
       )}
       {showRemoteTrack && remoteBitrateBps !== null && (

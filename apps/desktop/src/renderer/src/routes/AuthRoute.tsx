@@ -3,6 +3,7 @@ import { AudioLines } from 'lucide-react';
 
 import { AppFooter } from '../components/AppFooter.js';
 import { BackendTargetSettings } from '../components/BackendTargetSettings.js';
+import { WelcomePanel } from '../components/WelcomePanel.js';
 import { useAuth } from '../state/auth-store.js';
 
 type AuthMode = 'login' | 'register' | 'verify';
@@ -17,7 +18,8 @@ export function AuthRoute({
   readonly modeSelector?: ReactNode;
 }) {
   const auth = useAuth();
-  const [mode, setMode] = useState<AuthMode>('login');
+  const [selectedMode, setMode] = useState<AuthMode>('login');
+  const mode = auth.pendingVerificationEmail === null ? selectedMode : 'verify';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -25,6 +27,7 @@ export function AuthRoute({
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const switchMode = (next: AuthMode) => {
+    if (auth.busy) return;
     setMode(next);
     setValidationError(null);
     auth.clearError();
@@ -33,6 +36,7 @@ export function AuthRoute({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (auth.busy) return;
     const normalizedEmail = (auth.pendingVerificationEmail ?? email)
       .trim()
       .toLowerCase();
@@ -60,23 +64,14 @@ export function AuthRoute({
     }
     setValidationError(null);
     if (mode === 'login') {
-      const ok = await auth.login({ email: normalizedEmail, password });
-      if (!ok && auth.error === '请先完成邮箱验证') {
-        setEmail(normalizedEmail);
-        setMode('verify');
-        void auth.resendVerification({ email: normalizedEmail });
-      }
+      await auth.login({ email: normalizedEmail, password });
       return;
     }
-    const result = await auth.register({
+    await auth.register({
       email: normalizedEmail,
       password,
       displayName: normalizedName,
     });
-    if (result?.kind === 'verification_required') {
-      setEmail(result.email);
-      setMode('verify');
-    }
   };
 
   const heading =
@@ -88,6 +83,7 @@ export function AuthRoute({
 
   return (
     <main className="auth-shell">
+      <WelcomePanel />
       <section className="auth-panel" aria-labelledby="auth-heading">
         <div className="product-lockup">
           <span className="product-mark" aria-hidden="true">
@@ -96,12 +92,25 @@ export function AuthRoute({
           <span>WO</span>
         </div>
         <h1 id="auth-heading">{heading}</h1>
-        {modeSelector}
+        <p className="auth-subtitle">
+          {mode === 'login'
+            ? '与你在意的人，连上同一个时刻。'
+            : mode === 'register'
+              ? '一个账号，开启属于你们的语音与共享空间。'
+              : '完成邮箱验证，即可开始通话。'}
+        </p>
+        {modeSelector != null && (
+          <fieldset className="connection-mode-fieldset" disabled={auth.busy}>
+            <legend className="sr-only">连接方式</legend>
+            {modeSelector}
+          </fieldset>
+        )}
         {mode !== 'verify' && (
           <div className="segmented" role="tablist" aria-label="账号操作">
             <button
               type="button"
               role="tab"
+              disabled={auth.busy}
               aria-selected={mode === 'login'}
               className={mode === 'login' ? 'active' : undefined}
               onClick={() => switchMode('login')}
@@ -111,6 +120,7 @@ export function AuthRoute({
             <button
               type="button"
               role="tab"
+              disabled={auth.busy}
               aria-selected={mode === 'register'}
               className={mode === 'register' ? 'active' : undefined}
               onClick={() => switchMode('register')}
@@ -122,6 +132,7 @@ export function AuthRoute({
         <form
           className="auth-form"
           onSubmit={(event) => void submit(event)}
+          aria-busy={auth.busy}
           noValidate
         >
           {mode === 'register' && (
@@ -129,6 +140,7 @@ export function AuthRoute({
               <span>显示名称</span>
               <input
                 value={displayName}
+                disabled={auth.busy}
                 maxLength={100}
                 autoComplete="name"
                 onChange={(event) => setDisplayName(event.target.value)}
@@ -141,6 +153,7 @@ export function AuthRoute({
                 <span>邮箱</span>
                 <input
                   type="email"
+                  disabled={auth.busy}
                   value={email}
                   maxLength={254}
                   autoComplete="email"
@@ -151,6 +164,7 @@ export function AuthRoute({
                 <span>密码</span>
                 <input
                   type="password"
+                  disabled={auth.busy}
                   value={password}
                   maxLength={128}
                   autoComplete={
@@ -164,13 +178,14 @@ export function AuthRoute({
           {mode === 'verify' && (
             <>
               <p className="auth-hint">
-                验证码已发送至{' '}
+                请查收邮箱中的验证码：{' '}
                 <strong>{auth.pendingVerificationEmail ?? email}</strong>
               </p>
               <label>
                 <span>验证码</span>
                 <input
                   value={code}
+                  disabled={auth.busy}
                   inputMode="numeric"
                   maxLength={6}
                   autoComplete="one-time-code"
@@ -192,20 +207,30 @@ export function AuthRoute({
                   : '完成验证'}
           </button>
           {mode === 'verify' && (
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={auth.busy}
-              onClick={() =>
-                void auth.resendVerification({
-                  email: (auth.pendingVerificationEmail ?? email)
-                    .trim()
-                    .toLowerCase(),
-                })
-              }
-            >
-              重新发送验证码
-            </button>
+            <>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={auth.busy}
+                onClick={() =>
+                  void auth.resendVerification({
+                    email: (auth.pendingVerificationEmail ?? email)
+                      .trim()
+                      .toLowerCase(),
+                  })
+                }
+              >
+                重新发送验证码
+              </button>
+              <button
+                className="text-button"
+                type="button"
+                disabled={auth.busy}
+                onClick={() => switchMode('login')}
+              >
+                返回登录
+              </button>
+            </>
           )}
         </form>
         <BackendTargetSettings />

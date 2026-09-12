@@ -66,6 +66,7 @@ import {
 
 export type AuthServiceErrorCode =
   | 'AUTH_REQUIRED'
+  | 'ADMIN_EMAIL_LOCKED'
   | 'EMAIL_ALREADY_REGISTERED'
   | 'EMAIL_DOMAIN_NOT_ALLOWED'
   | 'EMAIL_NOT_VERIFIED'
@@ -75,6 +76,8 @@ export type AuthServiceErrorCode =
 
 const authServiceErrorMessages: Record<AuthServiceErrorCode, string> = {
   AUTH_REQUIRED: 'Authentication is required',
+  ADMIN_EMAIL_LOCKED:
+    'The deployment administrator email is fixed; contact the server operator to migrate it',
   EMAIL_ALREADY_REGISTERED: 'Email is already registered',
   EMAIL_DOMAIN_NOT_ALLOWED: 'Email domain is not allowed',
   EMAIL_NOT_VERIFIED: 'Email address is not verified',
@@ -129,6 +132,7 @@ export interface AuthServiceDependencies {
   readonly dummyPasswordHash: string;
   readonly emailPolicy: AuthServiceEmailPolicy;
   readonly emailDelivery: EmailDelivery;
+  readonly protectedEmailUserIds?: readonly string[];
   readonly now?: () => Date;
   readonly randomUUID?: () => string;
   readonly hashPassword?: (password: string) => Promise<string>;
@@ -273,6 +277,9 @@ function generateVerificationCode(): string {
 export function createAuthService(
   dependencies: AuthServiceDependencies,
 ): AuthService {
+  const protectedEmailUserIds = new Set(
+    dependencies.protectedEmailUserIds ?? [],
+  );
   const now = dependencies.now ?? (() => new Date());
   const randomUUID = dependencies.randomUUID ?? nodeRandomUUID;
   const hashPassword = dependencies.hashPassword ?? defaultHashPassword;
@@ -614,6 +621,8 @@ export function createAuthService(
     async requestEmailChange(userId, input) {
       const operationTime = snapshotDate(now());
       const body = authRequestEmailChangeBodySchema.parse(input);
+      if (protectedEmailUserIds.has(userId))
+        throw new AuthServiceError('ADMIN_EMAIL_LOCKED');
       assertEmailDomainAllowed(body.newEmail, policy.domainAllowlist);
       const identity =
         await dependencies.identityRepository.findEmailUserById(userId);
@@ -659,6 +668,8 @@ export function createAuthService(
     async confirmEmailChange(userId, input) {
       const operationTime = snapshotDate(now());
       const body = authConfirmEmailChangeBodySchema.parse(input);
+      if (protectedEmailUserIds.has(userId))
+        throw new AuthServiceError('ADMIN_EMAIL_LOCKED');
       assertEmailDomainAllowed(body.newEmail, policy.domainAllowlist);
       const challenge =
         await dependencies.identityRepository.findLatestEmailVerificationChallenge(

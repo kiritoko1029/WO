@@ -407,6 +407,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function audioStatsReport(localLevel: number, remoteLevel: number) {
+  return new Map([
+    [
+      'microphone',
+      { type: 'media-source', kind: 'audio', audioLevel: localLevel },
+    ],
+    [
+      'remote-audio',
+      { type: 'inbound-rtp', kind: 'audio', audioLevel: remoteLevel },
+    ],
+  ]) as unknown as RTCStatsReport;
+}
+
 function audioTrack() {
   const listeners = new Set<() => void>();
   let readyState: MediaStreamTrackState = 'live';
@@ -3783,6 +3796,375 @@ describe('realtime room gateway', () => {
     await call.cleanup();
   });
 
+  it('collects one fresh native report for both quality directions per tick', async () => {
+    vi.useFakeTimers();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const peer = peerConnectionFactory();
+    peer.pc.getStats.mockResolvedValue(
+      new Map([
+        [
+          'screen-send',
+          {
+            id: 'screen-send',
+            type: 'outbound-rtp',
+            kind: 'video',
+            frameWidth: 1_920,
+            framesPerSecond: 50,
+          },
+        ],
+        [
+          'screen-receive',
+          {
+            id: 'screen-receive',
+            type: 'inbound-rtp',
+            kind: 'video',
+            frameWidth: 1_280,
+            framesPerSecond: 24,
+          },
+        ],
+      ]) as RTCStatsReport,
+    );
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+      statsIntervalMs: 250,
+    });
+    try {
+      await call.start();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(peer.pc.getStats).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(peer.pc.getStats).toHaveBeenCalledTimes(2);
+      expect(call.getSnapshot().quality).toMatchObject({
+        outbound: { fps: 50, width: 1_920 },
+        inbound: { fps: 24, width: 1_280 },
+      });
+
+      await vi.advanceTimersByTimeAsync(250);
+      // Two audio ticks and two quality ticks each collect one report.
+      expect(peer.pc.getStats).toHaveBeenCalledTimes(4);
+      expect(call.exportDiagnostics().samples).toHaveLength(2);
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares a slow stats report without accumulating audio or quality reads', async () => {
+    vi.useFakeTimers();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const peer = peerConnectionFactory();
+    const pendingStats = deferred<RTCStatsReport>();
+    peer.pc.getStats.mockReturnValueOnce(pendingStats.promise);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+      statsIntervalMs: 250,
+    });
+    try {
+      await call.start();
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(peer.pc.getStats).toHaveBeenCalledOnce();
+      expect(call.getSnapshot().quality).toBeNull();
+      pendingStats.resolve(audioStatsReport(0.4, 0.2));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0.4,
+        remoteAudioLevel: 0.2,
+      });
+      expect(call.exportDiagnostics().samples).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(peer.pc.getStats).toHaveBeenCalledTimes(2);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0,
+        remoteAudioLevel: 0,
+      });
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves snapshot identity for unchanged audio and publishes changed levels once', async () => {
+    vi.useFakeTimers();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const peer = peerConnectionFactory();
+    peer.pc.getStats.mockResolvedValue(audioStatsReport(0, 0));
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+      statsIntervalMs: 60_000,
+    });
+    try {
+      await call.start();
+      const initial = call.getSnapshot();
+      const listener = vi.fn();
+      call.subscribe(listener);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(peer.pc.getStats).toHaveBeenCalledTimes(5);
+      expect(call.getSnapshot()).toBe(initial);
+      expect(listener).not.toHaveBeenCalled();
+
+      peer.pc.getStats.mockResolvedValue(audioStatsReport(0.25, 0.5));
+      await vi.advanceTimersByTimeAsync(200);
+      const speaking = call.getSnapshot();
+      expect(speaking).toMatchObject({
+        localAudioLevel: 0.25,
+        remoteAudioLevel: 0.5,
+      });
+      expect(listener).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(call.getSnapshot()).toBe(speaking);
+      expect(listener).toHaveBeenCalledOnce();
+
+      peer.pc.getStats.mockResolvedValue(audioStatsReport(0, 0));
+      await vi.advanceTimersByTimeAsync(200);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0,
+        remoteAudioLevel: 0,
+      });
+      expect(listener).toHaveBeenCalledTimes(2);
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not publish a pending audio report after cleanup', async () => {
+    vi.useFakeTimers();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const peer = peerConnectionFactory();
+    const pendingStats = deferred<RTCStatsReport>();
+    peer.pc.getStats.mockReturnValue(pendingStats.promise);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: peer.factory,
+      statsIntervalMs: 60_000,
+    });
+    try {
+      await call.start();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(peer.pc.getStats).toHaveBeenCalledOnce();
+      const listener = vi.fn();
+      call.subscribe(listener);
+      await call.cleanup();
+      const closedSnapshot = call.getSnapshot();
+      listener.mockClear();
+
+      pendingStats.resolve(audioStatsReport(0.8, 0.9));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(call.getSnapshot()).toBe(closedSnapshot);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0,
+        remoteAudioLevel: 0,
+      });
+      expect(listener).not.toHaveBeenCalled();
+      expect(peer.pc.getStats).toHaveBeenCalledOnce();
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('samples a replacement transport while retired audio stats are unresolved', async () => {
+    vi.useFakeTimers();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const oldPeer = peerConnectionFactory();
+    const nextPeer = peerConnectionFactory();
+    const oldStats = deferred<RTCStatsReport>();
+    oldPeer.pc.getStats
+      .mockResolvedValueOnce(audioStatsReport(0.6, 0.7))
+      .mockReturnValue(oldStats.promise);
+    nextPeer.pc.getStats.mockResolvedValue(audioStatsReport(0.1, 0.2));
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(oldPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(nextPeer.pc as unknown as PeerConnectionLike);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+      statsIntervalMs: 60_000,
+    });
+    try {
+      await call.start();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(oldPeer.pc.getStats).toHaveBeenCalledTimes(2);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0.6,
+        remoteAudioLevel: 0.7,
+      });
+      client.emit({
+        version: PROTOCOL_VERSION,
+        eventId: 'reset-during-audio' as never,
+        type: 'webrtc.negotiationReset',
+        payload: {
+          roomId: room.roomId as never,
+          negotiationId: 'reset-during-audio' as never,
+          resetGeneration: 1,
+          reason: 'signaling_reset',
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0,
+        remoteAudioLevel: 0,
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(nextPeer.pc.getStats).toHaveBeenCalledOnce();
+      const currentSnapshot = call.getSnapshot();
+      expect(currentSnapshot).toMatchObject({
+        localAudioLevel: 0.1,
+        remoteAudioLevel: 0.2,
+      });
+      const listener = vi.fn();
+      call.subscribe(listener);
+
+      oldStats.resolve(audioStatsReport(0.9, 0.8));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(call.getSnapshot()).toBe(currentSnapshot);
+      expect(listener).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(nextPeer.pc.getStats).toHaveBeenCalledTimes(2);
+      expect(oldPeer.pc.getStats).toHaveBeenCalledTimes(2);
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires audio sampling when a replacement transport fails to bind', async () => {
+    vi.useFakeTimers();
+    const client = signaling();
+    const gateway = createRealtimeRoomGateway({
+      desktop,
+      user,
+      signaling: client,
+    });
+    const room = await gateway.createRoom('access-token');
+    const firstPeer = peerConnectionFactory();
+    const failedPeer = peerConnectionFactory();
+    const pendingBind = deferred<void>();
+    const pendingStats = deferred<RTCStatsReport>();
+    failedPeer.transceivers[0]!.sender.replaceTrack.mockImplementationOnce(
+      () => pendingBind.promise,
+    );
+    failedPeer.pc.getStats
+      .mockResolvedValueOnce(audioStatsReport(0.3, 0.4))
+      .mockReturnValue(pendingStats.promise);
+    const factory = vi
+      .fn()
+      .mockReturnValueOnce(firstPeer.pc as unknown as PeerConnectionLike)
+      .mockReturnValueOnce(failedPeer.pc as unknown as PeerConnectionLike);
+    const call = createCallController({
+      room,
+      gateway,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(mediaStream(audioTrack())),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      } as unknown as MediaDevices,
+      createPeerConnection: factory,
+      statsIntervalMs: 60_000,
+    });
+    try {
+      await call.start();
+      client.emit({
+        version: PROTOCOL_VERSION,
+        eventId: 'reset-before-bind-failure' as never,
+        type: 'webrtc.negotiationReset',
+        payload: {
+          roomId: room.roomId as never,
+          negotiationId: 'reset-before-bind-failure' as never,
+          resetGeneration: 1,
+          reason: 'signaling_reset',
+        },
+      });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(failedPeer.pc.getStats).toHaveBeenCalledTimes(2);
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0.3,
+        remoteAudioLevel: 0.4,
+      });
+
+      pendingBind.reject(new Error('Replacement microphone bind failed'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(failedPeer.pc.close).toHaveBeenCalledOnce();
+      expect(call.getSnapshot()).toMatchObject({
+        localAudioLevel: 0,
+        remoteAudioLevel: 0,
+      });
+      const failedSnapshot = call.getSnapshot();
+      const listener = vi.fn();
+      call.subscribe(listener);
+      pendingStats.resolve(audioStatsReport(0.8, 0.9));
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(call.getSnapshot()).toBe(failedSnapshot);
+      expect(listener).not.toHaveBeenCalled();
+      expect(failedPeer.pc.getStats).toHaveBeenCalledTimes(2);
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
+  });
+
   it('publishes bounded privacy-safe quality samples from the live transport', async () => {
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
@@ -3870,6 +4252,7 @@ describe('realtime room gateway', () => {
   });
 
   it('drops an old peer stats poll as soon as an authoritative rebuild starts', async () => {
+    vi.useFakeTimers();
     const client = signaling();
     const gateway = createRealtimeRoomGateway({
       desktop,
@@ -3895,29 +4278,37 @@ describe('realtime room gateway', () => {
       createPeerConnection: factory,
       statsIntervalMs: 250,
     });
-    await call.start();
-    await vi.waitFor(() =>
-      expect(oldPeer.pc.getStats.mock.calls.length).toBeGreaterThanOrEqual(2),
-    );
+    try {
+      await call.start();
+      await vi.advanceTimersByTimeAsync(300);
+      // The 200 ms audio and 250 ms quality tick both await this report.
+      expect(oldPeer.pc.getStats).toHaveBeenCalledOnce();
 
-    client.emit({
-      version: PROTOCOL_VERSION,
-      eventId: 'reset-during-old-stats' as never,
-      type: 'webrtc.negotiationReset',
-      payload: {
-        roomId: room.roomId as never,
-        negotiationId: 'reset-during-old-stats' as never,
-        resetGeneration: 1,
-        reason: 'signaling_reset',
-      },
-    });
-    oldStats.resolve(new Map() as RTCStatsReport);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+      client.emit({
+        version: PROTOCOL_VERSION,
+        eventId: 'reset-during-old-stats' as never,
+        type: 'webrtc.negotiationReset',
+        payload: {
+          roomId: room.roomId as never,
+          negotiationId: 'reset-during-old-stats' as never,
+          resetGeneration: 1,
+          reason: 'signaling_reset',
+        },
+      });
+      oldStats.resolve(audioStatsReport(0.8, 0.9));
+      await vi.advanceTimersByTimeAsync(0);
 
-    expect(call.exportDiagnostics().samples).toEqual([]);
-    expect(call.getSnapshot().quality).toBeNull();
-    await vi.waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
-    await call.cleanup();
+      expect(call.exportDiagnostics().samples).toEqual([]);
+      expect(call.getSnapshot()).toMatchObject({
+        quality: null,
+        localAudioLevel: 0,
+        remoteAudioLevel: 0,
+      });
+      expect(factory).toHaveBeenCalledTimes(2);
+    } finally {
+      await call.cleanup();
+      vi.useRealTimers();
+    }
   });
 
   it('starts and stops one screen sender without renegotiating or stopping voice', async () => {

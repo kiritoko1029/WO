@@ -16,6 +16,8 @@
     "../desktop/src/renderer/src/env.d.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
-    "test/**/*.ts"
+    "test/**/*.ts",
+    "preview/**/*.ts",
+    "preview/**/*.tsx"
   ]
 }

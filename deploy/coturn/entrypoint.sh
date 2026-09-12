@@ -27,7 +27,20 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-for required_file in "$static_config" "$secret_file" "$tls_cert" "$tls_key"; do
+if [ -n "${WO_TURN_MANAGED_CERTS:-}" ]; then
+  if [ "$WO_TURN_MANAGED_CERTS" != /certs ]; then
+    printf '%s\n' 'Managed TURN certificates must be mounted at /certs' >&2
+    exit 1
+  fi
+  # The certificate key is readable only by the eventual TURN identity.
+  # The root setup process deliberately has no DAC override capability.
+  tls_cert=/certs/current/fullchain.pem
+  tls_key=/certs/current/key.pem
+  set -- "$static_config" "$secret_file"
+else
+  set -- "$static_config" "$secret_file" "$tls_cert" "$tls_key"
+fi
+for required_file in "$@"; do
   if [ ! -r "$required_file" ]; then
     printf '%s\n' "Required TURN file is not readable: $required_file" >&2
     exit 1
@@ -77,8 +90,10 @@ done
 
 umask 077
 cat "$static_config" > "$runtime_config"
-cp "$tls_cert" "$runtime_tls_cert"
-cp "$tls_key" "$runtime_tls_key"
+if [ -z "${WO_TURN_MANAGED_CERTS:-}" ]; then
+  cp "$tls_cert" "$runtime_tls_cert"
+  cp "$tls_key" "$runtime_tls_key"
+fi
 printf '%s\n' \
   "static-auth-secret=$turn_secret" \
   "realm=$TURN_REALM" \
@@ -98,14 +113,22 @@ if [ -n "${TURN_INTERNAL_IP:-}" ]; then
 else
   printf '%s\n' "external-ip=$TURN_EXTERNAL_IP" >> "$runtime_config"
 fi
-chmod 600 "$runtime_config" "$runtime_tls_key"
-chmod 400 "$runtime_tls_cert"
+chmod 600 "$runtime_config"
 chown 65534:65533 \
   "$runtime_config" \
-  "$runtime_tls_cert" \
-  "$runtime_tls_key" \
   /run/wo-turn
 unset turn_secret
+
+if [ -n "${WO_TURN_MANAGED_CERTS:-}" ]; then
+  /usr/local/bin/wo-drop-privileges 65534 65533 \
+    /bin/sh /opt/wo/turn-certificate-watcher.sh --initialize
+  /usr/local/bin/wo-drop-privileges 65534 65533 \
+    /bin/sh /opt/wo/turn-certificate-watcher.sh &
+else
+  chmod 600 "$runtime_tls_key"
+  chmod 400 "$runtime_tls_cert"
+  chown 65534:65533 "$runtime_tls_cert" "$runtime_tls_key"
+fi
 
 exec /usr/local/bin/wo-drop-privileges \
   65534 \

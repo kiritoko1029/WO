@@ -1,0 +1,121 @@
+# Generated settings are selected by deploy.sh / deploy.ps1. Requires Compose >=2.24.4.
+services:
+  certificates:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+    image: 'wo-certificates:${BUILD_VERSION:-unresolved}'
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/managed/certificates/Dockerfile
+    restart: unless-stopped
+    environment:
+      WO_TLS_MODE: ${WO_TLS_MODE:?Use the guided setup first}
+      APP_DOMAIN: ${APP_DOMAIN:?APP_DOMAIN is required}
+      TURN_HOST: ${TURN_HOST:?TURN_HOST is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+      WO_ACME_SERVER: ${WO_ACME_SERVER:-letsencrypt}
+    healthcheck:
+      test: ['CMD', '/opt/wo/certificates.sh', '--check']
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    networks:
+      - edge
+    volumes:
+      - acme_state:/acme.sh
+      - managed_certs:/certs
+      - acme_webroot:/var/www/acme
+      - certificate_status:/status
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  caddy:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+    depends_on: !reset {}
+    entrypoint: ['/bin/sh', '/opt/wo/managed-caddy-entrypoint.sh']
+    environment:
+      WO_PUBLIC_ORIGIN: ${WO_PUBLIC_ORIGIN:?WO_PUBLIC_ORIGIN is required}
+      WO_PUBLIC_AUTHORITY: ${WO_PUBLIC_AUTHORITY:?WO_PUBLIC_AUTHORITY is required}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -f /tmp/wo-caddy-ready && wget --quiet --spider http://127.0.0.1:2019/config/
+      retries: 60
+    volumes:
+      - ./managed/caddy/entrypoint.sh:/opt/wo/managed-caddy-entrypoint.sh:ro
+      - ./managed/caddy/Caddyfile.bootstrap:/opt/wo/Caddyfile.bootstrap:ro
+      - ./managed/caddy/Caddyfile:/opt/wo/Caddyfile.managed:ro
+      - managed_certs:/certs:ro
+      - acme_webroot:/var/www/acme:ro
+
+  server:
+    # File-backed secrets retain the installing user's UID. Read them during
+    # initialization; server-entrypoint then drops every capability.
+    cap_add:
+      - DAC_READ_SEARCH
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+    environment:
+      PUBLIC_URL: ${WO_PUBLIC_ORIGIN:?WO_PUBLIC_ORIGIN is required}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?BOOTSTRAP_ADMIN_EMAIL is required}
+      DEPLOYMENT_STATUS_DIR: /run/wo-deployment
+      DEPLOYMENT_CERT_MODE: ${WO_TLS_MODE:?WO_TLS_MODE is required}
+    secrets:
+      - bootstrap_admin_password
+    volumes:
+      - certificate_status:/run/wo-deployment:ro
+
+  coturn:
+    # The final turnserver and watcher still run with zero capabilities.
+    cap_add:
+      - DAC_READ_SEARCH
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+    depends_on:
+      certificates:
+        condition: service_healthy
+    environment:
+      WO_TURN_MANAGED_CERTS: /certs
+    secrets: !override
+      - turn_shared_secret
+    volumes:
+      - managed_certs:/certs:ro
+
+  postgres:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+
+secrets:
+  bootstrap_admin_password:
+    file: ${DEPLOY_SECRET_DIR:?DEPLOY_SECRET_DIR is required}/bootstrap_admin_password
+  turn_tls_cert: !reset null
+  turn_tls_key: !reset null
+
+volumes:
+  acme_state:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+  managed_certs:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+  acme_webroot:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+  certificate_status:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+  caddy_config:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+  caddy_data:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}
+  postgres_data:
+    labels:
+      io.wo.managed.deployment-id: ${WO_DEPLOYMENT_ID:?WO_DEPLOYMENT_ID is required}

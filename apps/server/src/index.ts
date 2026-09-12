@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { parseP2pServerConfig } from '@wo/config';
 import {
   createDatabaseClient,
+  createAdminBootstrapRepository,
   createIdentityRepository,
   createSessionRepository,
   migrateDatabase,
@@ -14,6 +15,8 @@ import type { FastifyInstance } from 'fastify';
 
 import { createApp } from './app.ts';
 import { createAdminService } from './modules/admin/admin-service.ts';
+import { bootstrapAdmin } from './modules/admin/bootstrap-admin.ts';
+import { createDeploymentStatusReader } from './modules/admin/deployment-status.ts';
 import { createAccessTokenService } from './modules/auth/access-token.ts';
 import { createAuthService } from './modules/auth/auth-service.ts';
 import { createEmailDelivery } from './modules/auth/email-delivery.ts';
@@ -60,6 +63,13 @@ export async function startServer(
 
   try {
     await migrateDatabase(databaseClient);
+    const bootstrapIdentity =
+      config.bootstrapAdmin === undefined
+        ? undefined
+        : await bootstrapAdmin(
+            config.bootstrapAdmin,
+            createAdminBootstrapRepository(databaseClient),
+          );
     const identityRepository = createIdentityRepository(databaseClient);
     const sessionRepository = createSessionRepository(databaseClient);
     const accessTokenService = createAccessTokenService({
@@ -78,6 +88,8 @@ export async function startServer(
         codeTtlSeconds: config.email.codeTtlSeconds,
       },
       emailDelivery: createEmailDelivery(config.email.smtp),
+      protectedEmailUserIds:
+        bootstrapIdentity === undefined ? [] : [bootstrapIdentity.userId],
     });
     const realtimeHandles: import('./modules/admin/admin-service.ts').AdminRealtimeHandles =
       {
@@ -97,7 +109,10 @@ export async function startServer(
       readinessCheck: async () => {
         await databaseClient.sql`SELECT 1`;
       },
-      admin: { adminService },
+      admin: {
+        adminService,
+        deploymentStatus: createDeploymentStatusReader(config),
+      },
       realtime: {
         identityRepository,
         ticketStore: createSignalTicketStore(),

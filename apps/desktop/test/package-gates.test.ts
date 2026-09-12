@@ -575,7 +575,9 @@ describe('desktop platform package command', () => {
       commands: Array<{ args: string[] }>;
     };
     expect(plan.platform).toBe('mac');
-    expect(plan.commands.at(-1)?.args).toContain('--smoke');
+    expect(plan.commands.at(-1)?.args.includes('--smoke')).toBe(
+      process.platform === 'darwin',
+    );
     expect(plan.commands.at(-1)?.args).toContain(
       '--expected-mac-team-id=TEAMID1234',
     );

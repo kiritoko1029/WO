@@ -1,5 +1,12 @@
-import { useRef, useState } from 'react';
-import { AudioLines, Check, Copy, ExternalLink, Settings, Share2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  AudioLines,
+  Check,
+  Copy,
+  ExternalLink,
+  Settings,
+  Share2,
+} from 'lucide-react';
 import {
   createJoinProtocolUrl,
   createServerShareUrl,
@@ -35,6 +42,13 @@ export function RoomRoute({
   const [copied, setCopied] = useState<'client' | 'web' | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const [roomCodeCopied, setRoomCodeCopied] = useState(false);
+  const [roomCodeCopyError, setRoomCodeCopyError] = useState<string | null>(
+    null,
+  );
+  const roomCodeTimerRef = useRef<number | null>(null);
+  const shareTimerRef = useRef<number | null>(null);
+  const roomCodeRequestRef = useRef(0);
+  const shareRequestRef = useRef(0);
   // Whether the floating toolbars are revealed while a screen share is showing.
   // Driven by ScreenStage's idle-reveal timer so the call toolbar and share
   // status fade out in sync with the in-stage overlay.
@@ -42,6 +56,24 @@ export function RoomRoute({
   const hangingUpRef = useRef(false);
   const shareRef = useRef<HTMLDivElement>(null);
   useClickOutside(shareRef, () => setShareOpen(false), shareOpen);
+  useEffect(() => {
+    setRoomCodeCopied(false);
+    setRoomCodeCopyError(null);
+    return () => {
+      roomCodeRequestRef.current += 1;
+      if (roomCodeTimerRef.current !== null)
+        window.clearTimeout(roomCodeTimerRef.current);
+    };
+  }, [room?.roomCode]);
+  useEffect(() => {
+    setCopied(null);
+    setCopyError(null);
+    return () => {
+      shareRequestRef.current += 1;
+      if (shareTimerRef.current !== null)
+        window.clearTimeout(shareTimerRef.current);
+    };
+  }, [shareOpen, room?.roomCode, serverOrigin]);
   if (room === null) return null;
   const parsedShareIntent = serverJoinIntentSchema.safeParse({
     version: 1,
@@ -129,6 +161,7 @@ export function RoomRoute({
       succeeded = false;
     }
     if (!succeeded && typeof document.execCommand === 'function') {
+      const previousFocus = document.activeElement;
       const textarea = document.createElement('textarea');
       textarea.value = value;
       textarea.readOnly = true;
@@ -142,6 +175,9 @@ export function RoomRoute({
         succeeded = false;
       } finally {
         textarea.remove();
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+          previousFocus.focus({ preventScroll: true });
+        }
       }
     }
     return succeeded;
@@ -151,10 +187,16 @@ export function RoomRoute({
     kind: 'client' | 'web',
     value: string,
   ): Promise<void> => {
+    const request = ++shareRequestRef.current;
+    if (shareTimerRef.current !== null)
+      window.clearTimeout(shareTimerRef.current);
+    setCopied(null);
     setCopyError(null);
     const succeeded = await writeClipboard(value);
+    if (request !== shareRequestRef.current) return;
     if (succeeded) {
       setCopied(kind);
+      shareTimerRef.current = window.setTimeout(() => setCopied(null), 1500);
       return;
     }
     setCopied(null);
@@ -162,10 +204,21 @@ export function RoomRoute({
   };
 
   const copyRoomCode = async (): Promise<void> => {
+    const request = ++roomCodeRequestRef.current;
+    if (roomCodeTimerRef.current !== null)
+      window.clearTimeout(roomCodeTimerRef.current);
+    setRoomCodeCopied(false);
+    setRoomCodeCopyError(null);
     const succeeded = await writeClipboard(room.roomCode);
+    if (request !== roomCodeRequestRef.current) return;
     if (succeeded) {
       setRoomCodeCopied(true);
-      setTimeout(() => setRoomCodeCopied(false), 1500);
+      roomCodeTimerRef.current = window.setTimeout(
+        () => setRoomCodeCopied(false),
+        1500,
+      );
+    } else {
+      setRoomCodeCopyError('房间号复制失败，请允许剪贴板权限后重试');
     }
   };
 
@@ -195,9 +248,7 @@ export function RoomRoute({
       onRemoteVolumeChange={call.controller.setRemoteVolume}
       onMicrophoneVolumeChange={call.controller.setMicrophoneVolume}
       onNoiseIntensityChange={(intensity) =>
-        void call.controller
-          .setNoiseIntensity(intensity)
-          .catch(() => undefined)
+        void call.controller.setNoiseIntensity(intensity).catch(() => undefined)
       }
       onRefreshDevices={() =>
         void call.controller.refreshDevices().catch(() => undefined)
@@ -225,7 +276,9 @@ export function RoomRoute({
     <div
       className="room-shell"
       data-rnnoise-active={call.snapshot.rnnoiseActive}
-      data-screen-controls-active={screenPresentationLive ? String(screenControlsActive) : undefined}
+      data-screen-controls-active={
+        screenPresentationLive ? String(screenControlsActive) : undefined
+      }
     >
       <header className="room-header">
         <div className="product-lockup compact">
@@ -246,12 +299,11 @@ export function RoomRoute({
             onClick={() => void copyRoomCode()}
           >
             <code>{room.roomCode}</code>
-            {roomCodeCopied ? (
-              <Check size={13} />
-            ) : (
-              <Copy size={13} />
-            )}
+            {roomCodeCopied ? <Check size={13} /> : <Copy size={13} />}
           </button>
+          <span className="sr-only" role="status">
+            {roomCodeCopied ? '房间号已复制' : ''}
+          </span>
           {lanEndpoint !== null && (
             <>
               <span className="room-code-label">可信局域网</span>
@@ -327,6 +379,7 @@ export function RoomRoute({
         />
         <div className="room-error" role="alert" aria-live="polite">
           {visibleError !== null && <span>{visibleError}</span>}
+          {roomCodeCopyError !== null && <span>{roomCodeCopyError}</span>}
           {canOpenScreenSettings && (
             <button
               type="button"

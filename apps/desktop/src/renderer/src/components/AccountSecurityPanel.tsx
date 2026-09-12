@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Shield, X } from 'lucide-react';
 
 import { useAuth } from '../state/auth-store.js';
+import { useDialogFocus } from '../hooks/use-dialog-focus.js';
 
 type PanelMode = 'menu' | 'password' | 'email-request' | 'email-confirm';
 
@@ -34,19 +35,16 @@ export function AccountSecurityPanel() {
   };
 
   const close = () => {
+    if (auth.busy) return;
     setOpen(false);
     reset();
   };
 
-  useEffect(() => {
-    if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || auth.busy) return;
-      close();
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [open, auth.busy]);
+  const dialogRef = useDialogFocus({
+    open: open && auth.session !== null,
+    onDismiss: close,
+    dismissible: !auth.busy,
+  });
 
   if (auth.session === null) return null;
 
@@ -137,9 +135,12 @@ export function AccountSecurityPanel() {
           }}
         >
           <section
+            ref={dialogRef}
+            tabIndex={-1}
             className="account-security-dialog"
             role="dialog"
             aria-modal="true"
+            aria-busy={auth.busy}
             aria-labelledby="account-security-title"
           >
             <header>
@@ -221,6 +222,7 @@ export function AccountSecurityPanel() {
                   <button
                     type="button"
                     className="secondary-button"
+                    disabled={auth.busy}
                     onClick={() => setMode('menu')}
                   >
                     返回
@@ -259,6 +261,7 @@ export function AccountSecurityPanel() {
                   <button
                     type="button"
                     className="secondary-button"
+                    disabled={auth.busy}
                     onClick={() => setMode('menu')}
                   >
                     返回
@@ -293,6 +296,7 @@ export function AccountSecurityPanel() {
                   <button
                     type="button"
                     className="secondary-button"
+                    disabled={auth.busy}
                     onClick={() => setMode('email-request')}
                   >
                     返回

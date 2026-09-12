@@ -186,7 +186,7 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
         SELECT count(*)::int AS migration_count
         FROM wo_meta.schema_migrations
       `;
-    expect(migration_count).toBe(2);
+    expect(migration_count).toBe(3);
   }, 60_000);
 
   test('journals each migration once and skips identical checksums', async () => {
@@ -207,6 +207,10 @@ describe('PostgreSQL identity and refresh-session repositories', () => {
       }),
       expect.objectContaining({
         migration_id: '0001_email_verification',
+        checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      }),
+      expect.objectContaining({
+        migration_id: '0002_admin_bootstrap',
         checksum: expect.stringMatching(/^[0-9a-f]{64}$/u),
       }),
     ]);

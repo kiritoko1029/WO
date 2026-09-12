@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -92,6 +93,7 @@ export function AuthProvider({
   const [status, setStatus] = useState<AuthStatus>('restoring');
   const [session, setSession] = useState<PublicAuthSession | null>(null);
   const [busy, setBusy] = useState(false);
+  const operationInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<
     string | null
@@ -116,10 +118,25 @@ export function AuthProvider({
     };
   }, [api]);
 
+  const beginOperation = useCallback(() => {
+    if (operationInFlight.current) return false;
+    operationInFlight.current = true;
+    setBusy(true);
+    setError(null);
+    return true;
+  }, []);
+
+  const finishOperation = useCallback(() => {
+    operationInFlight.current = false;
+    setBusy(false);
+  }, []);
+
   const runSession = useCallback(
-    async (operation: () => Promise<PublicAuthSession>) => {
-      setBusy(true);
-      setError(null);
+    async (
+      operation: () => Promise<PublicAuthSession>,
+      verificationEmail?: string,
+    ) => {
+      if (!beginOperation()) return false;
       try {
         const next = await operation();
         setSession(next);
@@ -127,13 +144,28 @@ export function AuthProvider({
         setPendingVerificationEmail(null);
         return true;
       } catch (operationError) {
+        if (
+          errorCode(operationError) === 'EMAIL_NOT_VERIFIED' &&
+          verificationEmail !== undefined
+        ) {
+          setPendingVerificationEmail(verificationEmail);
+          try {
+            const result = await api.auth.resendVerification({
+              email: verificationEmail,
+            });
+            setPendingVerificationEmail(result.email);
+          } catch (resendError) {
+            setError(authErrorMessage(resendError));
+          }
+          return false;
+        }
         setError(authErrorMessage(operationError));
         return false;
       } finally {
-        setBusy(false);
+        finishOperation();
       }
     },
-    [],
+    [api, beginOperation, finishOperation],
   );
 
   const value = useMemo<AuthState>(
@@ -144,8 +176,7 @@ export function AuthProvider({
       error,
       pendingVerificationEmail,
       register: async (input) => {
-        setBusy(true);
-        setError(null);
+        if (!beginOperation()) return null;
         try {
           const result = await api.auth.register(input);
           if (result.kind === 'session') {
@@ -160,14 +191,13 @@ export function AuthProvider({
           setError(authErrorMessage(operationError));
           return null;
         } finally {
-          setBusy(false);
+          finishOperation();
         }
       },
-      login: (input) => runSession(() => api.auth.login(input)),
+      login: (input) => runSession(() => api.auth.login(input), input.email),
       verifyEmail: (input) => runSession(() => api.auth.verifyEmail(input)),
       resendVerification: async (input) => {
-        setBusy(true);
-        setError(null);
+        if (!beginOperation()) return false;
         try {
           const result = await api.auth.resendVerification(input);
           setPendingVerificationEmail(result.email);
@@ -176,12 +206,11 @@ export function AuthProvider({
           setError(authErrorMessage(operationError));
           return false;
         } finally {
-          setBusy(false);
+          finishOperation();
         }
       },
       changePassword: async (input) => {
-        setBusy(true);
-        setError(null);
+        if (!beginOperation()) return false;
         try {
           await api.auth.changePassword(input);
           return true;
@@ -189,12 +218,11 @@ export function AuthProvider({
           setError(authErrorMessage(operationError));
           return false;
         } finally {
-          setBusy(false);
+          finishOperation();
         }
       },
       requestEmailChange: async (input) => {
-        setBusy(true);
-        setError(null);
+        if (!beginOperation()) return null;
         try {
           const result = await api.auth.requestEmailChange(input);
           return result.email;
@@ -202,14 +230,13 @@ export function AuthProvider({
           setError(authErrorMessage(operationError));
           return null;
         } finally {
-          setBusy(false);
+          finishOperation();
         }
       },
       confirmEmailChange: (input) =>
         runSession(() => api.auth.confirmEmailChange(input)),
       logout: async () => {
-        setBusy(true);
-        setError(null);
+        if (!beginOperation()) return false;
         try {
           await api.auth.logout();
           setSession(null);
@@ -220,13 +247,23 @@ export function AuthProvider({
           setError(authErrorMessage(operationError));
           return false;
         } finally {
-          setBusy(false);
+          finishOperation();
         }
       },
       clearError: () => setError(null),
       clearPendingVerification: () => setPendingVerificationEmail(null),
     }),
-    [api, busy, error, pendingVerificationEmail, runSession, session, status],
+    [
+      api,
+      beginOperation,
+      busy,
+      error,
+      finishOperation,
+      pendingVerificationEmail,
+      runSession,
+      session,
+      status,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
