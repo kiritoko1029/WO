@@ -1,0 +1,30 @@
+# 1Panel owns the public 80/443 listeners and HTTPS certificates.
+services:
+  caddy:
+    profiles: ['wo-internal-edge']
+    ports: !reset []
+
+  server:
+    # A published loopback port needs a routable bridge as well as the private
+    # database network; an internal-only bridge cannot serve host OpenResty.
+    networks:
+      - edge
+    ports:
+      - target: 3000
+        published: '${WO_HTTP_PORT:-18080}'
+        host_ip: 127.0.0.1
+        protocol: tcp
+
+  certificates:
+    networks: !reset []
+    network_mode: none
+    environment:
+      WO_EXTERNAL_CERT_FILE: ${WO_EXTERNAL_CERT_FILE:-fullchain.pem}
+      WO_EXTERNAL_KEY_FILE: ${WO_EXTERNAL_KEY_FILE:-privkey.pem}
+    volumes:
+      - type: bind
+        source: ${WO_EXTERNAL_CERT_DIR:?Select the 1Panel website SSL directory}
+        target: /external-certs
+        read_only: true
+        bind:
+          create_host_path: false

@@ -10,7 +10,7 @@ webroot=/var/www/acme
 export AUTO_UPGRADE=0
 umask 077
 
-case "$mode" in acme|local) ;; *) printf '%s\n' 'Invalid certificate mode' >&2; exit 64 ;; esac
+case "$mode" in acme|local|external) ;; *) printf '%s\n' 'Invalid certificate mode' >&2; exit 64 ;; esac
 if ! printf '%s\n' "$domain" | LC_ALL=C grep -Eq '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' || [ "${#domain}" -gt 253 ]; then
   printf '%s\n' 'Invalid certificate hostname' >&2
   exit 64
@@ -23,6 +23,8 @@ fi
 validate_certificate() {
   candidate=$1
   [ -s "$candidate/fullchain.pem" ] && [ -s "$candidate/key.pem" ] || return 1
+  # A combined certificate/key export must never enter the public status volume.
+  if grep -q 'PRIVATE KEY' "$candidate/fullchain.pem"; then return 1; fi
   openssl x509 -in "$candidate/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1 || return 1
   openssl verify -CAfile "$candidate/fullchain.pem" -partial_chain -purpose sslserver \
     -verify_hostname "$domain" "$candidate/fullchain.pem" >/dev/null 2>&1 || return 1
@@ -43,7 +45,7 @@ write_status() {
   status_state=$1
   status_error=$2
   success=null
-  if [ -s "$state/wo-last-success" ]; then
+  if [ -s "$state/wo-last-success" ] && { [ "$mode" != external ] || [ -s "$state/wo-external-imported" ]; }; then
     success=$(jq -Rn --arg value "$(cat "$state/wo-last-success")" '$value')
   fi
   jq -n --arg mode "$mode" --arg state "$status_state" \
@@ -133,6 +135,28 @@ local_certificate() {
   publish_certificate "$state/export"
 }
 
+external_certificate() {
+  certificate_name=${WO_EXTERNAL_CERT_FILE:-fullchain.pem}
+  private_name=${WO_EXTERNAL_KEY_FILE:-privkey.pem}
+  for filename in "$certificate_name" "$private_name"; do
+    case "$filename" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    source_file="/external-certs/$filename"
+    [ -f "$source_file" ] && [ -r "$source_file" ] || return 1
+    [ "$(wc -c < "$source_file")" -le 65536 ] || return 1
+  done
+  rm -f "$state/export/fullchain.pem" "$state/export/key.pem"
+  cp "/external-certs/$certificate_name" "$state/export/fullchain.pem" || return 1
+  cp "/external-certs/$private_name" "$state/export/key.pem" || return 1
+  # One complete, validated generation is published even if 1Panel replaces
+  # the source pair non-atomically. A mismatched pair never reaches consumers.
+  publish_certificate "$state/export" || return 1
+  imported=$(current_generation) || return 1
+  if [ ! -s "$state/wo-external-imported" ]; then
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$state/wo-last-success"
+  fi
+  printf '%s\n' "${imported##*/}" > "$state/wo-external-imported"
+}
+
 attempt_certificate() (
   # Kernel locks disappear on crashes, so restarting cannot inherit a stale lock.
   flock -n 9 || { printf '%s\n' 'Certificate operation already in progress; retry shortly' >&2; exit 75; }
@@ -142,6 +166,9 @@ attempt_certificate() (
   if [ "$mode" = local ]; then
     result=0
     local_certificate || result=$?
+  elif [ "$mode" = external ]; then
+    result=0
+    external_certificate || result=$?
   else
     result=0
     acme_certificate || result=$?
@@ -152,26 +179,37 @@ attempt_certificate() (
   else
     error='"ISSUANCE_FAILED"'
     if [ -s "$state/wo-last-success" ]; then error='"RENEWAL_FAILED"'; fi
+    if [ "$mode" = external ]; then error='"IMPORT_FAILED"'; fi
     write_status error "$error"
-    printf '%s\n' 'Certificate operation failed; check DNS, ports and ACME connectivity' >&2
+    if [ "$mode" = external ]; then
+      printf '%s\n' 'Certificate import failed; check the 1Panel website certificate, key and host directory' >&2
+    else
+      printf '%s\n' 'Certificate operation failed; check DNS, ports and ACME connectivity' >&2
+    fi
     exit 1
   fi
 ) 9>"$state/wo-certificate.lock"
 
 case "${1:-daemon}" in
   --check)
-    current=$(current_generation) && validate_certificate "$current"
-    exit $?
+    current=$(current_generation) || exit 1
+    validate_certificate "$current" || exit 1
+    if [ "$mode" = external ]; then
+      [ -s "$state/wo-external-imported" ] && [ "$(cat "$state/wo-external-imported")" = "${current##*/}" ] || exit 1
+    fi
+    exit 0
     ;;
-  --renew-now|daemon) ;;
-  *) printf '%s\n' 'Usage: certificates.sh [daemon|--renew-now|--check]' >&2; exit 64 ;;
+  --sync-now) [ "$mode" = external ] || exit 64 ;;
+  --renew-now) [ "$mode" != external ] || { echo 'Renew in 1Panel, then use --sync-now' >&2; exit 64; } ;;
+  daemon) ;;
+  *) printf '%s\n' 'Usage: certificates.sh [daemon|--renew-now|--sync-now|--check]' >&2; exit 64 ;;
 esac
 
 mkdir -p "$state/export" "$certificates/generations" "$status" "$webroot/.well-known/acme-challenge"
 chmod 700 "$state" "$state/export"
 chmod 755 "$certificates" "$certificates/generations" "$status" "$webroot" "$webroot/.well-known" "$webroot/.well-known/acme-challenge"
 force=0
-if [ "${1:-daemon}" = --renew-now ]; then
+if [ "${1:-daemon}" = --renew-now ] || [ "${1:-daemon}" = --sync-now ]; then
   force=1
   attempt_certificate
   exit $?
@@ -189,6 +227,7 @@ while :; do
   child=$!
   interval=43200
   wait "$child" || interval=300
+  if [ "$mode" = external ]; then interval=30; fi
   sleep "$interval" &
   child=$!
   wait "$child" || true

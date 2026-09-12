@@ -55,14 +55,16 @@ const certificateAlerts: Record<
 > = {
   LOCAL_CERTIFICATE: '本地测试证书：仅适合本机测试，浏览器可能提示不受信任。',
   STATUS_UNAVAILABLE: '证书状态暂不可用，请检查部署服务是否正常运行。',
-  STATUS_STALE: '证书任务超过 48 小时没有更新，请检查自动续签服务。',
-  CERTIFICATE_PENDING: '正在等待首次签发与发布，通常需要几分钟。',
+  STATUS_STALE: '证书任务超过 48 小时没有更新，请检查证书管理服务。',
+  CERTIFICATE_PENDING: '正在等待可用证书发布，请检查所选证书管理方式。',
   CERTIFICATE_EXPIRED: '证书已过期，请检查续签服务和域名解析。',
   CERTIFICATE_EXPIRING: '证书将在 21 天内到期，请确认续签任务正常。',
   CERTIFICATE_NOT_YET_VALID: '证书尚未生效，请检查服务器时间。',
   HOST_MISMATCH: '证书与访问地址或 TURN 域名不匹配，请重新检查部署设置。',
   ISSUANCE_FAILED: '首次签发失败；服务将自动重试，请检查域名解析和 80 端口。',
   RENEWAL_FAILED: '续签失败；服务将自动重试，目前保留上一份证书。',
+  IMPORT_FAILED:
+    '1Panel 证书导入失败；请检查网站证书目录、文件名、有效期和私钥是否匹配。',
 };
 
 function DeploymentPanel({
@@ -165,7 +167,11 @@ function DeploymentPanel({
             </article>
             <article className="admin-status-card">
               <div className="admin-card-heading">
-                <p className="admin-card-label">HTTPS / TURN TLS</p>
+                <p className="admin-card-label">
+                  {cert.mode === 'external'
+                    ? 'TURN TLS / 1Panel 同步'
+                    : 'HTTPS / TURN TLS'}
+                </p>
                 <span className={`admin-cert-state ${cert.state}`}>
                   {stateLabels[cert.state]}
                 </span>
@@ -175,12 +181,16 @@ function DeploymentPanel({
                   ? '本地测试证书'
                   : cert.mode === 'acme'
                     ? 'ACME 自动证书'
-                    : '自主管理证书'}
+                    : cert.mode === 'external'
+                      ? '1Panel 管理证书'
+                      : '自主管理证书'}
               </strong>
               <p className="admin-sub">
-                {cert.autoRenew
-                  ? '自动检查续签并发布证书，供 HTTPS 与 TURN 服务加载'
-                  : '当前部署未启用自动证书状态管理'}
+                {cert.mode === 'external'
+                  ? '由 1Panel 签发与续签，WO 自动导入网站证书供 TURN 加载；HTTPS 状态请在 1Panel 查看。'
+                  : cert.autoRenew
+                    ? '自动检查续签并发布证书，供 HTTPS 与 TURN 服务加载'
+                    : '当前部署未启用自动证书状态管理'}
               </p>
               <dl className="admin-status-list">
                 <div>
@@ -200,7 +210,7 @@ function DeploymentPanel({
                   </dd>
                 </div>
                 <div>
-                  <dt>最近签发</dt>
+                  <dt>{cert.mode === 'external' ? '最近导入' : '最近签发'}</dt>
                   <dd>
                     {cert.lastSuccessAt === null
                       ? '暂无记录'

@@ -62,6 +62,8 @@ Docker Compose 提供账号、房间信令、Web、PostgreSQL 和 TURN；媒体�
 
 ## 中心模式快速开始
 
+已有 1Panel OpenResty 占用 80/443 时，使用 [1Panel 部署模式](docs/1panel.md)：保留现有 HTTPS 入口，WO 自动同步网站证书给 TURN。
+
 生产环境准备 Linux x86_64、Git、Docker Engine 26+ 和 Docker Compose 2.24.4+，
 将域名 A 记录指向服务器并开放 HTTPS/TURN 端口。在克隆的仓库根目录执行：
 

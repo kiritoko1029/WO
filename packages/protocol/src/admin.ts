@@ -74,11 +74,13 @@ export type AdminConnectionSnapshot = z.infer<
 export const deploymentCertificateWorkerStatusSchema = z
   .object({
     version: z.literal(1),
-    mode: z.enum(['acme', 'local']),
+    mode: z.enum(['acme', 'local', 'external']),
     state: z.enum(['starting', 'ready', 'error']),
     lastAttemptAt: z.string().datetime(),
     lastSuccessAt: z.string().datetime().nullable(),
-    errorCode: z.enum(['ISSUANCE_FAILED', 'RENEWAL_FAILED']).nullable(),
+    errorCode: z
+      .enum(['ISSUANCE_FAILED', 'RENEWAL_FAILED', 'IMPORT_FAILED'])
+      .nullable(),
   })
   .strict();
 
@@ -94,7 +96,7 @@ export const adminDeploymentStatusSchema = z
     smtpConfigured: z.boolean(),
     certificate: z
       .object({
-        mode: z.enum(['acme', 'local', 'manual']),
+        mode: z.enum(['acme', 'local', 'external', 'manual']),
         state: z.enum([
           'pending',
           'ready',
@@ -106,7 +108,9 @@ export const adminDeploymentStatusSchema = z
         stale: z.boolean(),
         lastAttemptAt: z.string().datetime().nullable(),
         lastSuccessAt: z.string().datetime().nullable(),
-        errorCode: z.enum(['ISSUANCE_FAILED', 'RENEWAL_FAILED']).nullable(),
+        errorCode: z
+          .enum(['ISSUANCE_FAILED', 'RENEWAL_FAILED', 'IMPORT_FAILED'])
+          .nullable(),
         details: z
           .object({
             subject: z.string().max(2048),
@@ -133,6 +137,7 @@ export const adminDeploymentStatusSchema = z
               'HOST_MISMATCH',
               'ISSUANCE_FAILED',
               'RENEWAL_FAILED',
+              'IMPORT_FAILED',
             ]),
           )
           .max(10),

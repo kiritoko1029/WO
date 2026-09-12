@@ -191,6 +191,10 @@ m-line 客户端不能与当前客户端混合进房；服务端不会重写或�
 
 ## 外部 Nginx / OpenResty 反代（1Panel 等）
 
+已有 1Panel 并希望继续使用向导、管理员初始化和自动证书同步时，优先使用
+[`--1panel` 模式](1panel.md)。下面的 root profile 是独立的高级发布流程，不要将其
+Compose 文件直接混入 managed 项目。
+
 标准 `deploy/compose.yaml` 使用内置 Caddy 终止 HTTPS。若改用仓库根目录
 `docker-compose.yml` / `docker-compose.external-db.yml`，只发布 server
 （默认 `18080→3000`）和 coturn，则由宿主机上的 Nginx、OpenResty 或 1Panel

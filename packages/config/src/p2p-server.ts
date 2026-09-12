@@ -24,7 +24,7 @@ export type P2pServerConfig = Readonly<{
   bootstrapAdmin?: Readonly<{ email: string; password: string }>;
   deployment?: Readonly<{
     statusDir: string;
-    certificateMode: 'acme' | 'local';
+    certificateMode: 'acme' | 'local' | 'external';
   }>;
   email: Readonly<{
     domainAllowlist: readonly string[];
@@ -554,11 +554,17 @@ function parseDeploymentConfig(
       'must be a non-empty bounded directory path',
     );
   }
-  if (certificateMode !== 'acme' && certificateMode !== 'local') {
-    addIssue(issues, 'DEPLOYMENT_CERT_MODE', 'must be acme or local');
+  if (
+    certificateMode !== 'acme' &&
+    certificateMode !== 'local' &&
+    certificateMode !== 'external'
+  ) {
+    addIssue(issues, 'DEPLOYMENT_CERT_MODE', 'must be acme, local or external');
   }
   return statusDir !== undefined &&
-    (certificateMode === 'acme' || certificateMode === 'local')
+    (certificateMode === 'acme' ||
+      certificateMode === 'local' ||
+      certificateMode === 'external')
     ? { statusDir, certificateMode }
     : undefined;
 }

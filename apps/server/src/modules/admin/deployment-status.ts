@@ -78,7 +78,8 @@ export function createDeploymentStatusReader(
     const certificate: AdminDeploymentStatus['certificate'] = {
       mode: managed?.certificateMode ?? 'manual',
       state: managed === undefined ? 'unmanaged' : 'pending',
-      autoRenew: managed !== undefined,
+      autoRenew:
+        managed !== undefined && managed.certificateMode !== 'external',
       stale: false,
       lastAttemptAt: null,
       lastSuccessAt: null,

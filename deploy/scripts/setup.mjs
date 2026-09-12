@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { resolve4 } from 'node:dns/promises';
 import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { pathToFileURL } from 'node:url';
 
@@ -30,7 +30,15 @@ const generatedSecrets = [
   'postgres_password',
   'turn_shared_secret',
 ];
-const actions = new Set(['up', 'configure', 'status', 'logs', 'renew', 'stop']);
+const actions = new Set([
+  'up',
+  'configure',
+  'status',
+  'logs',
+  'renew',
+  'sync-cert',
+  'stop',
+]);
 const optionNames = new Set([
   'project',
   'state-dir',
@@ -46,6 +54,9 @@ const optionNames = new Set([
   'relay-min',
   'relay-max',
   'password-file',
+  'cert-dir',
+  'cert-file',
+  'key-file',
 ]);
 const booleanNames = new Set([
   'local',
@@ -53,6 +64,7 @@ const booleanNames = new Set([
   'prepare-only',
   'finish',
   'refresh-build',
+  '1panel',
   'help',
 ]);
 
@@ -176,6 +188,11 @@ export function createSetupEnvironment(
   platform = process.platform,
 ) {
   const local = options.local === true;
+  const onePanel = options['1panel'] === true;
+  if (onePanel && local)
+    throw new Error(
+      '--1panel uses the existing HTTPS ingress; it cannot be combined with --local',
+    );
   const appDomain = literal(
     options.domain ?? (local ? 'wo.localhost' : ''),
     'Domain',
@@ -193,15 +210,19 @@ export function createSetupEnvironment(
     'Administrator email',
   );
   const httpPort = literal(
-    options['http-port'] ?? (local ? '18080' : '80'),
+    options['http-port'] ?? (local || onePanel ? '18080' : '80'),
     'HTTP port',
   );
   const httpsPort = literal(
     options['https-port'] ?? (local ? '18443' : '443'),
     'HTTPS port',
   );
-  if (!local && (httpPort !== '80' || httpsPort !== '443'))
+  if (!local && !onePanel && (httpPort !== '80' || httpsPort !== '443'))
     throw new Error('Public ACME deployment requires host ports 80 and 443');
+  if (onePanel && (httpsPort !== '443' || Number(httpPort) < 1024))
+    throw new Error(
+      '1Panel keeps public HTTPS on 443; choose a loopback upstream port above 1023',
+    );
   const turnPort = literal(
     options['turn-port'] ?? (local ? '13478' : '3478'),
     'TURN port',
@@ -215,7 +236,8 @@ export function createSetupEnvironment(
   const environment = {
     APP_DOMAIN: appDomain,
     ACME_EMAIL: emailAddress(
-      options.email ?? (local ? 'operator@wo.localhost' : ''),
+      options.email ??
+        (onePanel ? adminEmail : local ? 'operator@wo.localhost' : ''),
       'ACME email',
     ),
     BOOTSTRAP_ADMIN_EMAIL: adminEmail,
@@ -240,7 +262,7 @@ export function createSetupEnvironment(
       'Relay maximum',
     ),
     TURN_URLS: `stun:${turnHost}:${turnPort},turn:${turnHost}:${turnPort}?transport=udp,turn:${turnHost}:${turnPort}?transport=tcp,turns:${turnHost}:${turnTlsPort}?transport=tcp`,
-    WO_TLS_MODE: local ? 'local' : 'acme',
+    WO_TLS_MODE: onePanel ? 'external' : local ? 'local' : 'acme',
     WO_HTTP_PORT: httpPort,
     WO_HTTPS_PORT: httpsPort,
     WO_PUBLIC_ORIGIN: `https://${authority}`,
@@ -249,6 +271,20 @@ export function createSetupEnvironment(
     BACKUP_DIR: `./${portablePath(relative(resolve(repositoryRoot, 'deploy'), paths.stateDirectory))}/backups`,
     ...provenance,
     WO_DEPLOYMENT_ID: paths.deploymentId,
+    ...(onePanel
+      ? {
+          WO_INGRESS: '1panel',
+          WO_EXTERNAL_CERT_DIR: onePanelCertificateDirectory(
+            options['cert-dir'],
+          ),
+          WO_EXTERNAL_CERT_FILE: certificateFilename(
+            options['cert-file'] ?? 'fullchain.pem',
+          ),
+          WO_EXTERNAL_KEY_FILE: certificateFilename(
+            options['key-file'] ?? 'privkey.pem',
+          ),
+        }
+      : {}),
   };
   const ports = [httpPort, httpsPort, turnPort, turnTlsPort].map(Number);
   if (
@@ -268,6 +304,35 @@ export function createSetupEnvironment(
   });
   if (issues.length > 0) throw new Error(issues.join('; '));
   return environment;
+}
+
+function onePanelCertificateDirectory(value) {
+  const directory = literal(value, '1Panel certificate directory');
+  if (
+    !posix.isAbsolute(directory) ||
+    posix.normalize(directory) !== directory ||
+    !/\/sites\/[^/]+\/ssl$/u.test(directory)
+  )
+    throw new Error(
+      '--cert-dir must be the absolute host path of one 1Panel website: .../sites/<site>/ssl',
+    );
+  return directory;
+}
+
+function certificateFilename(value) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)
+  )
+    throw new Error(
+      'Certificate filenames must be simple filenames, without directories',
+    );
+  return value;
+}
+
+export function onePanelProxyConfiguration(environment) {
+  const upstream = `http://127.0.0.1:${environment.WO_HTTP_PORT}`;
+  return `# Paste into the WO site's server block; keep 1Panel's existing TLS directives.\n# Default 1Panel OpenResty uses host networking. Do not expose this upstream publicly.\nlocation / {\n    proxy_pass ${upstream};\n    proxy_http_version 1.1;\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $remote_addr;\n    proxy_set_header X-Forwarded-Proto $scheme;\n    proxy_set_header Upgrade $http_upgrade;\n    proxy_set_header Connection "upgrade";\n    proxy_read_timeout 3600s;\n    proxy_send_timeout 3600s;\n    proxy_buffering off;\n    proxy_request_buffering off;\n    proxy_cache off;\n    client_max_body_size 2m;\n}\n`;
 }
 
 function serializeEnvironment(environment) {
@@ -296,6 +361,9 @@ export function managedPortOverlay(environment) {
     environment.WO_TLS_MODE === 'local'
       ? '  server:\n    environment:\n      NODE_ENV: test\n'
       : '';
+  if (environment.WO_INGRESS === '1panel') {
+    return `# Generated by guided setup. Do not edit.\nservices:\n  caddy:\n    ports: !reset []\n  coturn:\n    ports: !override\n${port(3478, environment.TURN_PORT)}${port(3478, environment.TURN_PORT, 'udp')}${port(5349, environment.TURN_TLS_PORT)}${relayPorts.join('')}`;
+  }
   return `# Generated by guided setup. Do not edit.\nservices:\n${localServer}  caddy:\n    ports: !override\n${port(80, environment.WO_HTTP_PORT)}${port(443, environment.WO_HTTPS_PORT)}  coturn:\n    ports: !override\n${port(3478, environment.TURN_PORT)}${port(3478, environment.TURN_PORT, 'udp')}${port(5349, environment.TURN_TLS_PORT)}${relayPorts.join('')}`;
 }
 
@@ -313,9 +381,17 @@ async function promptOptions(options) {
   try {
     for (const [key, label] of [
       ['domain', 'Public domain (DNS A record pointing to this server)'],
-      ['email', 'ACME contact email'],
+      ...(options['1panel'] ? [] : [['email', 'ACME contact email']]),
       ['admin-email', 'Initial administrator email'],
       ['public-ip', 'Server public IPv4'],
+      ...(options['1panel']
+        ? [
+            [
+              'cert-dir',
+              '1Panel website SSL directory on the host (.../sites/<site>/ssl)',
+            ],
+          ]
+        : []),
     ]) {
       if (result[key] === undefined)
         result[key] = (await input.question(`${label}: `)).trim();
@@ -447,6 +523,22 @@ function environmentWithoutBuild(environment) {
   );
 }
 
+function environmentForPanelRecovery(environment) {
+  const ingressKeys = new Set([
+    'WO_TLS_MODE',
+    'WO_HTTP_PORT',
+    'WO_INGRESS',
+    'WO_EXTERNAL_CERT_DIR',
+    'WO_EXTERNAL_CERT_FILE',
+    'WO_EXTERNAL_KEY_FILE',
+  ]);
+  return environmentWithoutBuild(
+    Object.fromEntries(
+      Object.entries(environment).filter(([key]) => !ingressKeys.has(key)),
+    ),
+  );
+}
+
 export async function configureSetup(
   options,
   {
@@ -479,6 +571,22 @@ export async function configureSetup(
           ...options,
           local: options.local ?? previous.options.local,
         };
+  const switchingToPanel =
+    previous !== null &&
+    previous.options['1panel'] !== true &&
+    options['1panel'] === true;
+  if (switchingToPanel) {
+    if (
+      !options['refresh-build'] ||
+      options.action !== 'up' ||
+      previous.options.local ||
+      existsSync(resolve(paths.stateDirectory, 'started.json'))
+    )
+      throw new Error(
+        'Switching to 1Panel requires --1panel --refresh-build on an unfinished production installation',
+      );
+    effectiveOptions['http-port'] = options['http-port'] ?? '18080';
+  }
   paths.deploymentId = previous?.environment?.WO_DEPLOYMENT_ID ?? randomUUID();
   if (
     !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(
@@ -506,6 +614,7 @@ export async function configureSetup(
       '--refresh-build is only for an unfinished production installation',
     );
   }
+  const panelRecovery = refreshBuild && options['1panel'] === true;
   const provenance = refreshBuild
     ? provenanceProvider({ root })
     : (previous?.provenance ??
@@ -546,10 +655,13 @@ export async function configureSetup(
     previous.environment.WO_DEPLOYMENT_ID = paths.deploymentId;
   if (
     previous !== null &&
-    (refreshBuild
-      ? environmentWithoutBuild(previous.environment) !==
-        environmentWithoutBuild(environment)
-      : JSON.stringify(previous.environment) !== JSON.stringify(environment))
+    (panelRecovery
+      ? environmentForPanelRecovery(previous.environment) !==
+        environmentForPanelRecovery(environment)
+      : refreshBuild
+        ? environmentWithoutBuild(previous.environment) !==
+          environmentWithoutBuild(environment)
+        : JSON.stringify(previous.environment) !== JSON.stringify(environment))
   )
     throw new Error(
       'Configuration differs from the existing deployment; use the original values. Domain/IP/account changes require a planned migration',
@@ -562,8 +674,12 @@ export async function configureSetup(
     );
     if (refreshBuild) {
       if (
-        environmentWithoutBuild(parseDotEnv(existingSource)) !==
-        environmentWithoutBuild(environment)
+        (panelRecovery ? environmentForPanelRecovery : environmentWithoutBuild)(
+          parseDotEnv(existingSource),
+        ) !==
+        (panelRecovery ? environmentForPanelRecovery : environmentWithoutBuild)(
+          environment,
+        )
       )
         throw new Error(
           'Build refresh cannot change deployment settings; restore the generated environment',
@@ -584,6 +700,7 @@ export async function configureSetup(
       ),
     );
     savedOptions.local = effectiveOptions.local === true;
+    if (effectiveOptions['1panel']) savedOptions['1panel'] = true;
     await privateWrite(
       manifestFile,
       JSON.stringify(
@@ -623,7 +740,17 @@ export async function configureSetup(
       '',
     );
     if (existingOverlay !== overlay) {
-      if (
+      const oldPanelIngress = panelRecovery
+        ? managedPortOverlay({
+            ...environment,
+            WO_INGRESS: undefined,
+            WO_TLS_MODE: 'acme',
+            WO_HTTP_PORT: '80',
+          })
+        : null;
+      if (panelRecovery && existingOverlay === oldPanelIngress) {
+        await privateWrite(overlayFile, overlay);
+      } else if (
         environment.WO_TLS_MODE === 'local' &&
         existingOverlay === previousLocalOverlay
       )
@@ -655,8 +782,24 @@ export async function configureSetup(
     // were checked above and are never regenerated by this path.
     previous.provenance = provenance;
     previous.environment = environment;
+    if (panelRecovery) {
+      previous.options = {
+        ...previous.options,
+        '1panel': true,
+        'http-port': environment.WO_HTTP_PORT,
+        'cert-dir': environment.WO_EXTERNAL_CERT_DIR,
+        'cert-file': environment.WO_EXTERNAL_CERT_FILE,
+        'key-file': environment.WO_EXTERNAL_KEY_FILE,
+      };
+    }
     await privateWrite(manifestFile, JSON.stringify(previous, null, 2) + '\n');
     await privateWrite(envFile, source);
+  }
+  if (environment.WO_INGRESS === '1panel') {
+    await privateWrite(
+      resolve(paths.stateDirectory, 'openresty-location.conf'),
+      onePanelProxyConfiguration(environment),
+    );
   }
   return {
     ...paths,
@@ -681,6 +824,9 @@ export function managedComposeArguments(setup, ...args) {
     resolve(setup.root, 'deploy/compose.yaml'),
     '-f',
     resolve(setup.root, 'deploy/compose.managed.yaml'),
+    ...(setup.environment.WO_INGRESS === '1panel'
+      ? ['-f', resolve(setup.root, 'deploy/compose.1panel.yaml')]
+      : []),
     '-f',
     setup.overlayFile,
     ...args,
@@ -797,6 +943,19 @@ export function managedActionCommands(setup, action) {
   if (action === 'configure') return [];
   if (action === 'up')
     return [
+      ...(setup.environment.WO_INGRESS === '1panel' && !setup.started
+        ? [
+            managedComposeArguments(
+              setup,
+              '--profile',
+              'wo-internal-edge',
+              'rm',
+              '--stop',
+              '--force',
+              'caddy',
+            ),
+          ]
+        : []),
       managedComposeArguments(
         setup,
         ...(setup.started
@@ -808,6 +967,25 @@ export function managedActionCommands(setup, action) {
     return [managedComposeArguments(setup, 'ps', '--all')];
   if (action === 'logs')
     return [managedComposeArguments(setup, 'logs', '--tail', '100')];
+  if (action === 'renew')
+    if (setup.environment.WO_INGRESS === '1panel')
+      throw new Error(
+        'Renew the certificate in 1Panel; use sync-cert to import its latest files',
+      );
+  if (action === 'sync-cert') {
+    if (setup.environment.WO_INGRESS !== '1panel')
+      throw new Error('sync-cert is only available in 1Panel mode');
+    return [
+      managedComposeArguments(
+        setup,
+        'exec',
+        '-T',
+        'certificates',
+        '/opt/wo/certificates.sh',
+        '--sync-now',
+      ),
+    ];
+  }
   if (action === 'renew')
     return [
       managedComposeArguments(
@@ -895,6 +1073,9 @@ export async function runSetup(argv = process.argv.slice(2)) {
   const options = parseSetupArguments(argv);
   if (options.help) {
     process.stdout.write(
+      '1Panel: --1panel --cert-dir=/host/path/sites/<site>/ssl. Existing unfinished install: add --refresh-build. Use sync-cert after renewing in 1Panel.\n',
+    );
+    process.stdout.write(
       'Failed first install recovery after git pull: add --refresh-build. This preserves credentials/settings and is rejected after a completed installation.\n',
     );
     process.stdout.write(
@@ -919,6 +1100,10 @@ export async function runSetup(argv = process.argv.slice(2)) {
     process.stdout.write(
       `Deployment ${setup.project}: ${setup.environment.WO_PUBLIC_ORIGIN}\nPrivate login receipt: ${setup.statePath}/first-login.txt\n`,
     );
+    if (setup.environment.WO_INGRESS === '1panel')
+      process.stdout.write(
+        `1Panel upstream: http://127.0.0.1:${setup.environment.WO_HTTP_PORT}\nProxy snippet: ${setup.statePath}/openresty-location.conf\n1Panel owns HTTPS/renewal; WO automatically imports the website certificate for TURN.\n`,
+      );
     if (setup.environment.WO_TLS_MODE === 'local')
       process.stdout.write(
         'Local certificates are for testing; export/trust the local CA before browser and client use.\n',

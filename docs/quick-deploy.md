@@ -2,6 +2,8 @@
 
 准备好域名和 Docker 后，运行向导、回答几个问题即可。向导会生成配置、独立随机密钥、初始管理员和证书配置；不需要修改源码、Compose YAML 或手工放置 PEM 文件。
 
+**80/443 已被 1Panel OpenResty 使用？** 请使用 [1Panel 模式](1panel.md)，保留现有入口，WO 只监听内部 HTTP 端口，并自动同步 1Panel 网站证书给 TURN。
+
 ## 1. 准备服务器
 
 生产环境使用 Linux x86_64、Git、Docker Engine 26+ 和 Docker Compose 2.24.4+。
@@ -75,7 +77,7 @@ bash deploy.sh --non-interactive \
 ```
 
 若需要指定密码，使用 `--password-file=仓库内的私密文件路径`，不要把密码直接写到命令行参数。
-密码须为 10–128 个字符。不要将密码文件提交到 Git。
+初始管理员密码须为 12–128 个字符。不要将密码文件提交到 Git。
 
 需要同时部署多个实例时，从第一次运行起选择独立项目，例如 `--project=wo-team`。
 状态默认保存在 `deploy/.managed/<项目名>/`；也可使用该目录下的 `--state-dir`。

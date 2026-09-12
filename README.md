@@ -75,6 +75,8 @@ media benchmark or certification evidence. See the
 
 ## Server-mode quick start
 
+Already using 1Panel OpenResty on ports 80/443? Use the [1Panel deployment mode](docs/1panel.md): keep the existing HTTPS ingress and import its website certificate for TURN.
+
 Requires Linux x86_64, Git, Docker Engine 26+ and Docker Compose 2.24.4+.
 Point a domain's DNS A record at the server and open the documented HTTPS/TURN ports.
 From the cloned repository, run:
