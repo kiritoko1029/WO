@@ -2,9 +2,45 @@
 
 [English](README.md) | **简体中文**
 
+**听见彼此，看见同一个世界。**
+
 WO 是一个可自托管的双人语音与桌面共享应用。中心模式由自己的
 Docker Compose 提供账号、房间信令、Web、PostgreSQL 和 TURN；媒体优先在两端
 直接传输。桌面端还提供仅面向可信局域网的轻量房间模式。
+
+[桌面客户端下载](https://github.com/kiritoko1029/WO/releases) ·
+[部署指南](docs/deployment.md) · [支持矩阵](docs/support-matrix.md)
+
+![WO 浅色登录页：产品介绍、账号入口和服务器设置](docs/screenshots/auth-light.jpg)
+
+## 可以做什么
+
+- **两个人，一个房间。** 创建房间，把 6 位房间码或邀请链接发给对方，即可加入。
+- **让交流更舒服。** 选择麦克风和扬声器，调节输入与对方音量，按需静音，使用平台支持的降噪方式。
+- **分享眼前的内容。** 在语音通话中共享屏幕或窗口，支持全屏观看、缩放和连接质量诊断。屏幕采集与系统音频能力以支持矩阵为准。
+- **选择自己的连接方式。** 桌面端和 Web 可连接自托管服务；同一可信局域网内，两台桌面客户端也能建立轻量房间。
+- **清楚、顺手的操作。** 支持浅色、深色和跟随系统主题；表单区分正在创建与正在加入，防止重复提交，失败后可重试，弹窗支持键盘导航。
+
+## 界面预览
+
+| 从一个邀请开始                                                        | 为两个人留出专注的空间                                                     |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| ![WO 首页：创建房间与输入房间码加入](docs/screenshots/home-light.jpg) | ![WO 深色房间：参与者、共享舞台与通话控制](docs/screenshots/room-dark.jpg) |
+
+以上图片直接截取自应用共用的 React 界面，使用本地示例账号和模拟的已连接房间；
+房间图展示的是等待屏幕共享状态。图片用于展示界面，不作为真实媒体性能或发布认证证据。
+复现方式见[界面预览与截图说明](docs/ui-preview.md)。
+
+## 选择连接模式
+
+|          | 自托管中心模式                   | 可信局域网轻量模式               |
+| -------- | -------------------------------- | -------------------------------- |
+| 客户端   | 桌面端与 Web                     | 两台桌面客户端                   |
+| 使用范围 | 配置 HTTPS 和 TURN 后跨网络连接  | 同一个可信私有网络               |
+| 账号     | 自建服务上的邮箱账号             | 仅需显示名称                     |
+| 邀请方式 | 6 位房间码或链接                 | 必须使用完整的私密客户端邀请链接 |
+| 基础设施 | Docker Compose、PostgreSQL、TURN | 房主电脑内的临时服务             |
+| 房间结束 | 房主结束或离开房间               | 房主休眠、退出应用时也会结束     |
 
 > 当前能力有自动化测试，但 Windows/macOS 正式安装包、真实双机局域网和
 > 1080p60 仍未完成发布认证。准确状态见
@@ -26,27 +62,35 @@ Docker Compose 提供账号、房间信令、Web、PostgreSQL 和 TURN；媒体�
 
 ## 中心模式快速开始
 
-要求 Node.js 24、pnpm 10.32.1、Linux x86_64、Docker Engine 26+ 和
-Docker Compose 2.24.4+。
+生产环境准备 Linux x86_64、Git、Docker Engine 26+ 和 Docker Compose 2.24.4+，
+将域名 A 记录指向服务器并开放 HTTPS/TURN 端口。在克隆的仓库根目录执行：
 
 ```bash
-pnpm install --frozen-lockfile
-cp deploy/.env.example deploy/.env
-node deploy/scripts/init-secrets.mjs
+bash deploy.sh
 ```
 
-编辑 `deploy/.env`，为应用和 TURN 配置真实域名、证书及公网 IPv4，然后运行：
+按提示填写域名、ACME 联系邮箱、管理员邮箱、公网 IPv4 和密码（也可自动生成）。
+向导自动生成配置与密钥、初始化管理员、通过 ACME 签发证书并启动五个服务。
+无需修改源码、环境文件或手工放置证书，也无需在宿主机安装 Node.js/pnpm；
+证书自动续期，Caddy 和 TURN 自动加载新证书。
 
-```bash
-node deploy/scripts/preflight.mjs --env-file=deploy/.env
-node deploy/scripts/compose.mjs --env-file=deploy/.env up -d --build --wait
-node deploy/scripts/smoke.mjs --env-file=deploy/.env
+Windows Docker Desktop 可先进行隔离的本地体验：
+
+```powershell
+.\deploy.cmd --local
 ```
 
-打开 `https://<APP_DOMAIN>` 即可使用 Web 客户端。Caddy 在同一 HTTPS origin
-提供 SPA，并把 `/v1/*` 和实时 WebSocket 代理到 server；不需要单独配置 Web
-域名或 CORS。完整的证书、防火墙、备份与升级要求见
-[部署文档](docs/deployment.md)。
+本地入口为 `https://wo.localhost:18443`，使用测试证书；生产入口为你的 HTTPS 域名。
+访问 `/admin` 查看用户、房间和证书状态。首登信息保存在私密的
+`deploy/.managed/<项目名>/first-login.txt`（生产默认 `wo`，本地默认 `wo-local`）。
+再次运行 `up` 保持已有版本和密码，也支持 `status`、`logs`、`renew`、`stop`。
+
+端口、首次登录、测试证书信任和故障排查见[向导部署指南](docs/quick-deploy.md)。
+需要自管证书、外部数据库、备份或发布运维时，参阅[高级部署文档](docs/deployment.md)。
+
+![本地 Docker 验收环境中的管理后台与证书状态](docs/screenshots/admin-deployment.jpg)
+
+后台截图来自真实的本机 Docker 验收环境，使用本地测试证书。
 
 ## 桌面端连接自建服务
 
@@ -133,6 +177,19 @@ pnpm build
 pnpm test:contract
 pnpm test:e2e:web
 ```
+
+无需后端、真实账号或媒体权限，即可预览界面：
+
+```bash
+pnpm --filter @wo/web dev --host 127.0.0.1
+```
+
+打开 `http://127.0.0.1:5173/preview/index.html`。预览使用独立的开发入口，不会进入正式 Web 构建。
+常规 Web 开发仍使用根页面，并把 `/v1` 代理到本机 3000 端口的服务。
+
+客户端会合并同一连接的并发 WebRTC 统计请求，双向质量采样复用一份报告；
+音量未变化时不通知界面，旧连接的迟到统计会被丢弃。
+回归测试验证了请求调度和资源生命周期，实际 CPU 占用、延迟和帧率仍取决于设备与网络。
 
 Web E2E 会使用 `deploy/.env.integration` 启动并清理隔离的四服务 Compose
 栈，以两个 Chromium 会话验证创建、加入和双向语音。

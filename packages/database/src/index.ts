@@ -1,4 +1,5 @@
 export * from './client.js';
+export * from './admin-bootstrap-repository.js';
 export * from './identity-repository.js';
 export * from './migrate.js';
 export * from './schema.js';

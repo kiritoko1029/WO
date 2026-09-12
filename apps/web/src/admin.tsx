@@ -1,17 +1,24 @@
-import { StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  StrictMode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   adminOverviewSchema,
+  adminDeploymentStatusSchema,
   authLoginBodySchema,
   authLoginResponseSchema,
   type AdminOverview,
   type AdminUserSnapshot,
+  type AdminDeploymentStatus,
 } from '@wo/protocol';
 
 import './web.css';
 import '../../desktop/src/renderer/src/styles.css';
-
-const REFRESH_TOKEN_KEY = 'wo.web.refresh-token.v1';
 
 function apiOrigin(): string {
   return window.location.origin;
@@ -42,6 +49,216 @@ async function apiFetch<T>(
   return init.parse(body);
 }
 
+const certificateAlerts: Record<
+  AdminDeploymentStatus['certificate']['alerts'][number],
+  string
+> = {
+  LOCAL_CERTIFICATE: '本地测试证书：仅适合本机测试，浏览器可能提示不受信任。',
+  STATUS_UNAVAILABLE: '证书状态暂不可用，请检查部署服务是否正常运行。',
+  STATUS_STALE: '证书任务超过 48 小时没有更新，请检查自动续签服务。',
+  CERTIFICATE_PENDING: '正在等待首次签发与发布，通常需要几分钟。',
+  CERTIFICATE_EXPIRED: '证书已过期，请检查续签服务和域名解析。',
+  CERTIFICATE_EXPIRING: '证书将在 21 天内到期，请确认续签任务正常。',
+  CERTIFICATE_NOT_YET_VALID: '证书尚未生效，请检查服务器时间。',
+  HOST_MISMATCH: '证书与访问地址或 TURN 域名不匹配，请重新检查部署设置。',
+  ISSUANCE_FAILED: '首次签发失败；服务将自动重试，请检查域名解析和 80 端口。',
+  RENEWAL_FAILED: '续签失败；服务将自动重试，目前保留上一份证书。',
+};
+
+function DeploymentPanel({
+  status,
+  busy,
+  error,
+  refresh,
+}: {
+  status: AdminDeploymentStatus | null;
+  busy: boolean;
+  error: string | null;
+  refresh: () => void;
+}) {
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const cert = status?.certificate;
+  const copyPublicUrl = async () => {
+    if (status === null) return;
+    try {
+      await navigator.clipboard.writeText(status.publicUrl);
+      setCopyFeedback('已复制连接地址');
+    } catch {
+      setCopyFeedback('复制失败，请手动选择地址复制');
+    }
+  };
+  const stateLabels = {
+    pending: '等待证书',
+    ready: '证书已就绪',
+    error: '需要关注',
+    unavailable: '状态不可用',
+    unmanaged: '手动管理',
+  };
+  return (
+    <section
+      className="admin-section admin-deployment"
+      aria-labelledby="deployment-title"
+    >
+      <div className="admin-section-heading">
+        <div>
+          <p className="admin-kicker">Deployment</p>
+          <h2 id="deployment-title">部署与证书</h2>
+        </div>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={busy}
+          onClick={refresh}
+        >
+          {busy ? '检查中…' : '刷新部署状态'}
+        </button>
+      </div>
+      {error !== null && (
+        <p className="form-message" role="alert">
+          {error}
+        </p>
+      )}
+      {status === null || cert === undefined ? (
+        <p className="admin-meta" role="status">
+          {busy ? '正在读取部署状态…' : '刷新后可查看部署与证书信息。'}
+        </p>
+      ) : (
+        <>
+          <div className="admin-deployment-grid">
+            <article className="admin-status-card">
+              <p className="admin-card-label">应用连接地址</p>
+              <a
+                className="admin-public-url"
+                href={status.publicUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {status.publicUrl}
+              </a>
+              <p className="admin-sub">桌面客户端可使用此地址连接后端</p>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void copyPublicUrl()}
+              >
+                复制地址
+              </button>
+              <span className="admin-copy-feedback" role="status">
+                {copyFeedback}
+              </span>
+              <dl className="admin-status-list">
+                <div>
+                  <dt>TURN 中继</dt>
+                  <dd>{status.turnHost}</dd>
+                </div>
+                <div>
+                  <dt>邮箱验证</dt>
+                  <dd>
+                    {status.emailVerificationRequired ? '已开启' : '未开启'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>邮件服务</dt>
+                  <dd>{status.smtpConfigured ? '已配置' : '未配置'}</dd>
+                </div>
+              </dl>
+            </article>
+            <article className="admin-status-card">
+              <div className="admin-card-heading">
+                <p className="admin-card-label">HTTPS / TURN TLS</p>
+                <span className={`admin-cert-state ${cert.state}`}>
+                  {stateLabels[cert.state]}
+                </span>
+              </div>
+              <strong className="admin-certificate-title">
+                {cert.mode === 'local'
+                  ? '本地测试证书'
+                  : cert.mode === 'acme'
+                    ? 'ACME 自动证书'
+                    : '自主管理证书'}
+              </strong>
+              <p className="admin-sub">
+                {cert.autoRenew
+                  ? '自动检查续签并发布证书，供 HTTPS 与 TURN 服务加载'
+                  : '当前部署未启用自动证书状态管理'}
+              </p>
+              <dl className="admin-status-list">
+                <div>
+                  <dt>有效期</dt>
+                  <dd>
+                    {cert.details === null
+                      ? '等待证书'
+                      : `${new Date(cert.details.validTo).toLocaleDateString()} · ${cert.details.daysRemaining >= 0 ? `剩余 ${cert.details.daysRemaining} 天` : '已过期'}`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>最近检查</dt>
+                  <dd>
+                    {cert.lastAttemptAt === null
+                      ? '等待首次检查'
+                      : new Date(cert.lastAttemptAt).toLocaleString()}
+                  </dd>
+                </div>
+                <div>
+                  <dt>最近签发</dt>
+                  <dd>
+                    {cert.lastSuccessAt === null
+                      ? '暂无记录'
+                      : new Date(cert.lastSuccessAt).toLocaleString()}
+                  </dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+          {cert.alerts.length > 0 && (
+            <ul className="admin-deployment-alerts" aria-label="部署提醒">
+              {cert.alerts.map((alert) => (
+                <li key={alert}>{certificateAlerts[alert]}</li>
+              ))}
+            </ul>
+          )}
+          {cert.details !== null && (
+            <details className="admin-certificate-details">
+              <summary>证书详情</summary>
+              <dl className="admin-status-list">
+                <div>
+                  <dt>颁发机构</dt>
+                  <dd>{cert.details.issuer}</dd>
+                </div>
+                <div>
+                  <dt>证书主体</dt>
+                  <dd>{cert.details.subject}</dd>
+                </div>
+                <div>
+                  <dt>域名检查</dt>
+                  <dd>
+                    {cert.details.matchesPublicHost &&
+                    cert.details.matchesTurnHost
+                      ? '应用与 TURN 域名均匹配'
+                      : '存在域名不匹配'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>SHA-256 指纹</dt>
+                  <dd>
+                    <code>{cert.details.fingerprint256}</code>
+                  </dd>
+                </div>
+              </dl>
+            </details>
+          )}
+          <p className="admin-meta admin-deployment-note">
+            此页显示已发布证书的状态。服务会自动加载已发布证书，实际加载异常请查服务日志。
+            日常状态与手动续签可使用部署脚本；更改域名或配置需由维护者迁移。
+            {status.enabled &&
+              ' 初始管理员可在客户端修改密码；更换该账号邮箱需要由服务器维护者迁移。'}
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 function AdminApp() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -50,6 +267,13 @@ function AdminApp() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState('');
+  const [deployment, setDeployment] = useState<AdminDeploymentStatus | null>(
+    null,
+  );
+  const [deploymentError, setDeploymentError] = useState<string | null>(null);
+  const [deploymentBusy, setDeploymentBusy] = useState(false);
+  const activeToken = useRef<string | null>(null);
+  const refreshToken = useRef<string | null>(null);
 
   const loadOverview = useCallback(async (token: string) => {
     const data = await apiFetch('/v1/admin/overview', {
@@ -57,10 +281,50 @@ function AdminApp() {
       headers: { authorization: `Bearer ${token}` },
       parse: (input) => adminOverviewSchema.parse(input),
     });
-    setOverview(data);
+    if (activeToken.current === token) setOverview(data);
+  }, []);
+
+  const loadDeployment = useCallback(async (token: string) => {
+    setDeploymentBusy(true);
+    try {
+      const data = await apiFetch('/v1/admin/deployment', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${token}` },
+        parse: (input) => adminDeploymentStatusSchema.parse(input),
+      });
+      if (activeToken.current !== token) return;
+      setDeployment(data);
+      setDeploymentError(null);
+    } catch {
+      if (activeToken.current === token)
+        setDeploymentError('部署状态暂时无法读取，请稍后刷新。');
+    } finally {
+      if (activeToken.current === token) setDeploymentBusy(false);
+    }
+  }, []);
+
+  const logout = useCallback(() => {
+    const tokenToRevoke = refreshToken.current;
+    activeToken.current = null;
+    refreshToken.current = null;
+    setAccessToken(null);
+    setOverview(null);
+    setDeployment(null);
+    setDeploymentError(null);
+    setDeploymentBusy(false);
+    setBusy(false);
+    setPassword('');
+    if (tokenToRevoke !== null) {
+      void apiFetch('/v1/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({ refreshToken: tokenToRevoke }),
+        parse: () => null,
+      }).catch(() => undefined);
+    }
   }, []);
 
   const login = async () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -73,8 +337,10 @@ function AdminApp() {
         body: JSON.stringify(body),
         parse: (input) => authLoginResponseSchema.parse(input),
       });
-      window.sessionStorage.setItem(REFRESH_TOKEN_KEY, session.refreshToken);
+      activeToken.current = session.accessToken;
+      refreshToken.current = session.refreshToken;
       setAccessToken(session.accessToken);
+      setPassword('');
       await loadOverview(session.accessToken);
     } catch (loginError) {
       const code =
@@ -91,8 +357,7 @@ function AdminApp() {
             ? '邮箱或密码错误'
             : '登录失败，请检查权限与网络',
       );
-      setAccessToken(null);
-      setOverview(null);
+      logout();
     } finally {
       setBusy(false);
     }
@@ -105,13 +370,13 @@ function AdminApp() {
     try {
       await loadOverview(accessToken);
     } catch {
+      if (activeToken.current !== accessToken) return;
       setError('刷新失败，请重新登录');
-      setAccessToken(null);
-      setOverview(null);
+      logout();
     } finally {
       setBusy(false);
     }
-  }, [accessToken, loadOverview]);
+  }, [accessToken, loadOverview, logout]);
 
   const setDisabled = async (user: AdminUserSnapshot, disabled: boolean) => {
     if (accessToken === null) return;
@@ -126,6 +391,7 @@ function AdminApp() {
       });
       await loadOverview(accessToken);
     } catch {
+      if (activeToken.current !== accessToken) return;
       setError(disabled ? '禁用失败' : '启用失败');
     } finally {
       setBusy(false);
@@ -140,6 +406,16 @@ function AdminApp() {
     }, 10_000);
     return () => window.clearInterval(timer);
   }, [accessToken, loadOverview]);
+
+  useEffect(() => {
+    if (accessToken === null) return;
+    void loadDeployment(accessToken);
+    const timer = window.setInterval(
+      () => void loadDeployment(accessToken),
+      60_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [accessToken, loadDeployment]);
 
   const filteredUsers = useMemo(() => {
     if (overview === null) return [];
@@ -171,13 +447,21 @@ function AdminApp() {
       </header>
 
       {accessToken === null || overview === null ? (
-        <section className="admin-login-card">
+        <form
+          className="admin-login-card"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void login();
+          }}
+        >
           <h2>管理员登录</h2>
-          <p>请使用 .env 中 SUPER_ADMIN_EMAILS 配置的邮箱登录。</p>
+          <p>使用部署向导创建的管理员账号，查看运行状态、证书与用户连接。</p>
           <label>
             <span>邮箱</span>
             <input
               type="email"
+              autoComplete="username"
+              required
               value={email}
               onChange={(event) => setEmail(event.target.value)}
             />
@@ -186,6 +470,8 @@ function AdminApp() {
             <span>密码</span>
             <input
               type="password"
+              autoComplete="current-password"
+              required
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
@@ -193,15 +479,10 @@ function AdminApp() {
           <div className="form-message" role="alert">
             {error}
           </div>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={busy}
-            onClick={() => void login()}
-          >
+          <button className="primary-button" type="submit" disabled={busy}>
             {busy ? '登录中…' : '进入管理台'}
           </button>
-        </section>
+        </form>
       ) : (
         <main className="admin-main">
           <div className="admin-toolbar">
@@ -219,14 +500,7 @@ function AdminApp() {
             >
               刷新
             </button>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => {
-                setAccessToken(null);
-                setOverview(null);
-              }}
-            >
+            <button type="button" className="secondary-button" onClick={logout}>
               退出
             </button>
           </div>
@@ -236,6 +510,13 @@ function AdminApp() {
           <p className="admin-meta">
             更新于 {new Date(overview.generatedAt).toLocaleString()}
           </p>
+
+          <DeploymentPanel
+            status={deployment}
+            error={deploymentError}
+            busy={deploymentBusy}
+            refresh={() => void loadDeployment(accessToken)}
+          />
 
           <section className="admin-section">
             <h2>用户与连接状态</h2>

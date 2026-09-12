@@ -1,5 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { adminDisableUserBodySchema, userIdSchema } from '@wo/protocol';
+import {
+  adminDisableUserBodySchema,
+  adminDeploymentStatusSchema,
+  userIdSchema,
+  type AdminDeploymentStatus,
+} from '@wo/protocol';
 import { z } from 'zod';
 
 import { HttpError } from '../../http/errors.ts';
@@ -7,6 +12,7 @@ import { AdminServiceError, type AdminService } from './admin-service.ts';
 
 export interface AdminRouteDependencies {
   readonly adminService: AdminService;
+  readonly deploymentStatus?: () => Promise<AdminDeploymentStatus>;
 }
 
 export function registerAdminRoutes(
@@ -40,6 +46,19 @@ export function registerAdminRoutes(
       return dependencies.adminService.getOverview();
     },
   );
+
+  if (dependencies.deploymentStatus !== undefined) {
+    const readDeployment = dependencies.deploymentStatus;
+    app.get(
+      '/v1/admin/deployment',
+      { preHandler: app.authenticate },
+      async (request, reply) => {
+        await requireAdmin(request);
+        reply.header('cache-control', 'no-store');
+        return adminDeploymentStatusSchema.parse(await readDeployment());
+      },
+    );
+  }
 
   app.get('/v1/admin/me', { preHandler: app.authenticate }, async (request) => {
     if (request.authIdentity === null) {

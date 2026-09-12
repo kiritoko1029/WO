@@ -521,10 +521,13 @@ describe('production Compose contract', () => {
     ).toBe(true);
     expect(configuration.services.coturn?.user).toBe('0:0');
     expect(read('deploy/coturn/entrypoint.sh')).toContain(
-      '"$runtime_tls_key" \\\n  /run/wo-turn',
+      'chown 65534:65533 "$runtime_tls_cert" "$runtime_tls_key"',
     );
     expect(read('deploy/coturn/entrypoint.sh')).toContain(
-      'chmod 600 "$runtime_config" "$runtime_tls_key"',
+      'chmod 600 "$runtime_config"',
+    );
+    expect(read('deploy/coturn/entrypoint.sh')).toContain(
+      'chmod 600 "$runtime_tls_key"',
     );
     const turnEntrypoint = read('deploy/coturn/entrypoint.sh');
     expect(turnEntrypoint).toContain(

@@ -1,0 +1,42 @@
+{
+	admin 127.0.0.1:2019
+	auto_https off
+}
+
+http://{$APP_DOMAIN} {
+	handle /.well-known/acme-challenge/* {
+		root * /var/www/acme
+		file_server
+	}
+	handle {
+		redir {$WO_PUBLIC_ORIGIN}{uri} 308
+	}
+}
+
+https://{$APP_DOMAIN} {
+	tls {$WO_CERTIFICATE_DIRECTORY}/fullchain.pem {$WO_CERTIFICATE_DIRECTORY}/key.pem
+	encode zstd gzip
+
+	header {
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' wss://{$WO_PUBLIC_AUTHORITY}; media-src 'self' blob:"
+		Permissions-Policy "camera=(), microphone=(self), display-capture=(self)"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@api path /v1 /v1/*
+	handle @api {
+		reverse_proxy server:3000 {
+			# Keep established WebSockets alive across certificate reloads.
+			stream_close_delay 5m
+		}
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

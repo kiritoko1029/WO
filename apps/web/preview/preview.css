@@ -1,0 +1,29 @@
+.preview-note {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 45;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--wo-border);
+  border-radius: 8px;
+  color: var(--wo-text-subtle);
+  background: var(--wo-surface);
+  font-size: 11px;
+}
+.preview-note nav {
+  display: flex;
+  gap: 12px;
+}
+.preview-note a {
+  color: var(--wo-brand-500);
+}
+@media (max-width: 600px) {
+  .preview-note {
+    left: 8px;
+    bottom: 8px;
+    font-size: 10px;
+  }
+}

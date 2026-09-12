@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import { createBrowserDesktopApi } from '../src/browser-desktop-api.js';
+import type { DesktopApi } from '../../desktop/src/preload/types.js';
 
 const ORIGIN = 'https://wo.example.test';
 const USER = Object.freeze({
@@ -31,6 +32,298 @@ function memoryStorage(initial?: string) {
     removeItem: (key: string) => void values.delete(key),
   };
 }
+
+const AUTH_RESPONSE = {
+  user: USER,
+  accessToken: 'access-token',
+  refreshToken: 'refresh-token',
+  accessTokenExpiresInSeconds: 900,
+};
+
+const accountOperations = [
+  {
+    name: 'changePassword',
+    path: '/v1/auth/password',
+    invoke: (api: DesktopApi) =>
+      api.auth.changePassword({
+        currentPassword: 'long-password',
+        newPassword: 'new-long-password',
+      }),
+    response: { changed: true },
+    expectedResult: undefined,
+    expectedStoredToken: 'refresh-b',
+  },
+  {
+    name: 'requestEmailChange',
+    path: '/v1/auth/email/change/request',
+    invoke: (api: DesktopApi) =>
+      api.auth.requestEmailChange({
+        password: 'long-password',
+        newEmail: 'next@example.cn',
+      }),
+    response: { status: 'verification_required', email: 'next@example.cn' },
+    expectedResult: { email: 'next@example.cn' },
+    expectedStoredToken: 'refresh-b',
+  },
+  {
+    name: 'confirmEmailChange',
+    path: '/v1/auth/email/change/confirm',
+    invoke: (api: DesktopApi) =>
+      api.auth.confirmEmailChange({
+        newEmail: 'next@example.cn',
+        code: '123456',
+      }),
+    response: { ...AUTH_RESPONSE, refreshToken: 'refresh-confirmed' },
+    expectedResult: {
+      user: USER,
+      accessToken: AUTH_RESPONSE.accessToken,
+      accessTokenExpiresAt: 901_000,
+    },
+    expectedStoredToken: 'refresh-confirmed',
+  },
+];
+
+describe('serialized browser account mutations', () => {
+  test.each(accountOperations)(
+    '$name refreshes inside its queue turn and preserves refresh/logout token order',
+    async ({ invoke, path, response, expectedResult, expectedStoredToken }) => {
+      const storage = memoryStorage('stored-refresh');
+      let releaseRefresh!: (response: Response) => void;
+      const fetch = vi
+        .fn()
+        .mockReturnValueOnce(
+          new Promise<Response>((resolve) => {
+            releaseRefresh = resolve;
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              ...AUTH_RESPONSE,
+              accessToken: 'access-b',
+              refreshToken: 'refresh-b',
+            },
+            '/v1/auth/refresh',
+          ),
+        )
+        .mockResolvedValueOnce(jsonResponse(response, path))
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              ...AUTH_RESPONSE,
+              accessToken: 'access-c',
+              refreshToken: 'refresh-c',
+            },
+            '/v1/auth/refresh',
+          ),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({ loggedOut: true }, '/v1/auth/logout'),
+        );
+      const api = createBrowserDesktopApi({
+        origin: ORIGIN,
+        storage,
+        fetch,
+        now: () => 1_000,
+      });
+
+      const before = api.auth.refresh();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      const account = invoke(api);
+      const after = api.auth.refresh();
+      expect(api.auth.refresh()).toBe(after);
+      expect(after).not.toBe(before);
+      const logout = api.auth.logout();
+      const afterLogout = expect(api.auth.refresh()).rejects.toMatchObject({
+        code: 'AUTH_REQUIRED',
+      });
+      releaseRefresh(
+        jsonResponse(
+          { ...AUTH_RESPONSE, refreshToken: 'refresh-a' },
+          '/v1/auth/refresh',
+        ),
+      );
+
+      await expect(account).resolves.toEqual(expectedResult);
+      await Promise.all([before, after, logout, afterLogout]);
+      expect(
+        fetch.mock.calls.map(([url, init]) => ({
+          url: String(url),
+          body: JSON.parse(init.body),
+          authorization: init.headers.authorization,
+        })),
+      ).toEqual([
+        {
+          url: `${ORIGIN}/v1/auth/refresh`,
+          body: { refreshToken: 'stored-refresh' },
+          authorization: undefined,
+        },
+        {
+          url: `${ORIGIN}/v1/auth/refresh`,
+          body: { refreshToken: 'refresh-a' },
+          authorization: undefined,
+        },
+        {
+          url: `${ORIGIN}${path}`,
+          body: expect.any(Object),
+          authorization: 'Bearer access-b',
+        },
+        {
+          url: `${ORIGIN}/v1/auth/refresh`,
+          body: { refreshToken: expectedStoredToken },
+          authorization: undefined,
+        },
+        {
+          url: `${ORIGIN}/v1/auth/logout`,
+          body: { refreshToken: 'refresh-c' },
+          authorization: undefined,
+        },
+      ]);
+      expect(storage.getItem('wo.web.refresh-token.v1')).toBeNull();
+    },
+    2_000,
+  );
+
+  test.each(accountOperations)(
+    '$name rejects an expired refresh without stalling the queue and recovers after login',
+    async ({ invoke, path, response, expectedResult }) => {
+      const storage = memoryStorage('expired-refresh');
+      const remove = vi.spyOn(storage, 'removeItem');
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              error: {
+                code: 'AUTH_REQUIRED',
+                message: 'Authentication is required',
+              },
+            },
+            '/v1/auth/refresh',
+            401,
+          ),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(
+            { ...AUTH_RESPONSE, refreshToken: 'refresh-login' },
+            '/v1/auth/login',
+          ),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              ...AUTH_RESPONSE,
+              accessToken: 'access-b',
+              refreshToken: 'refresh-b',
+            },
+            '/v1/auth/refresh',
+          ),
+        )
+        .mockResolvedValueOnce(jsonResponse(response, path));
+      const api = createBrowserDesktopApi({
+        origin: ORIGIN,
+        storage,
+        fetch,
+        now: () => 1_000,
+      });
+
+      const failure = expect(invoke(api)).rejects.toMatchObject({
+        status: 401,
+        code: 'AUTH_REQUIRED',
+      });
+      const queuedRefresh = expect(api.auth.refresh()).rejects.toMatchObject({
+        status: null,
+        code: 'AUTH_REQUIRED',
+      });
+      await Promise.all([failure, queuedRefresh]);
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(storage.getItem('wo.web.refresh-token.v1')).toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      await api.auth.login({ email: USER.email, password: 'long-password' });
+      await expect(invoke(api)).resolves.toEqual(expectedResult);
+      expect(
+        fetch.mock.calls.map(([url]) => new URL(String(url)).pathname),
+      ).toEqual([
+        '/v1/auth/refresh',
+        '/v1/auth/login',
+        '/v1/auth/refresh',
+        path,
+      ]);
+      expect(JSON.parse(fetch.mock.calls[2]?.[1].body)).toEqual({
+        refreshToken: 'refresh-login',
+      });
+    },
+    2_000,
+  );
+
+  test.each(accountOperations)(
+    '$name allows an explicit retry after an account 401 and uses the rotated refresh token',
+    async ({ invoke, path, response, expectedResult, expectedStoredToken }) => {
+      const storage = memoryStorage('stored-refresh');
+      const remove = vi.spyOn(storage, 'removeItem');
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              ...AUTH_RESPONSE,
+              accessToken: 'access-a',
+              refreshToken: 'refresh-a',
+            },
+            '/v1/auth/refresh',
+          ),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              error: {
+                code: 'AUTH_REQUIRED',
+                message: 'Authentication is required',
+              },
+            },
+            path,
+            401,
+          ),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(
+            {
+              ...AUTH_RESPONSE,
+              accessToken: 'access-b',
+              refreshToken: 'refresh-b',
+            },
+            '/v1/auth/refresh',
+          ),
+        )
+        .mockResolvedValueOnce(jsonResponse(response, path));
+      const api = createBrowserDesktopApi({
+        origin: ORIGIN,
+        storage,
+        fetch,
+        now: () => 1_000,
+      });
+
+      await expect(invoke(api)).rejects.toMatchObject({
+        status: 401,
+        code: 'AUTH_REQUIRED',
+      });
+      expect(remove).not.toHaveBeenCalled();
+      expect(storage.getItem('wo.web.refresh-token.v1')).toBe('refresh-a');
+      await expect(invoke(api)).resolves.toEqual(expectedResult);
+      expect(JSON.parse(fetch.mock.calls[2]?.[1].body)).toEqual({
+        refreshToken: 'refresh-a',
+      });
+      expect(fetch.mock.calls[3]?.[1].headers.authorization).toBe(
+        'Bearer access-b',
+      );
+      expect(storage.getItem('wo.web.refresh-token.v1')).toBe(
+        expectedStoredToken,
+      );
+    },
+    2_000,
+  );
+});
 
 describe('browser DesktopApi', () => {
   test('accepts the authenticated registration discriminator and stores the session', async () => {

@@ -15,6 +15,10 @@ const migrations = Object.freeze([
     id: '0001_email_verification',
     url: new URL('../drizzle/0001_email_verification.sql', import.meta.url),
   }),
+  Object.freeze({
+    id: '0002_admin_bootstrap',
+    url: new URL('../drizzle/0002_admin_bootstrap.sql', import.meta.url),
+  }),
 ]);
 
 export class MigrationError extends Error {

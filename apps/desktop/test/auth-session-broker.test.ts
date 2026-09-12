@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AuthSessionBrokerError,
   createAuthSessionBroker,
+  type AuthSessionBroker,
 } from '../src/main/auth-session-broker.js';
 import {
   DesktopHttpError,
@@ -48,6 +49,226 @@ function createHttp(): MainHttpClient & {
     ReturnType<typeof vi.fn>;
   return { post };
 }
+
+const accountOperations = [
+  {
+    name: 'changePassword',
+    path: '/v1/auth/password',
+    invoke: (broker: AuthSessionBroker) =>
+      broker.changePassword({
+        currentPassword: 'long-password',
+        newPassword: 'new-long-password',
+      }),
+    response: { changed: true },
+    expectedResult: undefined,
+    expectedStoredToken: 'refresh-b',
+  },
+  {
+    name: 'requestEmailChange',
+    path: '/v1/auth/email/change/request',
+    invoke: (broker: AuthSessionBroker) =>
+      broker.requestEmailChange({
+        password: 'long-password',
+        newEmail: 'next@example.cn',
+      }),
+    response: { status: 'verification_required', email: 'next@example.cn' },
+    expectedResult: { email: 'next@example.cn' },
+    expectedStoredToken: 'refresh-b',
+  },
+  {
+    name: 'confirmEmailChange',
+    path: '/v1/auth/email/change/confirm',
+    invoke: (broker: AuthSessionBroker) =>
+      broker.confirmEmailChange({
+        newEmail: 'next@example.cn',
+        code: '123456',
+      }),
+    response: { ...authResponse, refreshToken: 'refresh-confirmed' },
+    expectedResult: {
+      user: authResponse.user,
+      accessToken: authResponse.accessToken,
+      accessTokenExpiresAt: 901_000,
+    },
+    expectedStoredToken: 'refresh-confirmed',
+  },
+];
+
+describe('serialized account mutations', () => {
+  it.each(accountOperations)(
+    '$name refreshes inside its queue turn and preserves refresh/logout token order',
+    async ({ invoke, path, response, expectedResult, expectedStoredToken }) => {
+      const store = createStore('stored-refresh');
+      const http = createHttp();
+      let releaseRefresh!: (value: typeof authResponse) => void;
+      http.post
+        .mockReturnValueOnce(
+          new Promise<typeof authResponse>((resolve) => {
+            releaseRefresh = resolve;
+          }),
+        )
+        .mockResolvedValueOnce({
+          ...authResponse,
+          accessToken: 'access-b',
+          refreshToken: 'refresh-b',
+        })
+        .mockResolvedValueOnce(response)
+        .mockResolvedValueOnce({
+          ...authResponse,
+          accessToken: 'access-c',
+          refreshToken: 'refresh-c',
+        })
+        .mockResolvedValueOnce({ loggedOut: true });
+      const broker = createAuthSessionBroker({
+        http,
+        sessionStore: store,
+        now: () => 1_000,
+      });
+
+      const before = broker.refresh();
+      await vi.waitFor(() => expect(http.post).toHaveBeenCalledTimes(1));
+      const account = invoke(broker);
+      const after = broker.refresh();
+      expect(broker.refresh()).toBe(after);
+      expect(after).not.toBe(before);
+      const logout = broker.logout();
+      const afterLogout = expect(broker.refresh()).rejects.toBeInstanceOf(
+        AuthSessionBrokerError,
+      );
+      releaseRefresh({ ...authResponse, refreshToken: 'refresh-a' });
+
+      await expect(account).resolves.toEqual(expectedResult);
+      await Promise.all([before, after, logout, afterLogout]);
+      expect(
+        http.post.mock.calls.map(([request]) => ({
+          path: request.path,
+          body: request.body,
+          bearerToken: request.bearerToken,
+        })),
+      ).toEqual([
+        {
+          path: '/v1/auth/refresh',
+          body: { refreshToken: 'stored-refresh' },
+          bearerToken: undefined,
+        },
+        {
+          path: '/v1/auth/refresh',
+          body: { refreshToken: 'refresh-a' },
+          bearerToken: undefined,
+        },
+        { path, body: expect.any(Object), bearerToken: 'access-b' },
+        {
+          path: '/v1/auth/refresh',
+          body: { refreshToken: expectedStoredToken },
+          bearerToken: undefined,
+        },
+        {
+          path: '/v1/auth/logout',
+          body: { refreshToken: 'refresh-c' },
+          bearerToken: undefined,
+        },
+      ]);
+      await expect(store.read()).resolves.toBeNull();
+    },
+    2_000,
+  );
+
+  it.each(accountOperations)(
+    '$name rejects an expired refresh without stalling the queue and recovers after login',
+    async ({ invoke, path, response, expectedResult }) => {
+      const store = createStore('expired-refresh');
+      const http = createHttp();
+      const rejection = new DesktopHttpError(
+        401,
+        'AUTH_REQUIRED',
+        'Authentication is required',
+      );
+      http.post
+        .mockRejectedValueOnce(rejection)
+        .mockResolvedValueOnce({
+          ...authResponse,
+          refreshToken: 'refresh-login',
+        })
+        .mockResolvedValueOnce({
+          ...authResponse,
+          accessToken: 'access-b',
+          refreshToken: 'refresh-b',
+        })
+        .mockResolvedValueOnce(response);
+      const broker = createAuthSessionBroker({
+        http,
+        sessionStore: store,
+        now: () => 1_000,
+      });
+
+      const failure = expect(invoke(broker)).rejects.toBe(rejection);
+      const queuedRefresh = expect(broker.refresh()).rejects.toBeInstanceOf(
+        AuthSessionBrokerError,
+      );
+      await Promise.all([failure, queuedRefresh]);
+      expect(store.clear).toHaveBeenCalledTimes(1);
+      await expect(store.read()).resolves.toBeNull();
+      expect(http.post).toHaveBeenCalledTimes(1);
+
+      await broker.login({
+        email: 'person@example.cn',
+        password: 'long-password',
+      });
+      await expect(invoke(broker)).resolves.toEqual(expectedResult);
+      expect(http.post.mock.calls.map(([request]) => request.path)).toEqual([
+        '/v1/auth/refresh',
+        '/v1/auth/login',
+        '/v1/auth/refresh',
+        path,
+      ]);
+      expect(http.post.mock.calls[2]?.[0].body).toEqual({
+        refreshToken: 'refresh-login',
+      });
+    },
+    2_000,
+  );
+
+  it.each(accountOperations)(
+    '$name allows an explicit retry after an account 401 and uses the rotated refresh token',
+    async ({ invoke, response, expectedResult, expectedStoredToken }) => {
+      const store = createStore('stored-refresh');
+      const http = createHttp();
+      const rejection = new DesktopHttpError(
+        401,
+        'AUTH_REQUIRED',
+        'Authentication is required',
+      );
+      http.post
+        .mockResolvedValueOnce({
+          ...authResponse,
+          accessToken: 'access-a',
+          refreshToken: 'refresh-a',
+        })
+        .mockRejectedValueOnce(rejection)
+        .mockResolvedValueOnce({
+          ...authResponse,
+          accessToken: 'access-b',
+          refreshToken: 'refresh-b',
+        })
+        .mockResolvedValueOnce(response);
+      const broker = createAuthSessionBroker({
+        http,
+        sessionStore: store,
+        now: () => 1_000,
+      });
+
+      await expect(invoke(broker)).rejects.toBe(rejection);
+      expect(store.clear).not.toHaveBeenCalled();
+      await expect(store.read()).resolves.toBe('refresh-a');
+      await expect(invoke(broker)).resolves.toEqual(expectedResult);
+      expect(http.post.mock.calls[2]?.[0].body).toEqual({
+        refreshToken: 'refresh-a',
+      });
+      expect(http.post.mock.calls[3]?.[0].bearerToken).toBe('access-b');
+      await expect(store.read()).resolves.toBe(expectedStoredToken);
+    },
+    2_000,
+  );
+});
 
 describe('auth session broker', () => {
   it.each(['register', 'login'] as const)(

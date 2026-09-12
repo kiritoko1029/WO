@@ -57,6 +57,64 @@ const captureError = (env: Record<string, string | undefined>) => {
 };
 
 describe('parseP2pServerConfig', () => {
+  test('validates and freezes optional bootstrap and managed deployment settings', () => {
+    const config = parseP2pServerConfig({
+      ...validP2pEnv(),
+      SUPER_ADMIN_EMAILS: 'admin@example.com',
+      BOOTSTRAP_ADMIN_EMAIL: ' Admin@Example.com ',
+      BOOTSTRAP_ADMIN_PASSWORD: 'long-secret-password',
+      DEPLOYMENT_STATUS_DIR: '/run/wo-deployment',
+      DEPLOYMENT_CERT_MODE: 'local',
+    });
+    expect(config.bootstrapAdmin).toEqual({
+      email: 'admin@example.com',
+      password: 'long-secret-password',
+    });
+    expect(Object.isFrozen(config.bootstrapAdmin)).toBe(true);
+    expect(config.deployment).toEqual({
+      statusDir: '/run/wo-deployment',
+      certificateMode: 'local',
+    });
+    expect(Object.isFrozen(config.deployment)).toBe(true);
+  });
+
+  test.each([
+    { BOOTSTRAP_ADMIN_EMAIL: 'admin@example.com' },
+    { BOOTSTRAP_ADMIN_PASSWORD: 'secret-only-sentinel' },
+    {
+      BOOTSTRAP_ADMIN_EMAIL: 'admin@example.com',
+      BOOTSTRAP_ADMIN_PASSWORD: 'short',
+    },
+    {
+      BOOTSTRAP_ADMIN_EMAIL: 'admin@example.com',
+      BOOTSTRAP_ADMIN_PASSWORD: 'x'.repeat(129),
+    },
+    {
+      BOOTSTRAP_ADMIN_EMAIL: 'stranger@example.com',
+      BOOTSTRAP_ADMIN_PASSWORD: 'secret-only-sentinel',
+    },
+    {
+      BOOTSTRAP_ADMIN_EMAIL: 'bad-email',
+      BOOTSTRAP_ADMIN_PASSWORD: 'secret-only-sentinel',
+    },
+    { DEPLOYMENT_STATUS_DIR: '/run/wo-deployment' },
+    { DEPLOYMENT_STATUS_DIR: '', DEPLOYMENT_CERT_MODE: 'local' },
+    {
+      DEPLOYMENT_STATUS_DIR: '/run/wo-deployment',
+      DEPLOYMENT_CERT_MODE: 'shell-command',
+    },
+  ])(
+    'rejects incomplete or unsafe guided configuration without exposing secrets: %j',
+    (extra) => {
+      const error = captureError({
+        ...validP2pEnv(),
+        SUPER_ADMIN_EMAILS: 'admin@example.com',
+        ...extra,
+      });
+      expect(error.message).not.toContain('secret-only-sentinel');
+    },
+  );
+
   test('parses the minimal P2P environment without legacy SFU services', () => {
     const config: P2pServerConfig = parseP2pServerConfig(validP2pEnv());
 

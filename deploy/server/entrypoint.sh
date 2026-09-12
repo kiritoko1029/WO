@@ -24,6 +24,11 @@ JWT_ACCESS_SECRET=$(read_secret /run/secrets/jwt_access_secret)
 TURN_SHARED_SECRET=$(read_secret /run/secrets/turn_shared_secret)
 postgres_password=$(read_secret /run/secrets/postgres_password)
 
+if [ -e /run/secrets/bootstrap_admin_password ]; then
+  BOOTSTRAP_ADMIN_PASSWORD=$(read_secret /run/secrets/bootstrap_admin_password)
+  export BOOTSTRAP_ADMIN_PASSWORD
+fi
+
 case "${POSTGRES_DB:-}" in
   ''|*[!A-Za-z0-9_]* ) printf '%s\n' 'POSTGRES_DB is invalid' >&2; exit 1 ;;
 esac

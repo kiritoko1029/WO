@@ -1,0 +1,3 @@
+# Guided setup settings, passwords, generated overlays and operation plans.
+.managed/
+.wo-release-apply.lock/

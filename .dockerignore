@@ -44,7 +44,14 @@ deploy/coturn/*
 !deploy/coturn/health-probe.c
 !deploy/coturn/drop-privileges.c
 !deploy/coturn/entrypoint.sh
+!deploy/coturn/certificate-watcher.sh
 !deploy/coturn/turnserver.conf
+!deploy/managed/
+deploy/managed/*
+!deploy/managed/certificates/
+deploy/managed/certificates/*
+!deploy/managed/certificates/Dockerfile
+!deploy/managed/certificates/entrypoint.sh
 !deploy/scripts/
 deploy/scripts/*
 !deploy/scripts/validate-build-metadata.sh

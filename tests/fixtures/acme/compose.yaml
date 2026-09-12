@@ -1,0 +1,64 @@
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
+    command: ['-config', '/test/wo-pebble-config.json', '-strict=false']
+    environment:
+      PEBBLE_VA_NOSLEEP: '1'
+      PEBBLE_WFE_NONCEREJECT: '0'
+      PEBBLE_AUTHZREUSE: '0'
+    volumes:
+      - ./pebble-config.json:/test/wo-pebble-config.json:ro
+    networks:
+      - acme_test
+
+  caddy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    entrypoint: ['/bin/sh', '/opt/wo/managed-caddy-entrypoint.sh']
+    environment:
+      APP_DOMAIN: wo.acme.test
+      WO_PUBLIC_ORIGIN: https://wo.acme.test
+      WO_PUBLIC_AUTHORITY: wo.acme.test
+    volumes:
+      - ../../../deploy/managed/caddy/entrypoint.sh:/opt/wo/managed-caddy-entrypoint.sh:ro
+      - ../../../deploy/managed/caddy/Caddyfile.bootstrap:/opt/wo/Caddyfile.bootstrap:ro
+      - ../../../deploy/managed/caddy/Caddyfile:/opt/wo/Caddyfile.managed:ro
+      - ./index.html:/srv/index.html:ro
+      - certificates:/certs:ro
+      - challenge:/var/www/acme:ro
+    networks:
+      acme_test:
+        aliases:
+          - wo.acme.test
+
+  certificates:
+    image: neilpang/acme.sh@sha256:5e5713c64816ca2f2dde780df87bc7464e6f6a5995d457710131b688317b8352
+    entrypoint: ['/bin/sh', '/opt/wo/certificates.sh']
+    command: ['daemon']
+    depends_on:
+      - pebble
+      - caddy
+    environment:
+      WO_TLS_MODE: acme
+      APP_DOMAIN: wo.acme.test
+      ACME_EMAIL: operator@example.com
+      WO_ACME_SERVER: https://pebble:14000/dir
+      WO_ACME_CA_BUNDLE: /test-ca/pebble-ca.pem
+    volumes:
+      - ../../../deploy/managed/certificates/entrypoint.sh:/opt/wo/certificates.sh:ro
+      - ./pebble-ca.pem:/test-ca/pebble-ca.pem:ro
+      - state:/acme.sh
+      - certificates:/certs
+      - challenge:/var/www/acme
+      - status:/status
+    networks:
+      - acme_test
+
+networks:
+  acme_test:
+    internal: true
+
+volumes:
+  state: {}
+  certificates: {}
+  challenge: {}
+  status: {}

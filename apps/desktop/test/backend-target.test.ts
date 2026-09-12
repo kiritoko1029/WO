@@ -43,7 +43,7 @@ function createFileSystem(initial?: Readonly<Record<string, string>>) {
   return { fileSystem, files };
 }
 
-const userDataPath = '/profiles/person-a';
+const userDataPath = join('/profiles', 'person-a');
 const targetPath = join(userDataPath, 'backend-target.json');
 
 describe('backend target store', () => {

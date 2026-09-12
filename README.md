@@ -2,11 +2,57 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+**Hear each other. Share what is in front of you.**
+
 WO is a self-hostable two-person voice and desktop-sharing application. In
 server mode, your own Docker Compose stack provides accounts, room signaling,
 the web client, PostgreSQL, and TURN, while media flows directly between the
 two peers whenever the network allows. The desktop app additionally offers a
 lightweight room mode restricted to trusted local networks.
+
+[Desktop releases](https://github.com/kiritoko1029/WO/releases) ·
+[Deployment guide](docs/deployment.md) ·
+[Support matrix](docs/support-matrix.md)
+
+![WO sign-in screen in the light theme, with the product introduction and server settings](docs/screenshots/auth-light.jpg)
+
+## What you can do
+
+- **Meet in one room.** Create a room, share its six-digit code or invite link,
+  and bring one other person in.
+- **Make the conversation comfortable.** Select your microphone and speakers,
+  adjust input and output volume, mute, and choose supported noise suppression.
+- **Share a screen or a window.** Keep voice and screen sharing together, with
+  fullscreen viewing, zoom, and quality diagnostics. Capture and system audio
+  availability depend on the platform; see the support matrix.
+- **Choose where it runs.** Use a self-hosted server from the desktop or web
+  client, or start a desktop-only room on a trusted local network.
+- **Make it yours.** Follow the system theme or choose light/dark. Forms show
+  the active operation, prevent duplicate submissions, and keep recovery actions
+  available when a request fails. Modal dialogs support keyboard navigation.
+
+## Screenshots
+
+| A room starts with an invitation                                         | A focused space for two                                                                                     |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| ![WO home with create and join actions](docs/screenshots/home-light.jpg) | ![WO dark room with participant indicators, screen stage and call controls](docs/screenshots/room-dark.jpg) |
+
+These are actual screenshots of the shared React interface, rendered with
+local sample accounts and a simulated connected room. They demonstrate the UI;
+the room image shows the screen-sharing waiting state. They are not a live
+media benchmark or certification evidence. See the
+[preview and capture instructions](docs/ui-preview.md) to reproduce them.
+
+## Choose a connection mode
+
+|                | Self-hosted server                              | Trusted-LAN lite                         |
+| -------------- | ----------------------------------------------- | ---------------------------------------- |
+| Clients        | Desktop + web                                   | Two desktop clients                      |
+| Where it works | Across networks, with configured HTTPS and TURN | Same trusted private network             |
+| Accounts       | Email-based accounts on your server             | Display name, no central account         |
+| Invite         | Six-digit code or link                          | Full private client invite link required |
+| Infrastructure | Docker Compose, PostgreSQL and TURN             | Temporary service on the host's desktop  |
+| Lifetime       | Ends when the creator ends/leaves the room      | Also ends when the host sleeps or quits  |
 
 > Current capabilities are covered by automated tests, but official
 > Windows/macOS installers, real two-device LAN validation, and 1080p60 have
@@ -29,29 +75,41 @@ lightweight room mode restricted to trusted local networks.
 
 ## Server-mode quick start
 
-Requires Node.js 24, pnpm 10.32.1, Linux x86_64, Docker Engine 26+, and
-Docker Compose 2.24.4+.
+Requires Linux x86_64, Git, Docker Engine 26+ and Docker Compose 2.24.4+.
+Point a domain's DNS A record at the server and open the documented HTTPS/TURN ports.
+From the cloned repository, run:
 
 ```bash
-pnpm install --frozen-lockfile
-cp deploy/.env.example deploy/.env
-node deploy/scripts/init-secrets.mjs
+bash deploy.sh
 ```
 
-Edit `deploy/.env` to set real domains, certificates, and a public IPv4 for
-the app and TURN, then run:
+Enter the domain, ACME contact email, initial administrator email, public IPv4
+and a password (or let the wizard generate one). The wizard generates config
+and secrets, bootstraps the administrator, obtains a certificate through ACME,
+and starts all five services. Host Node.js/pnpm are not required. Certificates
+renew automatically and are reloaded by Caddy and TURN.
 
-```bash
-node deploy/scripts/preflight.mjs --env-file=deploy/.env
-node deploy/scripts/compose.mjs --env-file=deploy/.env up -d --build --wait
-node deploy/scripts/smoke.mjs --env-file=deploy/.env
+For an isolated Windows Docker Desktop trial:
+
+```powershell
+.\deploy.cmd --local
 ```
 
-Open `https://<APP_DOMAIN>` to use the web client. Caddy serves the SPA and
-proxies `/v1/*` and the realtime WebSocket on a single HTTPS origin, so no
-separate web domain or CORS setup is needed. Full requirements for
-certificates, firewalling, backups, and upgrades are in the
-[deployment guide](docs/deployment.md).
+Local mode uses `https://wo.localhost:18443` and local test certificates.
+Production uses `https://<your-domain>`. Open `/admin` for user management and
+certificate status; the private first-login receipt is under
+`deploy/.managed/<project>/first-login.txt` (`wo` for production, `wo-local` for local mode).
+Rerunning `up` preserves the existing version and credentials; `status`, `logs`,
+`renew` and `stop` are available too.
+
+See the [guided deployment instructions](docs/quick-deploy.md) for ports, local
+certificate trust, first login and troubleshooting. The
+[advanced deployment guide](docs/deployment.md) retains manual configuration,
+external ingress/database, backup and release workflows.
+
+![Admin deployment and certificate status from the local Docker acceptance environment](docs/screenshots/admin-deployment.jpg)
+
+The admin capture uses the actual local Docker API and a local test certificate.
 
 ## Connecting the desktop app to your server
 
@@ -158,6 +216,22 @@ pnpm build
 pnpm test:contract
 pnpm test:e2e:web
 ```
+
+For a local UI preview without a backend or real media access:
+
+```bash
+pnpm --filter @wo/web dev --host 127.0.0.1
+```
+
+Open `http://127.0.0.1:5173/preview/index.html`. The preview is a separate
+development entry and is excluded from the production web build. Normal web
+development uses the root page and proxies `/v1` to the local server on port 3000.
+
+The client coalesces concurrent WebRTC statistics requests per connection and
+reuses one report for both directions of a quality sample. Unchanged audio
+levels do not notify the UI, and results from retired connections are discarded.
+Regression tests verify these scheduling and lifecycle properties; actual CPU,
+latency, and frame rate still depend on the devices and network.
 
 Web E2E boots and tears down an isolated four-service Compose stack using
 `deploy/.env.integration`, verifying create, join, and bidirectional voice

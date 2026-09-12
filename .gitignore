@@ -34,6 +34,15 @@ node_modules/
 # SSH / deploy private keys (never commit)
 /key
 /.key
+*.key
+*.pem
+*.p12
+*.pfx
+# This is an upstream public test CA certificate, never a private key.
+!tests/fixtures/acme/pebble-ca.pem
+
+# Local agent plans may contain deployment details and personal notes.
+/.zcode/plans/
 
 # Local media-lab evidence (the directory itself remains documented)
 /docs/poc/results/*

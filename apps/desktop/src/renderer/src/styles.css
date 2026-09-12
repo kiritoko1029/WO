@@ -247,13 +247,14 @@ button:disabled {
 }
 
 .auth-panel {
-  width: min(100%, 420px);
-  padding: 36px 32px 28px;
+  width: min(100%, 440px);
+  padding: 36px;
   background: var(--wo-surface);
   border: 1px solid var(--wo-border);
   border-radius: var(--wo-radius-lg);
   box-shadow: var(--wo-shadow-lg);
-  animation: rise-in var(--wo-dur) var(--wo-ease) both;
+  /* A retained transform would make nested fixed dialogs relative to this card. */
+  animation: rise-in var(--wo-dur) var(--wo-ease) backwards;
 }
 
 .product-lockup {
@@ -968,11 +969,11 @@ button:disabled {
 }
 
 .home-content {
-  width: min(100%, 880px);
+  width: min(100%, 980px);
   min-height: 0;
   margin: 0 auto;
-  padding: 72px 22px 64px;
-  animation: rise-in var(--wo-dur) var(--wo-ease) both;
+  padding: 100px 32px 48px;
+  animation: rise-in var(--wo-dur) var(--wo-ease) backwards;
 }
 
 .home-heading p {
@@ -985,11 +986,11 @@ button:disabled {
 }
 
 .home-heading h1 {
-  margin: 0 0 28px;
+  margin: 0 0 16px;
   font-family:
     'SF Pro Display', 'SF Pro Icons', 'Helvetica Neue', Helvetica,
     'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
-  font-size: clamp(32px, 5vw, 40px);
+  font-size: clamp(32px, 5vw, 46px);
   font-weight: 600;
   letter-spacing: -0.015em;
   line-height: 1.1;
@@ -998,7 +999,7 @@ button:disabled {
 .room-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 24px;
   margin-top: 0;
   background: transparent;
   border: 0;
@@ -1014,20 +1015,34 @@ button:disabled {
 .room-action {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;
   min-width: 0;
-  padding: 24px;
+  padding: 30px;
   background: var(--wo-surface);
   border: 1px solid var(--wo-border);
   border-radius: var(--wo-radius-lg);
   box-shadow: var(--wo-shadow-lg);
-  transition: background-color var(--wo-dur) var(--wo-ease);
+  transition:
+    border-color var(--wo-dur-fast) var(--wo-ease),
+    box-shadow var(--wo-dur-fast) var(--wo-ease);
+}
+
+.room-action:hover,
+.room-action:focus-within {
+  border-color: var(--wo-brand-500);
+  box-shadow: var(--wo-shadow-md);
+}
+
+.home-content .room-action:first-child {
+  background:
+    linear-gradient(140deg, var(--wo-brand-50), transparent 75%),
+    var(--wo-surface);
 }
 
 .action-icon {
   display: grid;
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   color: var(--wo-text);
   background: var(--wo-bg);
   border: 1px solid var(--wo-surface-3);
@@ -1650,17 +1665,36 @@ button:disabled {
   display: grid;
   justify-items: center;
   color: var(--wo-stage-text-muted);
+  max-width: 440px;
+  padding: 24px;
+  text-align: center;
+}
+
+.screen-empty > svg {
+  box-sizing: content-box;
+  padding: 24px;
+  color: #82afff;
+  background: rgb(112 160 255 / 0.07);
+  border: 1px solid rgb(112 160 255 / 0.16);
+  border-radius: 28px;
 }
 
 .screen-empty h2 {
-  margin: 12px 0 0;
+  margin: 24px 0 0;
   color: var(--wo-stage-text);
-  font-size: 15px;
+  font-size: 20px;
   font-weight: 580;
 }
 
 .screen-empty.local-sharing {
   color: var(--wo-success);
+}
+
+.screen-empty p {
+  margin: 12px 0 0;
+  color: var(--wo-stage-text-muted);
+  font-size: 13px;
+  line-height: 1.8;
 }
 
 .screen-empty.local-sharing h2 {
@@ -2827,15 +2861,322 @@ button:disabled {
   border-color: var(--wo-border-strong);
 }
 
-/* Release identity footer (auth + home screens, desktop and web). The
-   home/auth shells gain a trailing auto row so the footer pins to the
-   bottom without affecting the existing centered content. */
+/* Content keeps its natural minimum height so short windows scroll instead
+   of clipping forms or placing the footer over a primary action. */
 .home-shell {
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(min-content, 1fr) auto;
+  overflow-y: auto;
 }
 
 .auth-shell {
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-rows: minmax(min-content, 1fr) auto;
+  gap: 24px 64px;
+  padding: 48px max(40px, calc((100vw - 1120px) / 2)) 20px;
+  overflow-y: auto;
+}
+
+.auth-shell > .app-footer {
+  grid-column: 1 / -1;
+}
+
+.auth-subtitle {
+  margin: 12px 0 24px;
+  color: var(--wo-text-subtle);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.text-button {
+  min-height: 36px;
+  padding: 6px 12px;
+  color: var(--wo-brand-500);
+  background: transparent;
+  border-radius: var(--wo-radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.text-button:hover:not(:disabled) {
+  background: var(--wo-brand-50);
+}
+
+.connection-mode-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.home-subtitle {
+  display: block;
+  margin: 0 0 30px;
+  color: var(--wo-text-subtle);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.welcome-panel {
+  width: 100%;
+  max-width: 540px;
+  padding: 20px 0;
+}
+
+.welcome-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--wo-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.welcome-eyebrow .product-mark {
+  width: 36px;
+  height: 36px;
+  flex-basis: 36px;
+  color: #fff;
+  background: #0071e3;
+  border-radius: 11px;
+}
+
+.welcome-eyebrow-divider {
+  padding: 0 10px;
+  color: var(--wo-border-strong);
+  font-weight: 400;
+}
+
+.welcome-panel h2 {
+  margin: 38px 0 22px;
+  font-size: clamp(32px, 3.5vw, 48px);
+  line-height: 1.35;
+  letter-spacing: -0.04em;
+  font-weight: 650;
+}
+
+.welcome-panel h2 > span {
+  color: var(--wo-brand-500);
+}
+
+.welcome-description {
+  margin: 0;
+  color: var(--wo-text-subtle);
+  font-size: 15px;
+  line-height: 1.95;
+}
+
+.welcome-visual {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  height: 210px;
+  max-width: 440px;
+  margin: 30px 0 24px;
+  isolation: isolate;
+}
+
+.welcome-orbit {
+  position: absolute;
+  z-index: -1;
+  inset: 4px 16px;
+  border: 1px solid var(--wo-brand-100);
+  border-radius: 50%;
+  transform: rotate(-12deg);
+}
+
+.welcome-orbit::after {
+  position: absolute;
+  inset: 25px -14px;
+  border: 1px solid var(--wo-brand-100);
+  border-radius: 50%;
+  transform: rotate(26deg);
+  content: '';
+}
+
+.welcome-peer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  background: var(--wo-surface);
+  border: 1px solid var(--wo-surface-3);
+  border-radius: 22px;
+  box-shadow: var(--wo-shadow-md);
+}
+
+.welcome-peer > span {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 13px;
+  font-size: 18px;
+}
+
+.welcome-peer-self {
+  transform: translateY(-15px) rotate(-6deg);
+  color: var(--wo-brand-500);
+}
+
+.welcome-peer-self > span {
+  background: var(--wo-brand-50);
+}
+
+.welcome-peer-friend {
+  transform: translateY(4px) rotate(6deg);
+  color: var(--wo-success);
+}
+
+.welcome-peer-friend > span {
+  background: var(--wo-success-soft);
+}
+
+.welcome-wave {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 56px;
+  color: var(--wo-brand-500);
+}
+
+.welcome-wave i {
+  width: 4px;
+  border-radius: 8px;
+  background: currentColor;
+  opacity: 0.7;
+}
+
+.welcome-share {
+  position: absolute;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  color: var(--wo-text-subtle);
+  background: var(--wo-surface);
+  border: 1px solid var(--wo-surface-3);
+  border-radius: var(--wo-radius-pill);
+  font-size: 12px;
+}
+
+.welcome-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.welcome-features li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--wo-text-subtle);
+  font-size: 12px;
+}
+
+.backend-target-dialog,
+.account-security-dialog,
+.join-intent-dialog {
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+@media (max-width: 960px) {
+  .auth-shell {
+    gap: 24px;
+    padding-inline: 28px;
+  }
+
+  .welcome-panel h2 {
+    font-size: 32px;
+  }
+  .welcome-break {
+    display: none;
+  }
+  .welcome-visual {
+    gap: 12px;
+  }
+  .welcome-peer {
+    padding: 10px;
+    gap: 6px;
+  }
+  .welcome-wave {
+    gap: 3px;
+  }
+  .welcome-wave i {
+    width: 3px;
+  }
+}
+
+@media (max-width: 760px) {
+  .auth-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(min-content, 1fr) auto;
+    padding: 28px 20px 20px;
+    gap: 28px;
+  }
+
+  .welcome-panel {
+    max-width: 440px;
+    padding: 0;
+  }
+
+  .welcome-panel h2 {
+    margin: 24px 0 12px;
+    font-size: 28px;
+  }
+  .welcome-description {
+    font-size: 13px;
+  }
+  .welcome-visual,
+  .welcome-features {
+    display: none;
+  }
+  .auth-panel {
+    padding: 26px;
+  }
+  .home-content {
+    padding: 86px 20px 28px;
+  }
+  .home-subtitle {
+    font-size: 14px;
+  }
+  .room-actions {
+    gap: 16px;
+  }
+  .room-action {
+    padding: 24px;
+    gap: 16px;
+  }
+  .screen-empty {
+    padding: 18px;
+  }
+  .screen-empty > svg {
+    padding: 18px;
+  }
+}
+
+@media (max-height: 640px) and (min-width: 761px) {
+  .auth-shell {
+    padding-block: 24px 16px;
+  }
+  .welcome-visual {
+    height: 140px;
+    margin-block: 18px;
+  }
+  .welcome-panel h2 {
+    margin-top: 24px;
+  }
+  .welcome-share {
+    display: none;
+  }
 }
 
 .app-footer {

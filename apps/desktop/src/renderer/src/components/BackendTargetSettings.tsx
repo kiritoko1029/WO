@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { LockKeyhole, Server, Settings, X } from 'lucide-react';
 
 import type {
@@ -6,6 +6,7 @@ import type {
   DesktopShellBridge,
 } from '../../../preload/types.js';
 import { createRendererShellConfigApi } from '../api/shell-config-api.js';
+import { useDialogFocus } from '../hooks/use-dialog-focus.js';
 
 function errorCode(error: unknown): string | null {
   if (
@@ -42,6 +43,13 @@ function AvailableBackendTargetSettings({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const originRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialogFocus({
+    open,
+    onDismiss: () => setOpen(false),
+    dismissible: !saving,
+    initialFocusRef: originRef,
+  });
 
   useEffect(() => {
     let active = true;
@@ -60,15 +68,6 @@ function AvailableBackendTargetSettings({
       active = false;
     };
   }, [api]);
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !saving) setOpen(false);
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [open, saving]);
 
   const showDialog = () => {
     if (target !== null) setOrigin(target.origin);
@@ -100,6 +99,8 @@ function AvailableBackendTargetSettings({
         className="backend-target-trigger"
         type="button"
         aria-label="配置服务器"
+        aria-haspopup="dialog"
+        aria-expanded={open}
         title={target?.origin ?? '服务器'}
         onClick={showDialog}
       >
@@ -125,9 +126,12 @@ function AvailableBackendTargetSettings({
           }}
         >
           <section
+            ref={dialogRef}
+            tabIndex={-1}
             className="backend-target-dialog"
             role="dialog"
             aria-modal="true"
+            aria-busy={saving}
             aria-labelledby="backend-target-title"
           >
             <header>
@@ -150,6 +154,7 @@ function AvailableBackendTargetSettings({
               <label htmlFor="backend-origin">
                 <span>HTTPS 服务地址</span>
                 <input
+                  ref={originRef}
                   id="backend-origin"
                   type="url"
                   value={origin}
@@ -157,7 +162,7 @@ function AvailableBackendTargetSettings({
                   autoComplete="url"
                   spellCheck={false}
                   readOnly={target?.readOnly ?? true}
-                  autoFocus
+                  disabled={saving}
                   onChange={(event) => setOrigin(event.target.value)}
                 />
               </label>

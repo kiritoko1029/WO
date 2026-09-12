@@ -30,6 +30,7 @@ function mapError(error: unknown): HttpError {
       case 'EMAIL_ALREADY_REGISTERED':
         return new HttpError(409, 'INVALID_STATE', error.message);
       case 'EMAIL_DOMAIN_NOT_ALLOWED':
+      case 'ADMIN_EMAIL_LOCKED':
         return new HttpError(403, 'INVALID_STATE', error.message);
       case 'EMAIL_NOT_VERIFIED':
         return new HttpError(403, 'INVALID_STATE', error.message);
